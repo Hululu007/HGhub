@@ -245,17 +245,19 @@ export default function Feed({media, position, active=true, preparing=false, err
   }, [isDesktop, preview, active, media, vsize, isLandscapeVideo, orientationOverride]);
 
   /* 手动旋转：切到当前方向的反面，并覆盖本集的自动选择。
-     “当前”必须以实际视口（vpLandscape）为准，不能拿视频分辨率代替：
-     自动转方向没生效时屏幕还是竖屏、视频却是横屏，用视频方向算会得出
-     “当前已是横屏”，点一下反而要求切回竖屏，看起来就像按钮没反应。 */
+     “当前”必须在点按时读实时视口尺寸（window.innerWidth >
+     window.innerHeight），不能读 vpLandscape state：程序触发旋转后
+     resize 事件可能不来、或来时尺寸还是旧的，state 就一直停在竖屏，
+     导致每次点都继续要求横屏、切不回竖屏（v0.0.23 录像里每次都提示
+     “已切换到横屏”就是这个症状）。vpLandscape 只留给布局用。 */
   const rotateOrientation = useCallback(() => {
     keepPlayingThroughTransition();
-    const next = !vpLandscape;
+    const next = !(window.innerWidth > window.innerHeight);
     setOrientationOverride(next);
     void setMobileOrientation(next)
       .then(() => setHint(next ? "已切换到横屏" : "已切换到竖屏"))
       .catch(() => setHint("无法切换屏幕方向，请重试"));
-  }, [vpLandscape, keepPlayingThroughTransition]);
+  }, [keepPlayingThroughTransition]);
 
   /* 复制当前视频的真实播放地址（media.url）：WKWebView 里
      navigator.clipboard 需用户手势（点按即满足），不可用时走
@@ -722,19 +724,21 @@ export default function Feed({media, position, active=true, preparing=false, err
                   {/* 分辨率角标（仅 iOS）：起播后显示 3 秒自动消失；位置在标题栏下方（顶边 + 安全区 + 96px），不贴顶边。
                       信息浮层打开时隐藏，避免与浮层左边的分辨率 pill 在同一位置重叠。 */}
                   {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && overlayBadgesVisible && !infoOverlay && (
-                    <div className="absolute left-3 z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
-                      style={{ top: "calc(var(--sat, 0px) + 96px)", background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                    <div className="absolute z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
+                      style={{ top: "calc(var(--sat, 0px) + 96px)", left: "var(--sal, 12px)", background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                       {formatResolution(vsize.w, vsize.h)}
                     </div>
                   )}
                   {/* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒。左为分辨率
-                      （与 3 秒角标同一位置），右对称显示当前播放内核；下方是真实
-                      播放地址（点按复制）与横竖屏切换按钮。容器本身不接指针事件，
-                      只有复制行与旋转按钮可点，其余点按仍走视频手势（单击退出清屏
-                      会关掉浮层）。 */}
+                      （与 3 秒角标同一位置），右对称显示当前播放内核；下方只有
+                      “复制播放地址”按钮（点按复制真实播放地址，不显示 URL 本身）
+                      与横竖屏切换按钮。两行左右都按横向安全区留白：横屏时刘海侧
+                      安全区约 44px，固定 12px 会把左边角标顶到刘海下面挡住。
+                      容器本身不接指针事件，只有复制按钮与旋转按钮可点，其余点按
+                      仍走视频手势（单击退出清屏会关掉浮层）。 */}
                   {platform === "ios" && preview && clean && infoOverlay && playUrl && (
                     <div className="absolute inset-x-0 z-20 pointer-events-none" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
-                      <div className="flex items-start justify-between px-3">
+                      <div className="flex items-start justify-between" style={{ paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
                         <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
                           style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                           {vsize.w > 0 && vsize.h > 0 ? formatResolution(vsize.w, vsize.h) : "分辨率未知"}
@@ -744,14 +748,11 @@ export default function Feed({media, position, active=true, preparing=false, err
                           {playbackEngineLabel(playbackEngine)}
                         </span>
                       </div>
-                      <div className="mt-2 px-3 flex items-start gap-2">
+                      <div className="mt-2 flex items-start gap-2" style={{ paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
                         <button onClick={() => { void copyPlayUrl(); }} aria-label="复制播放地址"
-                          className="pointer-events-auto flex-1 min-w-0 text-left rounded-2xl px-3 py-2 backdrop-blur-md pressable"
+                          className="pointer-events-auto shrink-0 rounded-full px-3 py-2 backdrop-blur-md pressable"
                           style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
-                          <span className="flex items-start gap-2">
-                            <span className="flex-1 min-w-0 text-[11px] hg-ink-2 break-all line-clamp-3">{playUrl}</span>
-                            <span className="shrink-0 text-[11px] font-bold hg-ink">复制</span>
-                          </span>
+                          <span className="text-[13px] font-bold hg-ink">复制播放地址</span>
                         </button>
                         <button onClick={() => { rotateOrientation(); pokeInfoOverlay(); }} aria-label="切换横竖屏"
                           className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable"

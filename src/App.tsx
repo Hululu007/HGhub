@@ -38,7 +38,7 @@ function Application() {
     else if(e.key==="/"){e.preventDefault();app.setTab("search");}
     else if(!e.repeat&&["1","2","3","4"].includes(e.key))app.setTab((["home","search","category","profile"] as Tab[])[Number(e.key)-1]);
   };window.addEventListener("keydown",fn);return()=>window.removeEventListener("keydown",fn);},[app.pop,app.setTab,app.fs]);
-  return <div className={`absolute inset-0 flex flex-col bg-canvas win-root plat-${app.platform}`} style={isMobile?{"--sat":"max(env(safe-area-inset-top), 12px)","--sab":"min(max(env(safe-area-inset-bottom), 0px), 48px)"} as React.CSSProperties:undefined}>
+  return <div className={`absolute inset-0 flex flex-col bg-canvas win-root plat-${app.platform}`} style={isMobile?{"--sat":"max(env(safe-area-inset-top), 12px)","--sab":"min(max(env(safe-area-inset-bottom), 0px), 48px)","--sal":"max(env(safe-area-inset-left), 12px)","--sar":"max(env(safe-area-inset-right), 12px)"} as React.CSSProperties:undefined}>
     {!isMobile&&!app.watching&&<DesktopTitleBar collapsed={collapsed} onToggle={()=>setCollapsed(v=>!v)}/>}
     <div className="relative flex-1 min-h-0 flex">{!isMobile&&!app.theater&&!app.watching&&<DesktopRail collapsed={collapsed}/>}<main className={`relative flex-1 min-w-0 overflow-hidden win-main ${app.watching?"is-watching-main":app.theater?"is-theater-main":""}`}>
       <div className="absolute inset-0" inert={app.tab!=="home"||!!top} hidden={app.tab!=="home"||!!top} style={{bottom:isMobile&&!top&&!app.fs&&!app.clean&&!app.watching?"calc(40px + var(--sab, 0px))":0}}>
