@@ -4,7 +4,7 @@
 //   - 基类：tauri-2.12.5/mobile/ios-api/Sources/Tauri/Plugin/Plugin.swift
 //   - 调用约定：`@objc func xxx(_ invoke: Invoke) throws`，`invoke.parseArgs` /
 //     `invoke.resolve` / `invoke.reject`，结尾的
-//     `@_cdecl("init_plugin_...") public func initPlugin() -> Plugin`
+//     `@_cdecl("init_plugin_...") public func initOrientationPlugin() -> Plugin`
 // Rust 侧见 src-tauri/src/lib.rs（orientation 插件的 iOS 分支）与 commands.rs。
 //
 // 行为：setOrientation 是“设置一次方向”，不是“锁定”——调完之后用户再转
@@ -13,8 +13,9 @@
 // landscape=false 切回竖屏；与 Android 的“恢复之前方向”语义不同，
 // 前端按“竖屏视频→竖屏”调用它时两者结果一致。
 //
-// 本机无 Xcode/Swift 工具链：本文件未编译，待 Mac 上第一次
-// `pnpm tauri ios init --ci` 后由 Xcode 校验（见 docs/developers/native-players.md）。
+// 本机无 Xcode/Swift 工具链：本文件未编译，由 src-tauri/build.rs 在
+// macOS 构建时经 SwiftLinker 编成静态库链进 Rust（见
+// docs/developers/native-players.md）。
 
 import Tauri
 import UIKit
@@ -47,8 +48,9 @@ public class OrientationPlugin: Plugin {
 }
 
 /// Rust 侧 `tauri::ios_plugin_binding!(init_plugin_orientation)` 找的就是
-/// 这个符号；名字改了要同步改 Rust 侧的宏参数。
+/// 这个符号；C 符号名改了要同步改 Rust 侧的宏参数。Swift 函数名本身
+/// 在包内必须唯一（NativePlayerPlugin 里的同名函数叫 initNativePlayerPlugin）。
 @_cdecl("init_plugin_orientation")
-public func initPlugin() -> Plugin {
+public func initOrientationPlugin() -> Plugin {
   return OrientationPlugin()
 }

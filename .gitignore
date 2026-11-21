@@ -10,6 +10,7 @@ test-results/
 src-tauri/target/
 src-tauri/crates/*/target/
 src-tauri/gen/
+src-tauri/ios/.tauri/
 *.local
 
 # 编辑器 / 系统

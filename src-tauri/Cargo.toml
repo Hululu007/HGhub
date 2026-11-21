@@ -17,6 +17,10 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# iOS 原生插件的 SwiftLinker 链接（build.rs 用）：build / build-2 都
+# 提供 tauri_utils::build 模块，这里用 build-2，与 tauri-build 启用的
+# 新版 html-manipulation 后端一致，避免多编一份。
+tauri-utils = { version = "2", features = ["build-2"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }

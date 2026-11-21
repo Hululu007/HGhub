@@ -5,13 +5,14 @@
 //   - 调用约定：tauri-plugin-dialog-2.8.3/ios/Sources/DialogPlugin.swift
 //    （`@objc func xxx(_ invoke: Invoke) throws`，`invoke.parseArgs` /
 //     `invoke.resolve` / `invoke.reject`，结尾的
-//     `@_cdecl("init_plugin_...") public func initPlugin() -> Plugin`）
+//     `@_cdecl("init_plugin_...") public func initNativePlayerPlugin() -> Plugin`）
 // Rust 侧见 src-tauri/src/native_player.rs：
 //   `tauri::ios_plugin_binding!(init_plugin_native_player)` +
 //   `api.register_ios_plugin(init_plugin_native_player)`。
 //
-// 本机无 Xcode/Swift 工具链：本文件未编译，待 Mac 上第一次
-// `pnpm tauri ios init --ci` 后由 Xcode 校验（见 docs/developers/native-players.md）。
+// 本机无 Xcode/Swift 工具链：本文件未编译，由 src-tauri/build.rs 在
+// macOS 构建时经 SwiftLinker 编成静态库链进 Rust（见
+// docs/developers/native-players.md）。
 
 import Tauri
 import UIKit
@@ -298,8 +299,9 @@ class NativePlayerPlugin: Plugin {
 }
 
 /// Rust 侧 `tauri::ios_plugin_binding!(init_plugin_native_player)` 找的就是
-/// 这个符号；名字改了要同步改 Rust 侧的宏参数。
+/// 这个符号；C 符号名改了要同步改 Rust 侧的宏参数。Swift 函数名本身
+/// 在包内必须唯一（OrientationPlugin 里的同名函数叫 initOrientationPlugin）。
 @_cdecl("init_plugin_native_player")
-public func initPlugin() -> Plugin {
+public func initNativePlayerPlugin() -> Plugin {
   return NativePlayerPlugin()
 }

@@ -16,8 +16,8 @@ React（Feed.tsx 原生播放入口按钮）
   → Rust 命令 src-tauri/src/native_player.rs
       native_player_open / close / play / pause / seek / set_rate / set_volume / state
   → Tauri 移动插件 "native-player"（lib.rs 注册）
-  → Swift src-tauri/ios/NativePlayerPlugin.swift（统一 NativePlayerEngine 协议）
-  → src-tauri/ios/engines/ 下四个引擎适配（原生全屏 present，退出时发回事件）
+  → Swift src-tauri/ios/Sources/NativePlayerPlugin.swift（统一 NativePlayerEngine 协议）
+  → src-tauri/ios/Sources/engines/ 下四个引擎适配（原生全屏 present，退出时发回事件）
   → 前端收到 native-player-time / -ended / -error / -closed 后回写进度、回落 WebView
 ```
 
@@ -26,23 +26,32 @@ React（Feed.tsx 原生播放入口按钮）
 密钥都由 Rust 代理处理，原生侧不拼头、不改地址、不碰 HPP 会话逻辑。
 `PreparedMedia` 的形状、会话 / 刷新 / 资源归属一律没改（协议 09 章不动）。
 
-同步脚本：`scripts/sync-ios-native-player.mjs` 把 `src-tauri/ios/` 的 Swift
-源码拷进 `src-tauri/gen/apple/Sources/NativePlayer/`。`gen/apple/` 由
-`pnpm tauri ios init --ci` 生成，不进版本控制；`gen/apple` 不存在时脚本
-打印提示并正常退出 0，不中断构建。**同步后必须重新生成 Xcode 工程**：
-init 时的 `.xcodeproj` 只包含当时已有的文件，`tauri ios build` 不会重新
-生成工程，不重跑 `xcodegen generate` 的话新文件根本不编译，链接时报
-`_init_plugin_native_player` / `_init_plugin_orientation` 找不到（v0.0.6
-就是这么挂的）。CI 的 release.yml iOS 任务里，同步步骤后有一单独步骤
-在 `src-tauri/gen/apple` 下跑 `xcodegen generate`。
+编译方式（SPM + SwiftLinker，官方插件同款）：`src-tauri/ios/` 是
+一个 SPM 包（`Package.swift`，包名 `NativePlugins`，含
+`NativePlayerPlugin` 与 `OrientationPlugin` 两个插件、同一个 Swift
+模块）。`src-tauri/build.rs` 在 macOS 上为 iOS target 构建时，先把
+tauri 的 iOS Swift API（`DEP_TAURI_IOS_LIBRARY_PATH`）拷到
+`ios/.tauri/tauri-api`（构建产物，不进版本控制），再调
+`tauri_utils::build::link_apple_library("NativePlugins", ios-dir)`，
+由 swift-rs 以 `swift build` 编成静态库链进 Rust。**Xcode 不编译
+这些文件**——不要再把它们拷进 `gen/apple/Sources`，那样会与静态
+库重复定义 `init_plugin_*` 符号。v0.0.8 之前走的就是拷进 Xcode 的
+路线，死在 `import Tauri`：Tauri 的 iOS Xcode 模板里根本没有 Tauri
+Swift 模块，无论是否重跑 xcodegen 都编不过（v0.0.5–v0.0.8 的教训：
+Rust 编不过 → 同步脚本 → xcodegen 重生成 → cdylib 链接缺符号 →
+Xcode 下 `import Tauri` 找不到模块）。
 
-链接说明：`src-tauri/Cargo.toml` 的 `[lib] crate-type` 含 `cdylib`，而
-Swift 插件符号只由 Xcode 编译 Swift 时才产生，cargo 在 Xcode 的
-Build Rust Code 阶段链接 cdylib 时它们还不存在。仓库根目录的
-`.cargo/config.toml` 给两个 iOS target 加了
+链接说明：`src-tauri/Cargo.toml` 的 `[lib] crate-type` 含 `cdylib`，
+而 Swift 插件符号只由 SwiftLinker 编 Swift 包时才产生，cargo 在
+Xcode 的 Build Rust Code 阶段链接 cdylib 时它们还不存在。仓库根目
+录的 `.cargo/config.toml` 给两个 iOS target 加了
 `-C link-args=-Wl,-undefined,dynamic_lookup`，让这次链接允许未定义
-符号（最终 App 链接的是 staticlib + Xcode 编出的 Swift 对象，符号在
-那里解析；cdylib 在 iOS 上只是构建副产物）。Android / 桌面构建不受影响。
+符号（最终 App 链接的是 staticlib + SwiftLinker 编出的 Swift 对象，
+符号在那里解析；cdylib 在 iOS 上只是构建副产物）。Android / 桌面
+构建不受影响。Swift 包里两个插件的 Swift 入口函数名必须不同
+（`initNativePlayerPlugin` / `initOrientationPlugin`），`@_cdecl` 的
+C 符号名（`init_plugin_native_player` / `init_plugin_orientation`）
+保持不动——同一模块内同名同签名是非法重声明。
 
 ## 引擎选择
 
@@ -71,7 +80,7 @@ AVPlayer → MDK → KSPlayer → mpv → 回落 WebView。
 - **MDK / KSPlayer / mpv 是 `canImport` 守卫**：依赖装了走 `#if` 分支的真实调用，
   没装走 `#else` 分支——`open` 直接失败，报错里写清缺哪个依赖、怎么装，
   不留“能打开但播不了”的空实现。`#if` 分支里的方法名是按各家 README 所写，
-  第一次在 Mac 上编时以接入的依赖版本为准由 Xcode 校验（见下）。
+  第一次在 Mac 上编时以接入的依赖版本为准在构建时校验（见下）。
 
 ## Mac 验证（按顺序）
 
@@ -80,14 +89,12 @@ AVPlayer → MDK → KSPlayer → mpv → 回落 WebView。
 git clone <你的 fork> HGhub && cd HGhub
 pnpm install --frozen-lockfile
 
-# 2. 生成 iOS 工程，再同步 Swift 源码，然后重新生成工程收录新文件
+# 2. 生成 iOS 工程（Swift 插件不用同步，build.rs 在构建时自己处理）
 pnpm tauri ios init --ci
-node scripts/sync-ios-native-player.mjs
-# 检查 gen/apple/Sources/NativePlayer/ 下有 NativePlayerPlugin.swift、OrientationPlugin.swift + engines/ 四个文件。
-# 同步完必须重跑 xcodegen：init 时的 .xcodeproj 只含当时已有的文件，tauri ios build 不会重新生成工程，
-# 不重生成新文件根本不编译，链接报 _init_plugin_native_player / _init_plugin_orientation 找不到（v0.0.6 已验证）。
-cd src-tauri/gen/apple && xcodegen generate && cd ../../..
-# CI 的 release.yml iOS 任务里，同步步骤后也有一单独的 xcodegen 重新生成步骤。
+# Swift 插件是 SPM 包：cargo 构建时 build.rs 把 tauri 的 iOS Swift API
+# 拷到 src-tauri/ios/.tauri/tauri-api，再经 SwiftLinker 编成静态库链进
+# Rust。不要把 Swift 文件拷进 gen/apple/Sources，也不要重跑 xcodegen
+# 收录它们——那样会与静态库重复定义 init_plugin_* 符号。
 
 # 3. 按要测的引擎装依赖（AVPlayer 零依赖，跳过这步就能先测桥）
 #    MDK：CocoaPods pod 'mdk' 或 SPM swift-mdk，并向作者申请 key
@@ -111,7 +118,10 @@ bash scripts/build-ios-unsigned.sh 0.0.4
 - `pnpm run build`（tsc + vite）通过。
 - `cargo check --manifest-path src-tauri/Cargo.toml` 通过（host check；
   `cfg(target_os = "ios")` 的代码只要求语法解析通过）。
-- `node --check scripts/sync-ios-native-player.mjs` 通过。
+- `cargo check --target aarch64-linux-android` 通过（build.rs 里
+  macOS 以外的部分、拷贝辅助函数、Cargo.toml 的新 build-dependency
+  都能在这步验证；macOS 专属的 SwiftLinker 调用是 `#[cfg]` 门控的，
+  Linux 上编不出来）。
 - Swift 文件**未编译**（本机无 swiftc / Xcode），上面 Mac 清单跑完之前，
   不要写“iOS 编译通过”或“真机验证通过”。
 
@@ -137,12 +147,12 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   不再只在全屏时才转；切集后回到自动。
 - 手动：移动端控制条（锁定、全屏之间）多了一个旋转按钮，点一下切
   到当前方向的反面，并覆盖本集的自动选择；退出播放页时恢复竖屏。
-- iOS 方向控制是新加的原生插件 `src-tauri/ios/OrientationPlugin.swift`
+- iOS 方向控制是新加的原生插件 `src-tauri/ios/Sources/OrientationPlugin.swift`
  （`UIDevice.setValue(forKey: "orientation")` +
-  `attemptRotationToDeviceOrientation()`），前端 `src/orientation.ts`
+  `attemptRotationToDeviceOrientation()`），与播放器插件同属 `NativePlugins`
+  SPM 包，前端 `src/orientation.ts`
   在 iOS 上也走 Rust 命令 `set_orientation`——iOS 的 WKWebView 不支持
   Screen Orientation API 的 `lock()`，之前 iOS 走浏览器分支会直接失败。
-  同步脚本会把它一起拷进 `gen/apple/Sources/NativePlayer/`。
 - 注意：`setOrientation` 是“设置一次方向”，不是“锁定”——调完之后
   用户再转手机，系统仍可按设备方向转回来；AppDelegate 级的方向
   锁定没做。另外 iOS 上 `set_orientation(false)` 是切回竖屏，与

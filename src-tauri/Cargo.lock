@@ -1971,6 +1971,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-opener",
+ "tauri-utils",
  "tempfile",
  "time",
  "tokio",
