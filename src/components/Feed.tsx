@@ -58,16 +58,18 @@ export default function Feed({media, position, active=true, preparing=false, err
   const phase = preparing || playback.key !== playKey ? 'loading' : playback.phase;
   const paused = phase === 'paused', waiting = phase === 'loading';
   const setPhase = (phase: typeof playback.phase) => setPlayback({ key: playKey, phase });
-  /* 分辨率角标：起播后显示 3 秒自动消失；切集重开一个 3 秒窗口。 */
-  const [resBadgeVisible, setResBadgeVisible] = useState(false);
-  const resHideTimer = useRef(0);
-  useEffect(() => { setResBadgeVisible(false); window.clearTimeout(resHideTimer.current); }, [playKey]);
+  /* 角标与“原生播放”按钮：起播后显示 3 秒自动消失；切集重开一个 3 秒窗口。
+     录像实测：分辨率角标的 3 秒定时本身是好的（约 3 秒就没了），一直不消失
+     的是右上角“原生播放 · mpv”按钮——它之前没有接这个定时器。 */
+  const [overlayBadgesVisible, setOverlayBadgesVisible] = useState(false);
+  const overlayHideTimer = useRef(0);
+  useEffect(() => { setOverlayBadgesVisible(false); window.clearTimeout(overlayHideTimer.current); }, [playKey]);
   useEffect(() => {
-    if (phase !== "playing" || vsize.w <= 0 || vsize.h <= 0) { setResBadgeVisible(false); window.clearTimeout(resHideTimer.current); return; }
-    setResBadgeVisible(true);
-    window.clearTimeout(resHideTimer.current);
-    resHideTimer.current = window.setTimeout(() => setResBadgeVisible(false), 3000);
-    return () => window.clearTimeout(resHideTimer.current);
+    if (phase !== "playing" || vsize.w <= 0 || vsize.h <= 0) { setOverlayBadgesVisible(false); window.clearTimeout(overlayHideTimer.current); return; }
+    setOverlayBadgesVisible(true);
+    window.clearTimeout(overlayHideTimer.current);
+    overlayHideTimer.current = window.setTimeout(() => setOverlayBadgesVisible(false), 3000);
+    return () => window.clearTimeout(overlayHideTimer.current);
   }, [phase, vsize.w, vsize.h]);
   const [controlsLocked, setControlsLocked] = useState(false);
   const [rate, setRate] = useState(1);
@@ -225,14 +227,16 @@ export default function Feed({media, position, active=true, preparing=false, err
     void setMobileOrientation(target).catch(() => {});
   }, [isDesktop, preview, active, media, vsize, isLandscapeVideo, orientationOverride]);
 
-  /* 手动旋转：切到当前方向的反面，并覆盖本集的自动选择。 */
+  /* 手动旋转：切到当前方向的反面，并覆盖本集的自动选择。
+     “当前”必须以实际视口（vpLandscape）为准，不能拿视频分辨率代替：
+     自动转方向没生效时屏幕还是竖屏、视频却是横屏，用视频方向算会得出
+     “当前已是横屏”，点一下反而要求切回竖屏，看起来就像按钮没反应。 */
   const rotateOrientation = useCallback(() => {
     keepPlayingThroughTransition();
-    const current = orientationOverride ?? (vsize.w > 0 && vsize.h > 0 ? isLandscapeVideo : vpLandscape);
-    const next = !current;
+    const next = !vpLandscape;
     setOrientationOverride(next);
     void setMobileOrientation(next).catch(() => setHint("无法切换屏幕方向，请重试"));
-  }, [orientationOverride, vsize, isLandscapeVideo, vpLandscape, keepPlayingThroughTransition]);
+  }, [vpLandscape, keepPlayingThroughTransition]);
 
 
   const go=(delta:number)=>{ if(!active || controlsLocked || panel) return; if(preview) delta>0 ? onNext?.() : onPrevious?.(); else delta>0 ? onNextEpisode?.() : onPreviousEpisode?.(); };
@@ -672,13 +676,16 @@ export default function Feed({media, position, active=true, preparing=false, err
                     />
                   </div>
                   {/* 分辨率角标（仅 iOS）：起播后显示 3 秒自动消失；位置在标题栏下方（顶边 + 安全区 + 96px），不贴顶边。 */}
-                  {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && resBadgeVisible && (
+                  {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && overlayBadgesVisible && (
                     <div className="absolute left-3 z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
                       style={{ top: "calc(var(--sat, 0px) + 96px)", background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                       {formatResolution(vsize.w, vsize.h)}
                     </div>
                   )}
-                  {platform === "ios" && media && playbackEngine !== "webview" && (
+                  {/* “原生播放”按钮（仅 iOS）：与分辨率角标共用同一个 3 秒窗口，
+                      起播 3 秒后一起消失；尺寸还没拿到时先显示，保证原生播放
+                      入口在任何时候都点得到；切集重开一个 3 秒窗口。 */}
+                  {platform === "ios" && media && playbackEngine !== "webview" && (overlayBadgesVisible || vsize.w <= 0 || vsize.h <= 0) && (
                     <div className="absolute right-3 z-20" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
                       <button aria-label="原生播放" onClick={() => void openNative()} className="pointer-events-auto rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
                         style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>

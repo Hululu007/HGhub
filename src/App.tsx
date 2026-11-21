@@ -27,21 +27,6 @@ export default function App() { return <HostProvider><Application/></HostProvide
 function Application() {
   const app=useStore(),host=useHost(),[collapsed,setCollapsed]=useState(false),top=app.stack[app.stack.length-1];
   const backRef=useRef(()=>{});
-  /* 启动画面：index.html 里内联的 #splash（黑底 + logo）在 WebView 加载时就显示；
-     900ms 时实测整个显示过程都发生在系统启动屏还盖着屏幕的时间里，等启动屏
-     撤掉时角标早已消失，用户根本看不到红苹果。改成最少显示 2000ms 再淡出
-     （300ms），保证启动屏撤掉后 logo 还能被看见；嫌长可再调。 */
-  useEffect(() => {
-    const el = document.getElementById("splash");
-    if (!el) return;
-    let removeTimer = 0;
-    const hideTimer = window.setTimeout(() => {
-      el.style.transition = "opacity .3s ease";
-      el.style.opacity = "0";
-      removeTimer = window.setTimeout(() => el.remove(), 320);
-    }, 2000);
-    return () => { window.clearTimeout(hideTimer); window.clearTimeout(removeTimer); };
-  }, []);
   backRef.current=()=>{if(runBack(10))return;if(app.fs){app.setFs(false);return;}if(document.fullscreenElement){void document.exitFullscreen();return;}if(runBack())return;if(app.stack.length)app.pop();else if(app.tab!=="home")app.setTab("home");else void invoke("plugin:app|exit",{code:0}).catch(()=>{});};
   useEffect(()=>{if(app.platform!=="android")return;let disposed=false;let listener:{unregister:()=>Promise<void>}|undefined;void addPluginListener("app","back-button",()=>backRef.current()).then(l=>{if(disposed)void l.unregister();else listener=l;}).catch(()=>{});return()=>{disposed=true;void listener?.unregister();};},[app.platform]);
   const manage=(focusId?:string)=>{host.clearAuth();app.push({kind:"plugins",focusId});};

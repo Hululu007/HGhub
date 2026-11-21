@@ -131,7 +131,8 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   `Feed.tsx` 在播放画面标题栏下方叠一个角标（`1920×1080` 这种格式，
   顶边 + 安全区 + 96px），拿到尺寸才显示，未知时隐藏；起播后显示
   3 秒自动消失，切集重开一个 3 秒窗口。“原生播放”按钮在同一高度
-  贴右上角，不自动消失。
+  贴右上角，与角标共用同一个 3 秒窗口一起消失（尺寸还没拿到时先
+  显示，保证入口点得到）。
 - 原生路：`NativePlayerState` 与 `native-player-time` 事件都带
   `videoWidth/videoHeight`（0 表示未知）；`AVPlayerEngine` 用
   `AVPlayerItem.presentationSize` 取真实尺寸，在
@@ -150,6 +151,10 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   不再只在全屏时才转；切集后回到自动。
 - 手动：移动端控制条（锁定、全屏之间）多了一个旋转按钮，点一下切
   到当前方向的反面，并覆盖本集的自动选择；退出播放页时恢复竖屏。
+  “当前方向”以实际视口为准，不能拿视频分辨率代替——自动转方向
+  没生效时屏幕还是竖屏、视频却是横屏，用视频方向算会得出“当前已
+  是横屏”，点一下反而要求切回竖屏，看起来就像按钮没反应（v0.0.21
+  修的就是这个）。
 - iOS 方向控制是新加的原生插件 `src-tauri/ios/Sources/OrientationPlugin.swift`
  （`UIDevice.setValue(forKey: "orientation")` +
   `attemptRotationToDeviceOrientation()`），与播放器插件同属 `NativePlugins`
