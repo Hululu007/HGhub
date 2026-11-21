@@ -126,6 +126,8 @@ final class MPVEngine: NSObject, NativePlayerEngine {
   var eventHandler: ((NativePlayerEvent) -> Void)?
   private var engineName = "mpv"
 
+  var videoSize: CGSize { .zero }
+
   var currentState: NativePlayerState {
     NativePlayerState(
       engine: engineName, playing: false, position: 0, duration: 0, rate: 1, volume: 1,

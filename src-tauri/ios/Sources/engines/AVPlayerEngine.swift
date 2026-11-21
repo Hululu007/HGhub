@@ -89,7 +89,11 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
     let player = AVPlayer(playerItem: item)
     player.volume = Float(volume)
     player.isMuted = muted
-    player.defaultRate = Float(rate)
+    // defaultRate 只在 iOS 16.0+ 可用；部署目标是 iOS 15.0，15 上跳过
+    // 预设倍速即可（setRate 里 playImmediately(atRate:) 的路子不受影响）。
+    if #available(iOS 16.0, *) {
+      player.defaultRate = Float(rate)
+    }
     self.player = player
     self.playerItem = item
 
@@ -137,13 +141,14 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
     self.controller = controller
     // 分辨率角标放在 AVPlayerViewController 的 contentOverlayView 右上角：
     // 系统控制条之下、视频之上，全屏播放时一直可见；尺寸未知时隐藏。
-    if resolutionLabel.superview == nil {
-      controller.contentOverlayView.addSubview(resolutionLabel)
+    // contentOverlayView 是 UIView?，没有时只跳过角标，不影响起播。
+    if resolutionLabel.superview == nil, let overlay = controller.contentOverlayView {
+      overlay.addSubview(resolutionLabel)
       NSLayoutConstraint.activate([
         resolutionLabel.topAnchor.constraint(
-          equalTo: controller.contentOverlayView.topAnchor, constant: 12),
+          equalTo: overlay.topAnchor, constant: 12),
         resolutionLabel.trailingAnchor.constraint(
-          equalTo: controller.contentOverlayView.trailingAnchor, constant: -12),
+          equalTo: overlay.trailingAnchor, constant: -12),
       ])
     }
     updateResolutionLabel()
@@ -197,7 +202,9 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
 
   func setRate(_ rate: Double) {
     self.rate = rate
-    player?.defaultRate = Float(rate)
+    if #available(iOS 16.0, *) {
+      player?.defaultRate = Float(rate)
+    }
     if player?.rate ?? 0 > 0 {
       player?.playImmediately(atRate: Float(rate))
     }
@@ -211,8 +218,8 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
   }
 
   func close() {
-    if let timeObserver = timeObserver {
-      player?.removeTimeObserver(timeObserver)
+    if let observer = timeObserver {
+      player?.removeTimeObserver(observer)
       timeObserver = nil
     }
     statusObservation?.invalidate()

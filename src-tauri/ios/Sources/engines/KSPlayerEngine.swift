@@ -128,6 +128,8 @@ final class KSPlayerEngine: NSObject, NativePlayerEngine {
   var eventHandler: ((NativePlayerEvent) -> Void)?
   private var engineName = "ksplayer"
 
+  var videoSize: CGSize { .zero }
+
   var currentState: NativePlayerState {
     NativePlayerState(
       engine: engineName, playing: false, position: 0, duration: 0, rate: 1, volume: 1,
