@@ -1,0 +1,241 @@
+// iOS 原生播放器桥：React -> Tauri 命令 -> Swift NativePlayerPlugin -> 四个引擎。
+// WebView / <video> 仍是默认播放路径（见 VideoSurface.tsx），这里只在用户
+// 选了原生引擎且平台是 iOS 时才转发；非 iOS 平台命令直接返回明确错误。
+
+use serde::{Deserialize, Serialize};
+#[cfg(target_os = "ios")]
+use serde_json::{json, Value};
+
+/// Swift 侧的插件入口（src-tauri/ios/NativePlayerPlugin.swift 里的
+/// `@_cdecl("init_plugin_native_player")`）。写法与官方 tauri-plugin-dialog
+/// 完全一致：`tauri::ios_plugin_binding!` + `api.register_ios_plugin(init_fn)`。
+/// 只在 iOS 编译；Linux/macOS/Windows/Android 上不存在这个符号。
+#[cfg(target_os = "ios")]
+tauri::ios_plugin_binding!(init_plugin_native_player);
+
+/// iOS 移动插件句柄（与 commands.rs 里的 OrientationPlugin 同一模式）。
+#[cfg(target_os = "ios")]
+pub struct NativePlayerPlugin(pub tauri::plugin::PluginHandle<tauri::Wry>);
+
+/// 四个原生引擎。名字与前端 NativeEngine、Swift makeEngine 保持一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeEngine {
+    Avplayer,
+    Mdk,
+    Ksplayer,
+    Mpv,
+}
+
+/// open / play / pause / seek / set_rate / set_volume 的回包：Swift 侧
+/// NativePlayerState 用同样字段名编码，serde 按名字对齐。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativePlayerState {
+    pub engine: Option<String>,
+    pub playing: bool,
+    pub position: f64,
+    pub duration: f64,
+    pub rate: f64,
+    pub volume: f64,
+    pub muted: bool,
+    /// 当前视频原始分辨率（像素）；0 表示未知（引擎未报或未加载出视频轨）。
+    pub video_width: u32,
+    pub video_height: u32,
+}
+
+/// 向 Swift 插件注册 "native-player"。setup 闭包与 native_player.rs 在同一
+/// 模块内引用 init_plugin_native_player（宏生成的绑定只在本模块可见）。
+pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::<tauri::Wry, ()>::new("native-player")
+        .setup(|app, api| {
+            #[cfg(target_os = "ios")]
+            {
+                let handle = api.register_ios_plugin(init_plugin_native_player)?;
+                app.manage(NativePlayerPlugin(handle));
+            }
+            #[cfg(not(target_os = "ios"))]
+            let _ = (app, api);
+            Ok(())
+        })
+        .build()
+}
+
+#[cfg(target_os = "ios")]
+async fn forward<T: serde::de::DeserializeOwned>(
+    plugin: &tauri::State<'_, NativePlayerPlugin>,
+    command: &str,
+    payload: Value,
+) -> Result<T, String> {
+    plugin
+        .0
+        .run_mobile_plugin_async::<T>(command, payload)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "ios")]
+fn open_payload(
+    engine: NativeEngine,
+    url: String,
+    session_id: String,
+    position: f64,
+    rate: f64,
+    volume: f64,
+    muted: bool,
+    title: Option<String>,
+) -> Value {
+    // 注意：invoke 参数名按 Rust 形参的 snake_case 传（前端 nativePlayer.ts
+    // 里用 session_id 而不是 sessionId），否则 Tauri 反序列化不到。
+    json!({
+        "engine": engine,
+        "url": url,
+        "session_id": session_id,
+        "position": position,
+        "rate": rate,
+        "volume": volume,
+        "muted": muted,
+        "title": title,
+    })
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_open(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+    engine: NativeEngine,
+    url: String,
+    session_id: String,
+    position: f64,
+    rate: f64,
+    volume: f64,
+    muted: bool,
+    title: Option<String>,
+) -> Result<NativePlayerState, String> {
+    forward(
+        &plugin,
+        "open",
+        open_payload(engine, url, session_id, position, rate, volume, muted, title),
+    )
+    .await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_open(
+    engine: NativeEngine,
+    url: String,
+    session_id: String,
+    position: f64,
+    rate: f64,
+    volume: f64,
+    muted: bool,
+    title: Option<String>,
+) -> Result<NativePlayerState, String> {
+    let _ = (engine, url, session_id, position, rate, volume, muted, title);
+    Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_close(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+) -> Result<(), String> {
+    forward::<()>(&plugin, "close", json!({})).await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_close() -> Result<(), String> {
+    Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_play(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+) -> Result<NativePlayerState, String> {
+    forward(&plugin, "play", json!({})).await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_play() -> Result<NativePlayerState, String> {
+    Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_pause(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+) -> Result<NativePlayerState, String> {
+    forward(&plugin, "pause", json!({})).await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_pause() -> Result<NativePlayerState, String> {
+    Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_seek(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+    position: f64,
+) -> Result<NativePlayerState, String> {
+    forward(&plugin, "seek", json!({ "position": position })).await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_seek(position: f64) -> Result<NativePlayerState, String> {
+    let _ = position;
+    Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_set_rate(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+    rate: f64,
+) -> Result<NativePlayerState, String> {
+    forward(&plugin, "setRate", json!({ "rate": rate })).await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_set_rate(rate: f64) -> Result<NativePlayerState, String> {
+    let _ = rate;
+    Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_set_volume(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+    volume: f64,
+    muted: bool,
+) -> Result<NativePlayerState, String> {
+    forward(&plugin, "setVolume", json!({ "volume": volume, "muted": muted })).await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_set_volume(volume: f64, muted: bool) -> Result<NativePlayerState, String> {
+    let _ = (volume, muted);
+    Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn native_player_state(
+    plugin: tauri::State<'_, NativePlayerPlugin>,
+) -> Result<NativePlayerState, String> {
+    forward(&plugin, "state", json!({})).await
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn native_player_state() -> Result<NativePlayerState, String> {
+    Err("当前平台不支持原生播放器".into())
+}

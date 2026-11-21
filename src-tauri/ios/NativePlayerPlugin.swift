@@ -1,0 +1,305 @@
+// iOS 原生播放器插件：Tauri 移动插件，名字 "native-player"。
+// 写法对照本地 Tauri 2.12.5 的官方模板：
+//   - 基类 / 事件：tauri-2.12.5/mobile/ios-api/Sources/Tauri/Plugin/Plugin.swift
+//    （`open class Plugin`，`trigger(_:data:)`，`manager.viewController`）
+//   - 调用约定：tauri-plugin-dialog-2.8.3/ios/Sources/DialogPlugin.swift
+//    （`@objc func xxx(_ invoke: Invoke) throws`，`invoke.parseArgs` /
+//     `invoke.resolve` / `invoke.reject`，结尾的
+//     `@_cdecl("init_plugin_...") public func initPlugin() -> Plugin`）
+// Rust 侧见 src-tauri/src/native_player.rs：
+//   `tauri::ios_plugin_binding!(init_plugin_native_player)` +
+//   `api.register_ios_plugin(init_plugin_native_player)`。
+//
+// 本机无 Xcode/Swift 工具链：本文件未编译，待 Mac 上第一次
+// `pnpm tauri ios init --ci` 后由 Xcode 校验（见 docs/developers/native-players.md）。
+
+import Tauri
+import UIKit
+
+// MARK: - 与 Rust / 前端对齐的模型
+
+/// Rust open_payload 发来的 JSON。注意 Rust 用 snake_case（session_id），
+/// 这里用 CodingKeys 映射，字段名本身与前端 NativePlayerOpenOptions 一致。
+struct NativePlayerOpenArgs: Decodable {
+  var engine: String
+  var url: String
+  var sessionId: String
+  var position: Double
+  var rate: Double
+  var volume: Double
+  var muted: Bool
+  var title: String?
+
+  enum CodingKeys: String, CodingKey {
+    case engine, url, position, rate, volume, muted, title
+    case sessionId = "session_id"
+  }
+}
+
+struct NativePlayerSeekArgs: Decodable {
+  var position: Double
+}
+
+struct NativePlayerRateArgs: Decodable {
+  var rate: Double
+}
+
+struct NativePlayerVolumeArgs: Decodable {
+  var volume: Double
+  var muted: Bool
+}
+
+/// 与 Rust NativePlayerState 同名字段；resolve 后由 serde 按名字对齐。
+struct NativePlayerState: Encodable {
+  var engine: String?
+  var playing: Bool
+  var position: Double
+  var duration: Double
+  var rate: Double
+  var volume: Double
+  var muted: Bool
+  /// 当前视频原始分辨率（像素）；0 表示未知。
+  var videoWidth: Int
+  var videoHeight: Int
+}
+
+// MARK: - 引擎事件（经 trigger 发回前端，见前端 nativePlayer.ts）
+
+struct NativePlayerTimeEvent: Encodable {
+  var engine: String
+  var sessionId: String
+  var position: Double
+  var duration: Double
+  /// 当前视频原始分辨率（像素）；0 表示未知。
+  var videoWidth: Int
+  var videoHeight: Int
+}
+
+struct NativePlayerEndEvent: Encodable {
+  var engine: String
+  var sessionId: String
+  var position: Double
+}
+
+struct NativePlayerErrorEvent: Encodable {
+  var engine: String
+  var sessionId: String
+  var message: String
+}
+
+struct NativePlayerClosedEvent: Encodable {
+  var engine: String
+  var sessionId: String
+  var position: Double
+}
+
+enum NativePlayerEvent {
+  case time(position: Double, duration: Double, videoSize: CGSize)
+  case ended
+  case error(String)
+  case closed
+}
+
+// MARK: - 统一引擎协议：四个引擎都实现它，插件只认这个接口
+
+protocol NativePlayerEngine: AnyObject {
+  var eventHandler: ((NativePlayerEvent) -> Void)? { get set }
+  var currentState: NativePlayerState { get }
+  /// 当前视频原始分辨率；未知时为 .zero（前端与覆盖层按 0 处理为不显示）。
+  var videoSize: CGSize { get }
+  func open(
+    url: URL, position: Double, rate: Double, volume: Double, muted: Bool, title: String?,
+    present: @escaping (UIViewController) -> Void,
+    completion: @escaping (Result<NativePlayerState, Error>) -> Void
+  )
+  func play()
+  func pause()
+  func seek(to position: Double)
+  func setRate(_ rate: Double)
+  func setVolume(_ volume: Double, muted: Bool)
+  func close()
+}
+
+struct NativePlayerUnavailableError: LocalizedError {
+  var message: String
+  var errorDescription: String? { message }
+}
+
+// MARK: - 插件本体
+
+class NativePlayerPlugin: Plugin {
+  private var engine: (any NativePlayerEngine)?
+  private var engineName: String?
+  private var sessionId: String?
+  private var lastPosition: Double = 0
+  private var lastDuration: Double = 0
+
+  private func makeEngine(_ name: String) -> (any NativePlayerEngine)? {
+    switch name {
+    case "avplayer": return AVPlayerEngine()
+    case "mdk": return MDKEngine()
+    case "ksplayer": return KSPlayerEngine()
+    case "mpv": return MPVEngine()
+    default: return nil
+    }
+  }
+
+  private func present(_ viewController: UIViewController) {
+    manager.viewController?.present(viewController, animated: true, completion: nil)
+  }
+
+  private func forwardEvent(_ event: NativePlayerEvent) {
+    guard let engineName = engineName, let sessionId = sessionId else { return }
+    do {
+      switch event {
+      case .time(let position, let duration, let videoSize):
+        lastPosition = position
+        lastDuration = duration
+        try trigger(
+          "native-player-time",
+          data: NativePlayerTimeEvent(
+            engine: engineName, sessionId: sessionId, position: position, duration: duration,
+            videoWidth: Int(videoSize.width), videoHeight: Int(videoSize.height)))
+      case .ended:
+        lastPosition = engine?.currentState.position ?? lastPosition
+        try trigger(
+          "native-player-ended",
+          data: NativePlayerEndEvent(
+            engine: engineName, sessionId: sessionId, position: lastPosition))
+        engine = nil
+      case .error(let message):
+        try trigger(
+          "native-player-error",
+          data: NativePlayerErrorEvent(
+            engine: engineName, sessionId: sessionId, message: message))
+        engine = nil
+      case .closed:
+        lastPosition = engine?.currentState.position ?? lastPosition
+        try trigger(
+          "native-player-closed",
+          data: NativePlayerClosedEvent(
+            engine: engineName, sessionId: sessionId, position: lastPosition))
+        engine = nil
+      }
+    } catch {
+      // 事件发不出去不影响播放本身；播放状态仍可由 state 命令查询。
+    }
+  }
+
+  private func requireEngine(_ invoke: Invoke) -> (any NativePlayerEngine)? {
+    guard let engine = engine else {
+      invoke.reject("没有正在播放的原生播放器")
+      return nil
+    }
+    return engine
+  }
+
+  private func resolveState(_ invoke: Invoke, from engine: (any NativePlayerEngine)? = nil) {
+    if let engine = engine ?? self.engine {
+      invoke.resolve(engine.currentState)
+    } else {
+      invoke.resolve(
+        NativePlayerState(
+          engine: engineName, playing: false, position: lastPosition, duration: lastDuration,
+          rate: 1, volume: 1, muted: false, videoWidth: 0, videoHeight: 0))
+    }
+  }
+
+  @objc public func open(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NativePlayerOpenArgs.self)
+    guard let url = URL(string: args.url) else {
+      invoke.reject("无效的播放地址")
+      return
+    }
+    guard let next = makeEngine(args.engine) else {
+      invoke.reject("未知的播放引擎：\(args.engine)")
+      return
+    }
+    DispatchQueue.main.async {
+      self.engine?.close()
+      self.engine = next
+      self.engineName = args.engine
+      self.sessionId = args.sessionId
+      self.lastPosition = args.position
+      self.lastDuration = 0
+      next.eventHandler = { [weak self] event in self?.forwardEvent(event) }
+      next.open(
+        url: url, position: args.position, rate: args.rate, volume: args.volume,
+        muted: args.muted, title: args.title,
+        present: { [weak self] viewController in self?.present(viewController) }
+      ) { result in
+        switch result {
+        case .success(let state):
+          self.lastPosition = state.position
+          self.lastDuration = state.duration
+          invoke.resolve(state)
+        case .failure(let error):
+          self.engine = nil
+          invoke.reject(error.localizedDescription)
+        }
+      }
+    }
+  }
+
+  @objc public func close(_ invoke: Invoke) throws {
+    DispatchQueue.main.async {
+      self.engine?.close()
+      self.engine = nil
+      invoke.resolve()
+    }
+  }
+
+  @objc public func play(_ invoke: Invoke) throws {
+    guard let engine = requireEngine(invoke) else { return }
+    DispatchQueue.main.async {
+      engine.play()
+      self.resolveState(invoke, from: engine)
+    }
+  }
+
+  @objc public func pause(_ invoke: Invoke) throws {
+    guard let engine = requireEngine(invoke) else { return }
+    DispatchQueue.main.async {
+      engine.pause()
+      self.resolveState(invoke, from: engine)
+    }
+  }
+
+  @objc public func seek(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NativePlayerSeekArgs.self)
+    guard let engine = requireEngine(invoke) else { return }
+    DispatchQueue.main.async {
+      engine.seek(to: args.position)
+      self.resolveState(invoke, from: engine)
+    }
+  }
+
+  @objc public func setRate(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NativePlayerRateArgs.self)
+    guard let engine = requireEngine(invoke) else { return }
+    DispatchQueue.main.async {
+      engine.setRate(args.rate)
+      self.resolveState(invoke, from: engine)
+    }
+  }
+
+  @objc public func setVolume(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NativePlayerVolumeArgs.self)
+    guard let engine = requireEngine(invoke) else { return }
+    DispatchQueue.main.async {
+      engine.setVolume(args.volume, muted: args.muted)
+      self.resolveState(invoke, from: engine)
+    }
+  }
+
+  @objc public func state(_ invoke: Invoke) throws {
+    resolveState(invoke)
+  }
+}
+
+/// Rust 侧 `tauri::ios_plugin_binding!(init_plugin_native_player)` 找的就是
+/// 这个符号；名字改了要同步改 Rust 侧的宏参数。
+@_cdecl("init_plugin_native_player")
+public func initPlugin() -> Plugin {
+  return NativePlayerPlugin()
+}

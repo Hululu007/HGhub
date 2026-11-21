@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#1a1a1a" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <title>红苹果影视</title>
+    <script>
+      try {
+        if (JSON.parse(localStorage.getItem("hpp.theme") || '"dark"') === "light") document.documentElement.classList.add("theme-light");
+      } catch (e) {}
+    </script>
+    <style>html{background:#000}body{background:#1a1a1a}html.theme-light,html.theme-light body{background:#f3f3f3}</style>
+  </head>
+  <body>
+    <!-- 启动画面：内联样式 + 黑底 logo，WebView 一加载就显示；App 首次渲染完成即撤掉，不加固定等待时间。 -->
+    <div id="splash" style="position:fixed;inset:0;background:#000;display:flex;align-items:center;justify-content:center;z-index:9999"><img src="/splash-logo.png" alt="" style="width:min(42vw,240px);height:auto" /></div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
