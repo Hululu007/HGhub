@@ -65,3 +65,33 @@ affected versions), re-apply this change to any newer vendored wry.
 Regression coverage is the device test: the app must launch on iOS 16.6.1
 and show its UI. If it still crashes, the new `.ips` tells whether the
 crash moved past `Wry::init`.
+
+---
+
+# iOS WebView background: black fallback instead of system background (v0.0.16)
+
+Second change in this vendored copy, same file
+(`src/wkwebview/mod.rs`, iOS `WebView::new` branch): when no
+`background_color` attribute is set, the fallback was
+`UIColor::systemBackgroundColor()`. That follows the phone's appearance,
+so on a phone in light mode the WebView (and its parent view) is white.
+
+## Why it mattered
+
+v0.0.15 launched fine on the user's iPhone 13 Pro Max (iOS 16.6.1) and
+played video, but the screenshot showed a pure-white strip, 80pt tall
+(115px in a 612×1326 screenshot, 129px in the original 685×1484 one),
+below the bottom tab bar. The shipped page already had `html { background:
+#000 }` and `#root` at `100dvh`, yet the strip stayed white, so it is not
+the page background: it is the WebView's own background showing where the
+page does not paint. Measured geometry: the tab bar is 40pt + 34pt
+(`--sab`, i.e. `env(safe-area-inset-bottom)` = 34), so the WebView does
+reach the screen bottom, but the page ends at ~846pt of a 926pt screen —
+`100dvh` in this WKWebView is inset by the top (47pt) + bottom (34pt)
+safe areas. The companion fix is `100dvh` → `100lvh` in `src/index.css`
+(the large viewport is the full viewport); this black fallback is the
+second layer, so any area the page still does not paint reads as black
+and blends with the dark UI instead of a white bar.
+
+Keep this change on upgrade for the same reason: the app is dark-themed
+and must never show a system-light background.

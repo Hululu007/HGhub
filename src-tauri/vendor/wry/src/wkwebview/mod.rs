@@ -493,6 +493,10 @@ impl InnerWebView {
           objc2::msg_send![super(webview), initWithFrame: frame, configuration: &**config];
         // Without a background color the webview stays opaque and white, flashing before the
         // page paints, so fall back to the system background to follow the current appearance.
+        // HGHUB-PATCH: black instead of systemBackgroundColor. This app is dark-themed, and
+        // on a phone in light mode the system background is white: any area the page does
+        // not paint (e.g. the 80pt strip below the page in v0.0.15, see the lvh note in
+        // src/index.css) showed as a pure-white bar at the bottom of the screen.
         let color = if let Some((red, green, blue, alpha)) = attributes.background_color {
           objc2_ui_kit::UIColor::colorWithRed_green_blue_alpha(
             red as f64 / 255.0,
@@ -501,7 +505,7 @@ impl InnerWebView {
             alpha as f64 / 255.0,
           )
         } else {
-          objc2_ui_kit::UIColor::systemBackgroundColor()
+          objc2_ui_kit::UIColor::colorWithRed_green_blue_alpha(0.0, 0.0, 0.0, 1.0)
         };
         // setOpaque must come first since the color is applied too late on its own.
         webview.setOpaque(false);

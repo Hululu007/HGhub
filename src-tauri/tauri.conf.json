@@ -14,6 +14,7 @@
       {
         "label": "main",
         "title": "红苹果影视",
+        "backgroundColor": "#000000",
         "width": 1200,
         "height": 780,
         "minWidth": 900,
