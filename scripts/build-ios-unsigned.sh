@@ -42,6 +42,7 @@ pnpm build
 rm -rf src-tauri/gen/apple/assets
 cp -R dist src-tauri/gen/apple/assets
 node scripts/sync-ios-icons.mjs
+node scripts/sync-ios-launch-screen.mjs
 
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.
