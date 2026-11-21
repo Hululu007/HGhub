@@ -20,8 +20,10 @@ fn main() {
 
 /// 把 src-tauri/ios/ 的 Swift 插件包（NativePlugins）编成静态库链进 Rust。
 /// 1. 把 tauri 的 iOS Swift API（DEP_TAURI_IOS_LIBRARY_PATH，tauri 的
-///    build.rs 以 cargo:ios_library_path 暴露）拷到 ios/.tauri/tauri-api，
-///    供 Package.swift 的 .package(path:) 引用；
+///    build.rs 以 cargo:ios_library_path 暴露）拷到 src-tauri/.tauri/tauri-api，
+///    供 Package.swift 的 .package(path: "../.tauri/tauri-api") 引用
+///    （路径是相对 Package.swift 所在目录解析的，也就是相对 ios/，
+///    所以目标是 crate 根 src-tauri/ 下的 .tauri/，不是 ios/ 下）；
 /// 2. 调 tauri_utils::build::link_apple_library("NativePlugins", ios-dir)，
 ///    由 swift-rs 以 swift build 编包并链接。
 /// 非 macOS host 上 tauri 不输出 DEP_TAURI_IOS_LIBRARY_PATH，直接跳过，
@@ -35,16 +37,15 @@ fn link_ios_native_plugins() {
         return;
     };
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let ios_dir = manifest_dir.join("ios");
-    copy_tauri_api(Path::new(&tauri_api_src), &ios_dir.join(".tauri").join("tauri-api"));
+    copy_tauri_api(Path::new(&tauri_api_src), &manifest_dir.join(".tauri").join("tauri-api"));
 
     println!("cargo:rerun-if-changed=ios/Package.swift");
     println!("cargo:rerun-if-changed=ios/Sources");
     #[cfg(target_os = "macos")]
-    tauri_utils::build::link_apple_library("NativePlugins", &ios_dir);
+    tauri_utils::build::link_apple_library("NativePlugins", &manifest_dir.join("ios"));
 }
 
-/// 把 tauri 的 iOS Swift API 目录拷到 `dst`（即 ios/.tauri/tauri-api）。
+/// 把 tauri 的 iOS Swift API 目录拷到 `dst`（即 src-tauri/.tauri/tauri-api）。
 /// 跳过构建产物与测试（.build / Package.resolved / Tests），与官方插件
 /// 的拷贝规则一致。目标已存在且来源一致时跳过，避免无谓重写。
 fn copy_tauri_api(src: &Path, dst: &Path) {

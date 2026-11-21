@@ -9,7 +9,7 @@ import PackageDescription
 // OrientationPlugin（orientation）共用这一个包、同一个 Swift 模块。
 // 写法照搬官方 tauri-plugin-dialog 2.8.3 的 ios/Package.swift，只改
 // 了包名与 target 名；依赖的 Tauri 模块来自 build.rs 在构建时拷到
-// ios/.tauri/tauri-api 的 tauri ios-api（见 src-tauri/build.rs）。
+// src-tauri/.tauri/tauri-api 的 tauri ios-api（见 src-tauri/build.rs）。
 // 本包由 build.rs 经 SwiftLinker（swift build）在 macOS 构建时编成
 // 静态库链进 Rust，Xcode 不编译这些文件——不要再把它们拷进
 // gen/apple/Sources（那样会与静态库重复定义 init_plugin_* 符号）。

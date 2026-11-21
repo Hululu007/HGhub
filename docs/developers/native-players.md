@@ -31,7 +31,7 @@ React（Feed.tsx 原生播放入口按钮）
 `NativePlayerPlugin` 与 `OrientationPlugin` 两个插件、同一个 Swift
 模块）。`src-tauri/build.rs` 在 macOS 上为 iOS target 构建时，先把
 tauri 的 iOS Swift API（`DEP_TAURI_IOS_LIBRARY_PATH`）拷到
-`ios/.tauri/tauri-api`（构建产物，不进版本控制），再调
+`src-tauri/.tauri/tauri-api`（构建产物，不进版本控制），再调
 `tauri_utils::build::link_apple_library("NativePlugins", ios-dir)`，
 由 swift-rs 以 `swift build` 编成静态库链进 Rust。**Xcode 不编译
 这些文件**——不要再把它们拷进 `gen/apple/Sources`，那样会与静态
@@ -92,7 +92,7 @@ pnpm install --frozen-lockfile
 # 2. 生成 iOS 工程（Swift 插件不用同步，build.rs 在构建时自己处理）
 pnpm tauri ios init --ci
 # Swift 插件是 SPM 包：cargo 构建时 build.rs 把 tauri 的 iOS Swift API
-# 拷到 src-tauri/ios/.tauri/tauri-api，再经 SwiftLinker 编成静态库链进
+# 拷到 src-tauri/.tauri/tauri-api，再经 SwiftLinker 编成静态库链进
 # Rust。不要把 Swift 文件拷进 gen/apple/Sources，也不要重跑 xcodegen
 # 收录它们——那样会与静态库重复定义 init_plugin_* 符号。
 
