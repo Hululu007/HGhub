@@ -14,10 +14,10 @@ import { useVerticalSwipe } from './useVerticalSwipe';
 import type { PreparedMedia } from "../plugins/client";
 import { closeNativePlayer, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
 import { playbackEngineFallbackChain, playbackEngineLabel, type PlaybackEngine } from "../plugins/playbackEngine";
-import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IList, ILockF, IPauseF, IPlayF, IRotate, ISearch, ISettings, IVol, IVolMute } from "../icons";
+import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IInfo, IList, ILockF, IPauseF, IPlayF, IRotate, ISearch, ISettings, IVol, IVolMute } from "../icons";
 
 export type PlayerPanel = "detail" | "episodes" | "comments" | "playback";
-type SurfacePanel = PlayerPanel | "more";
+type SurfacePanel = PlayerPanel | "more" | "info";
 export interface FeedPresentation {
   playIntent?: number; mode?: "preview" | "full"; onOpenDetail?: () => void;
   title?: string; author?: string; description?: string; score?: number; poster?: string;
@@ -75,7 +75,7 @@ export default function Feed({media, position, active=true, preparing=false, err
   const [err, setErr] = useState("");
   /* 取播放地址失败后手动重试：递增即重新触发拉取 */
   const [panel, setPanel] = useState<SurfacePanel | null>(null);
-  useEffect(() => { if (panel && panel !== "more") onPanelChange?.(panel); }, [panel, onPanelChange]);
+  useEffect(() => { if (panel && panel !== "more" && panel !== "info") onPanelChange?.(panel); }, [panel, onPanelChange]);
   const resumeAfterOverlay = useRef(false);
   useEffect(() => {
     if (!active) resumeAfterOverlay.current = !paused;
@@ -140,6 +140,11 @@ export default function Feed({media, position, active=true, preparing=false, err
     if (paused) { setIdle(false); window.clearTimeout(idleTimer.current); }
   }, [paused]);
   const [fullscreen, setFullscreen] = useState(false);
+
+  /* 详情页角标显隐：跟控制条同显同隐（移动端看清屏/锁定，桌面看闲置），
+     起播/切集后的 3 秒窗口内也短暂显示一次。 */
+  const detailUiVisible = !preview && active && !controlsLocked && !clean && (isDesktop ? (!idle || paused || !!panel) : true);
+  const detailBadgesVisible = detailUiVisible || overlayBadgesVisible;
 
   /* —— 移动端手势 & 竖屏横片缩放 —— */
   const [holdSpeed, setHoldSpeed] = useState(false);
@@ -259,6 +264,17 @@ export default function Feed({media, position, active=true, preparing=false, err
       .catch(() => setHint("无法切换屏幕方向，请重试"));
   }, [keepPlayingThroughTransition]);
 
+  /* 影片信息里的格式：media.format 是 hls 还是 progressive；progressive 时
+     从播放地址后缀推导（.m3u8 → HLS、.mp4 → MP4），拿不到的只写未知，
+     不编造编码信息。 */
+  const mediaFormatLabel = (() => {
+    if (!media) return "未知";
+    if (media.format === "hls") return "HLS";
+    const ext = playUrl?.split(/[?#]/)[0].match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+    if (!ext) return "未知";
+    return ({ m3u8: "HLS", mp4: "MP4", mkv: "MKV", webm: "WebM", mov: "MOV", m4v: "M4V", ts: "TS" } as Record<string, string>)[ext] ?? ext.toUpperCase();
+  })();
+
   /* 复制当前视频的真实播放地址（media.url）：WKWebView 里
      navigator.clipboard 需用户手势（点按即满足），不可用时走
      textarea + execCommand 兜底；失败给提示，不静默。 */
@@ -347,10 +363,11 @@ export default function Feed({media, position, active=true, preparing=false, err
     };window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);
   },[active,controlsLocked,panel,time,onNext,onPrevious,fs,preview,onNextEpisode,onPreviousEpisode]);
   const showDetails = () => { if (!isDesktop && fs) { setPanel('detail'); return; } setPanel(null); if (onOpenDetail) onOpenDetail(); else setPanel("detail"); };
-  const panelContent=panel && <><header className="legacy-panel-heading"><h2>{{detail:"作品详情",episodes:"选集",comments:"评论",playback:"画质与线路",more:"更多播放选项"}[panel]}</h2><button aria-label="关闭面板" onClick={()=>setPanel(null)}><IClose size={18}/></button></header><div className="legacy-panel-body">
+  const panelContent=panel && <><header className="legacy-panel-heading"><h2>{{detail:"作品详情",episodes:"选集",comments:"评论",playback:"画质与线路",more:"更多播放选项",info:"影片信息"}[panel]}</h2><button aria-label="关闭面板" onClick={()=>setPanel(null)}><IClose size={18}/></button></header><div className="legacy-panel-body">
     {panel === "more" ? <div className="hg-more-menu">
       <div className="hg-more-shortcuts">
         <button onClick={showDetails}><IList size={22}/>作品详情</button>
+        <button onClick={()=>setPanel("info")}><IInfo size={22}/>影片信息</button>
         {onFavorite && <button onClick={onFavorite} aria-label={favorite?"取消本地收藏":"本地收藏"} aria-pressed={favorite}>{favorite ? <IHeartF size={22}/> : <IHeart size={22}/>}收藏</button>}
         {panels.playback && <button onClick={()=>setPanel("playback")}><ISettings size={22}/>画质与线路</button>}
         {panels.comments && <button onClick={()=>setPanel("comments")}><ICommentF size={22}/>评论</button>}
@@ -363,6 +380,10 @@ export default function Feed({media, position, active=true, preparing=false, err
       <button onClick={()=>{setPanel(null);lockControls();}}><ILockF size={18}/>锁定播放控制</button>
       <details><summary>操作说明</summary><p>{isDesktop ? "空格 播放/暂停 · ← → 快退/快进 · M 静音 · F 全屏 · E 选集" : "单击显示/隐藏控制 · 双击播放/暂停 · 横滑调整进度 · 长按临时倍速 · 双指缩放画面"}</p></details>
       {onBack&&<button onClick={onBack}><IBack size={19}/>退出播放</button>}
+    </div> : panel === "info" ? <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3"><span className="text-[13px] hg-ink-4">分辨率</span><span className="text-[13px] font-semibold hg-ink tabular-nums">{vsize.w > 0 && vsize.h > 0 ? formatResolution(vsize.w, vsize.h) : "分辨率未知"}</span></div>
+      <div className="flex items-center justify-between gap-3"><span className="text-[13px] hg-ink-4">格式</span><span className="text-[13px] font-semibold hg-ink">{mediaFormatLabel}</span></div>
+      <div className="flex flex-col items-start gap-2"><span className="text-[13px] hg-ink-4">资源播放地址</span><span className="text-[12px] hg-ink-2 break-all">{playUrl ?? "暂无播放地址"}</span><button onClick={() => { void copyPlayUrl(); }} disabled={!playUrl} className="mt-1 px-4 py-1.5 rounded-full hg-chip-strong hg-link text-[12.5px] font-semibold pressable disabled:opacity-40">复制播放地址</button></div>
     </div> : panels[panel]}
     {panel==="playback"&&media?.playback.subtitles?.some(t=>t.format==="vtt")&&<label className="flex flex-col gap-2 mt-4">字幕<select aria-label="字幕" value={subtitle} onChange={e=>{const n=Number(e.target.value);setSubtitle(n);const v=videoRef.current?.el();if(v)Array.from(v.textTracks).forEach((t,i)=>{t.mode=i===n?"showing":"disabled";});}}><option value={-1}>字幕关闭</option>{media.playback.subtitles.filter(t=>t.format==="vtt").map((t,i)=><option key={t.url} value={i}>{t.label||t.language||`字幕 ${i+1}`}</option>)}</select></label>}
   </div></>;
@@ -721,12 +742,31 @@ export default function Feed({media, position, active=true, preparing=false, err
                       onError={() => { setErr("播放失败"); onFailure(); }}
                     />
                   </div>
-                  {/* 分辨率角标（仅 iOS）：起播后显示 3 秒自动消失；位置在标题栏下方（顶边 + 安全区 + 96px），不贴顶边。
-                      信息浮层打开时隐藏，避免与浮层左边的分辨率 pill 在同一位置重叠。 */}
-                  {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && overlayBadgesVisible && !infoOverlay && (
+                  {/* 分辨率角标（仅 iOS 预览卡片）：起播后显示 3 秒自动消失；位置在标题栏下方（顶边 + 安全区 + 96px），不贴顶边。
+                      信息浮层打开时隐藏，避免与浮层左边的分辨率 pill 在同一位置重叠。
+                      详情页用下面那组左右角标，不走这里。 */}
+                  {platform === "ios" && preview && playUrl && vsize.w > 0 && vsize.h > 0 && overlayBadgesVisible && !infoOverlay && (
                     <div className="absolute z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
                       style={{ top: "calc(var(--sat, 0px) + 96px)", left: "var(--sal, 12px)", background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                       {formatResolution(vsize.w, vsize.h)}
+                    </div>
+                  )}
+                  {/* 详情页角标（仅 iOS）：分辨率在左、当前播放内核在右，与 3 秒角标
+                      同款式，位置同样在标题栏下方（顶边 + 安全区 + 96px），左右
+                      按横向安全区留白。显隐跟控制条同显同隐，起播/切集后的 3 秒
+                      窗口内也短暂显示一次。 */}
+                  {platform === "ios" && !preview && playUrl && vsize.w > 0 && vsize.h > 0 && detailBadgesVisible && (
+                    <div className="absolute inset-x-0 z-20 pointer-events-none" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
+                      <div className="flex items-start justify-between" style={{ paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
+                        <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          {formatResolution(vsize.w, vsize.h)}
+                        </span>
+                        <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          {playbackEngineLabel(playbackEngine)}
+                        </span>
+                      </div>
                     </div>
                   )}
                   {/* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒。左为分辨率
