@@ -13,6 +13,16 @@
 // landscape=false 切回竖屏；与 Android 的“恢复之前方向”语义不同，
 // 前端按“竖屏视频→竖屏”调用它时两者结果一致。
 //
+// 机制（v0.0.22）：iOS 16+ 不再用 UIDevice KVC
+// （setValue(forKey: "orientation") + attemptRotationToDeviceOrientation()）：
+// 两段用户录像里自动与手动方向切换从没生效过——横屏视频播着，屏幕一直
+// 竖屏——且旧实现调完就无条件 resolve，前端根本分不清成功还是失败。
+// iOS 16 起方向归 UIWindowScene 管，改走
+// scene.requestGeometryUpdate(.iOS(interfaceOrientations:))，
+// 等一拍后按场景实际方向验收，方向对上才 resolve，对不上 reject；
+// iOS 15 没有这个 API，才走 KVC 老路（#available 守卫，
+// 两条路按系统版本二选一，不叠加）。
+//
 // 本机无 Xcode/Swift 工具链：本文件未编译，由 src-tauri/build.rs 在
 // macOS 构建时经 SwiftLinker 编成静态库链进 Rust（见
 // docs/developers/native-players.md）。
@@ -30,19 +40,48 @@ public class OrientationPlugin: Plugin {
   @objc public func setOrientation(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(OrientationArgs.self)
     DispatchQueue.main.async {
-      if args.landscape {
-        // 已是横屏方向时保持当前横屏朝向，否则默认横屏左。
-        let current = UIDevice.current.orientation
-        let target: UIInterfaceOrientation =
-          (current == .landscapeLeft || current == .landscapeRight)
-          ? UIInterfaceOrientation(rawValue: current.rawValue) ?? .landscapeLeft
-          : .landscapeLeft
-        UIDevice.current.setValue(target.rawValue, forKey: "orientation")
+      if #available(iOS 16.0, *) {
+        guard let scene = self.manager.viewController?.view.window?.windowScene
+          ?? UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene
+        else {
+          invoke.reject("无法获取窗口场景")
+          return
+        }
+        let mask: UIInterfaceOrientationMask = args.landscape ? [.landscapeLeft, .landscapeRight] : .portrait
+        // requestGeometryUpdate 成功时没有回调，只有失败时调 errorHandler，
+        // 所以用 settled 守卫：失败立即 reject；否则等 0.5s 后按场景的
+        // 实际方向验收，方向对上才 resolve，对不上 reject。
+        var settled = false
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+          guard !settled else { return }
+          settled = true
+          invoke.reject(error.localizedDescription)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+          guard !settled else { return }
+          settled = true
+          if scene.interfaceOrientation.isLandscape == args.landscape {
+            invoke.resolve()
+          } else {
+            invoke.reject("无法切换屏幕方向")
+          }
+        }
       } else {
-        UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+        // iOS 15：requestGeometryUpdate 不可用，走原来的 KVC 老路。
+        if args.landscape {
+          // 已是横屏方向时保持当前横屏朝向，否则默认横屏左。
+          let current = UIDevice.current.orientation
+          let target: UIInterfaceOrientation =
+            (current == .landscapeLeft || current == .landscapeRight)
+            ? UIInterfaceOrientation(rawValue: current.rawValue) ?? .landscapeLeft
+            : .landscapeLeft
+          UIDevice.current.setValue(target.rawValue, forKey: "orientation")
+        } else {
+          UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+        }
+        UIViewController.attemptRotationToDeviceOrientation()
+        invoke.resolve()
       }
-      UIViewController.attemptRotationToDeviceOrientation()
-      invoke.resolve()
     }
   }
 }

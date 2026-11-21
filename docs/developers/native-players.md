@@ -11,7 +11,7 @@ WebView / HTML5 `<video>` + hls.js 仍是默认播放路径（`src/components/Vi
 ## 架构
 
 ```text
-React（Feed.tsx 原生播放入口按钮）
+React（Feed.tsx 更多播放选项菜单里的“原生播放”入口）
   → src/plugins/nativePlayer.ts（invoke 封装 + addPluginListener 事件）
   → Rust 命令 src-tauri/src/native_player.rs
       native_player_open / close / play / pause / seek / set_rate / set_volume / state
@@ -64,6 +64,13 @@ C 符号名（`init_plugin_native_player` / `init_plugin_orientation`）
 AVPlayer → MDK → KSPlayer → mpv → 回落 WebView。
 指定某个引擎时只试它，失败也回落 WebView。
 
+选引擎有两个入口，共用同一个 store（`playbackEngine` /
+`setPlaybackEngine`，与设置页选择器同一套）：设置页“播放”区的
+“播放内核”选择器，和播放页“更多播放选项”菜单里的“播放内核”
+选择行。菜单只在 iOS 显示；选了新引擎不切当前播放，下次点菜单里
+的“原生播放”时才按新引擎打开。播放画面右上角不再放“原生播放”
+pill（v0.0.22 删掉），入口只在更多菜单里。
+
 ## 四个引擎
 
 | 引擎 | 格式 | 许可证（发行前必读） | 接入方式 | 已知限制 |
@@ -110,7 +117,12 @@ bash scripts/build-ios-unsigned.sh 0.0.4
 #    - 再逐个测 MDK / KSPlayer / mpv（各依赖装好后）
 #    - 方向：播横屏视频（16:9）自动转横屏，播竖屏视频自动回竖屏；
 #      点控制条的旋转按钮手动切到反面，本集内不再自动改回；切集后
-#      回到按分辨率自动；退出播放页后恢复竖屏
+#      回到按分辨率自动；退出播放页后恢复竖屏。手动旋转成功时应有
+#      “已切换到横屏/竖屏”提示，失败时应有“无法切换屏幕方向”提示。
+#      若仍不转：先确认 `src-tauri/gen/apple` 里窗口根视图控制器
+#      有没有重写 supportedInterfaceOrientations 限制方向（本地
+#      查不到，gen 目录是 CI 生成的、不进版本控制），再看 Swift
+#      侧 requestGeometryUpdate 是否被 reject。
 ```
 
 ## 本机能验证的
@@ -130,9 +142,8 @@ bash scripts/build-ios-unsigned.sh 0.0.4
 - WebView 路：`VideoSurface` 的 `onSize` 已回传 `videoWidth/videoHeight`，
   `Feed.tsx` 在播放画面标题栏下方叠一个角标（`1920×1080` 这种格式，
   顶边 + 安全区 + 96px），拿到尺寸才显示，未知时隐藏；起播后显示
-  3 秒自动消失，切集重开一个 3 秒窗口。“原生播放”按钮在同一高度
-  贴右上角，与角标共用同一个 3 秒窗口一起消失（尺寸还没拿到时先
-  显示，保证入口点得到）。
+  3 秒自动消失，切集重开一个 3 秒窗口。右上角的“原生播放”pill
+  已删（v0.0.22），角标仍是左上角那一个，3 秒行为不变。
 - 原生路：`NativePlayerState` 与 `native-player-time` 事件都带
   `videoWidth/videoHeight`（0 表示未知）；`AVPlayerEngine` 用
   `AVPlayerItem.presentationSize` 取真实尺寸，在
@@ -156,11 +167,20 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   是横屏”，点一下反而要求切回竖屏，看起来就像按钮没反应（v0.0.21
   修的就是这个）。
 - iOS 方向控制是新加的原生插件 `src-tauri/ios/Sources/OrientationPlugin.swift`
- （`UIDevice.setValue(forKey: "orientation")` +
-  `attemptRotationToDeviceOrientation()`），与播放器插件同属 `NativePlugins`
+  与播放器插件同属 `NativePlugins`
   SPM 包，前端 `src/orientation.ts`
   在 iOS 上也走 Rust 命令 `set_orientation`——iOS 的 WKWebView 不支持
   Screen Orientation API 的 `lock()`，之前 iOS 走浏览器分支会直接失败。
+- 机制（v0.0.22）：iOS 16+ 走
+  `UIWindowScene.requestGeometryUpdate(.iOS(interfaceOrientations:))`，
+  等 0.5s 后按场景实际方向验收，方向对上才 resolve，对不上 reject；
+  iOS 15 没有这个 API，才走 `UIDevice.setValue(forKey: "orientation")` +
+  `attemptRotationToDeviceOrientation()` 的 KVC 老路（`#available`
+  守卫，两条路按系统版本二选一，不叠加）。v0.0.21 及之前全量走 KVC，
+  两段用户录像里自动与手动切换从没生效过，且旧实现调完无条件
+  resolve，前端分不清成功失败——这是 v0.0.22 换机制的原因。
+  手动旋转成功时提示“已切换到横屏/竖屏”，失败时提示“无法切换屏幕
+  方向，请重试”；自动切换失败仍静默。
 - 注意：`setOrientation` 是“设置一次方向”，不是“锁定”——调完之后
   用户再转手机，系统仍可按设备方向转回来；AppDelegate 级的方向
   锁定没做。另外 iOS 上 `set_orientation(false)` 是切回竖屏，与

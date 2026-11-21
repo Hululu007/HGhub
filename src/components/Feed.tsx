@@ -13,7 +13,7 @@ import { registerBackHandler } from "../back";
 import { useVerticalSwipe } from './useVerticalSwipe';
 import type { PreparedMedia } from "../plugins/client";
 import { closeNativePlayer, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
-import { playbackEngineFallbackChain, playbackEngineLabel } from "../plugins/playbackEngine";
+import { playbackEngineFallbackChain, playbackEngineLabel, type PlaybackEngine } from "../plugins/playbackEngine";
 import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IList, ILockF, IPauseF, IPlayF, ISearch, ISettings, IVol, IVolMute } from "../icons";
 
 export type PlayerPanel = "detail" | "episodes" | "comments" | "playback";
@@ -39,7 +39,7 @@ export interface FeedProps extends FeedPresentation {
 export default function Feed({media, position, active=true, preparing=false, error="", onRetry, onPosition, onFailure, onPlaying, onStopped, onEnded, onBuffer, onWaiting,
  title="", author="", description="", score, poster:posterUrl, episodeLabel="", qualityLabel, episodeCount=0, favorite=false, onFavorite,
  playIntent=0, mode="full", onOpenDetail, panels={}, social, onPanelChange, onBack, onNext, onPrevious, onNextEpisode, onPreviousEpisode, queueIndex=0, total=1, previousPreview, nextPreview}: FeedProps) {
-  const store=useStore(), {muted,setMuted,volume,setVolume,playbackEngine}=store;
+  const store=useStore(), {muted,setMuted,volume,setVolume,playbackEngine,setPlaybackEngine}=store;
   const activeRef = useRef(active); activeRef.current = active;
   const isDesktop=!isMobile, preview=mode==="preview";
   const boxRef=useRef<HTMLDivElement>(null), videoRef=useRef<VideoHandle>(null);
@@ -58,9 +58,8 @@ export default function Feed({media, position, active=true, preparing=false, err
   const phase = preparing || playback.key !== playKey ? 'loading' : playback.phase;
   const paused = phase === 'paused', waiting = phase === 'loading';
   const setPhase = (phase: typeof playback.phase) => setPlayback({ key: playKey, phase });
-  /* 角标与“原生播放”按钮：起播后显示 3 秒自动消失；切集重开一个 3 秒窗口。
-     录像实测：分辨率角标的 3 秒定时本身是好的（约 3 秒就没了），一直不消失
-     的是右上角“原生播放 · mpv”按钮——它之前没有接这个定时器。 */
+  /* 分辨率角标：起播后显示 3 秒自动消失；切集重开一个 3 秒窗口。
+     “原生播放”入口不在这里，见更多播放选项菜单。 */
   const [overlayBadgesVisible, setOverlayBadgesVisible] = useState(false);
   const overlayHideTimer = useRef(0);
   useEffect(() => { setOverlayBadgesVisible(false); window.clearTimeout(overlayHideTimer.current); }, [playKey]);
@@ -235,7 +234,9 @@ export default function Feed({media, position, active=true, preparing=false, err
     keepPlayingThroughTransition();
     const next = !vpLandscape;
     setOrientationOverride(next);
-    void setMobileOrientation(next).catch(() => setHint("无法切换屏幕方向，请重试"));
+    void setMobileOrientation(next)
+      .then(() => setHint(next ? "已切换到横屏" : "已切换到竖屏"))
+      .catch(() => setHint("无法切换屏幕方向，请重试"));
   }, [vpLandscape, keepPlayingThroughTransition]);
 
 
@@ -317,6 +318,8 @@ export default function Feed({media, position, active=true, preparing=false, err
       </div>
       <label>播放速度<select aria-label="播放速度" value={rate} onChange={e=>setRate(Number(e.target.value))}>{[.5,.75,1,1.25,1.5,2].map(v=><option key={v} value={v}>{v}×{v===1?" · 正常":""}</option>)}</select></label>
       <label>音量<input aria-label="音量" type="range" min="0" max="1" step=".01" value={muted?0:volume} onChange={e=>{setMuted(false);setVolume(Number(e.target.value));}}/></label>
+      {platform === "ios" && <label>播放内核<select aria-label="播放内核" value={playbackEngine} onChange={e=>setPlaybackEngine(e.target.value as PlaybackEngine)}>{(["webview","avplayer","mdk","ksplayer","mpv","auto"] as const).map(engine=><option key={engine} value={engine}>{playbackEngineLabel(engine)}</option>)}</select></label>}
+      {platform === "ios" && playbackEngine !== "webview" && <button onClick={()=>{setPanel(null);void openNative();}}><IPlayF size={19}/>原生播放</button>}
       <button onClick={()=>{setPanel(null);void togglePip();}}><IPip size={19}/>画中画</button>
       <button onClick={()=>{setPanel(null);lockControls();}}><ILockF size={18}/>锁定播放控制</button>
       <details><summary>操作说明</summary><p>{isDesktop ? "空格 播放/暂停 · ← → 快退/快进 · M 静音 · F 全屏 · E 选集" : "单击显示/隐藏控制 · 双击播放/暂停 · 横滑调整进度 · 长按临时倍速 · 双指缩放画面"}</p></details>
@@ -682,18 +685,6 @@ export default function Feed({media, position, active=true, preparing=false, err
                       {formatResolution(vsize.w, vsize.h)}
                     </div>
                   )}
-                  {/* “原生播放”按钮（仅 iOS）：与分辨率角标共用同一个 3 秒窗口，
-                      起播 3 秒后一起消失；尺寸还没拿到时先显示，保证原生播放
-                      入口在任何时候都点得到；切集重开一个 3 秒窗口。 */}
-                  {platform === "ios" && media && playbackEngine !== "webview" && (overlayBadgesVisible || vsize.w <= 0 || vsize.h <= 0) && (
-                    <div className="absolute right-3 z-20" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
-                      <button aria-label="原生播放" onClick={() => void openNative()} className="pointer-events-auto rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
-                        style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
-                        原生播放 · {playbackEngineLabel(playbackEngine)}
-                      </button>
-                    </div>
-                  )}
-
                   {/* 横拖定位浮层 */}
                   {!isDesktop && scrub && (
                     <div className="absolute inset-0 z-30 flex flex-col items-center justify-center pointer-events-none" style={{ background: "rgba(0,0,0,.25)" }}>
