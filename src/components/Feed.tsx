@@ -14,7 +14,7 @@ import { useVerticalSwipe } from './useVerticalSwipe';
 import type { PreparedMedia } from "../plugins/client";
 import { closeNativePlayer, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
 import { playbackEngineFallbackChain, playbackEngineLabel, type PlaybackEngine } from "../plugins/playbackEngine";
-import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IList, ILockF, IPauseF, IPlayF, ISearch, ISettings, IVol, IVolMute } from "../icons";
+import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IList, ILockF, IPauseF, IPlayF, IRotate, ISearch, ISettings, IVol, IVolMute } from "../icons";
 
 export type PlayerPanel = "detail" | "episodes" | "comments" | "playback";
 type SurfacePanel = PlayerPanel | "more";
@@ -90,6 +90,24 @@ export default function Feed({media, position, active=true, preparing=false, err
   const setFs = store.setFs;
   const clean = store.clean;
   const setClean = store.setClean;
+
+  /* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒/关闭；15 秒无操作
+     自动消失（复制地址或点旋转会续 15 秒，3 秒不够点到复制）；切集、
+     退出清屏时关闭。 */
+  const [infoOverlay, setInfoOverlay] = useState(false);
+  const infoOverlayTimer = useRef(0);
+  const pokeInfoOverlay = () => {
+    if (!infoOverlay) return;
+    window.clearTimeout(infoOverlayTimer.current);
+    infoOverlayTimer.current = window.setTimeout(() => setInfoOverlay(false), 15000);
+  };
+  useEffect(() => { setInfoOverlay(false); }, [playKey]);
+  useEffect(() => { if (!clean) setInfoOverlay(false); }, [clean]);
+  useEffect(() => {
+    if (!infoOverlay) { window.clearTimeout(infoOverlayTimer.current); return; }
+    infoOverlayTimer.current = window.setTimeout(() => setInfoOverlay(false), 15000);
+    return () => window.clearTimeout(infoOverlayTimer.current);
+  }, [infoOverlay]);
 
   /* 追踪手机视口是否已处于物理/系统横屏状态（window.innerWidth > window.innerHeight） */
   const [vpLandscape, setVpLandscape] = useState(
@@ -238,6 +256,25 @@ export default function Feed({media, position, active=true, preparing=false, err
       .then(() => setHint(next ? "已切换到横屏" : "已切换到竖屏"))
       .catch(() => setHint("无法切换屏幕方向，请重试"));
   }, [vpLandscape, keepPlayingThroughTransition]);
+
+  /* 复制当前视频的真实播放地址（media.url）：WKWebView 里
+     navigator.clipboard 需用户手势（点按即满足），不可用时走
+     textarea + execCommand 兜底；失败给提示，不静默。 */
+  const copyPlayUrl = async () => {
+    if (!playUrl) return;
+    const done = () => { toast("已复制"); pokeInfoOverlay(); };
+    try { await navigator.clipboard.writeText(playUrl); done(); return; } catch { /* 走兜底 */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = playUrl;
+      ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      done();
+    } catch { toast("复制失败"); }
+  };
 
 
   const go=(delta:number)=>{ if(!active || controlsLocked || panel) return; if(preview) delta>0 ? onNext?.() : onPrevious?.(); else delta>0 ? onNextEpisode?.() : onPreviousEpisode?.(); };
@@ -513,10 +550,14 @@ export default function Feed({media, position, active=true, preparing=false, err
     if (Date.now() - g.t < 260 && moveDist < 16) {
       const now = Date.now();
       if (now - lastTapRef.current.time < 280) {
-        // 双击屏幕：切换暂停 / 播放
+        // 双击屏幕：仅首页预览卡片且已清屏时，唤醒/关闭信息浮层，不暂停播放；
+        // 其他情况（非清屏、播放详情页）仍切换暂停 / 播放。单击的 250ms
+        // 延迟计时器在第二下点按时已被 clearTapTimer 取消，所以一次双击
+        // 不会触发两次单击的清屏切换。
         clearTapTimer();
         lastTapRef.current.time = 0;
-        videoRef.current?.toggle();
+        if (preview && clean) setInfoOverlay((v) => !v);
+        else videoRef.current?.toggle();
       } else {
         // 单击屏幕：切换清屏模式（消除或恢复所有界面控件，只显示视频内容）
         lastTapRef.current.time = now;
@@ -678,11 +719,46 @@ export default function Feed({media, position, active=true, preparing=false, err
                       onError={() => { setErr("播放失败"); onFailure(); }}
                     />
                   </div>
-                  {/* 分辨率角标（仅 iOS）：起播后显示 3 秒自动消失；位置在标题栏下方（顶边 + 安全区 + 96px），不贴顶边。 */}
-                  {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && overlayBadgesVisible && (
+                  {/* 分辨率角标（仅 iOS）：起播后显示 3 秒自动消失；位置在标题栏下方（顶边 + 安全区 + 96px），不贴顶边。
+                      信息浮层打开时隐藏，避免与浮层左边的分辨率 pill 在同一位置重叠。 */}
+                  {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && overlayBadgesVisible && !infoOverlay && (
                     <div className="absolute left-3 z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
                       style={{ top: "calc(var(--sat, 0px) + 96px)", background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                       {formatResolution(vsize.w, vsize.h)}
+                    </div>
+                  )}
+                  {/* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒。左为分辨率
+                      （与 3 秒角标同一位置），右对称显示当前播放内核；下方是真实
+                      播放地址（点按复制）与横竖屏切换按钮。容器本身不接指针事件，
+                      只有复制行与旋转按钮可点，其余点按仍走视频手势（单击退出清屏
+                      会关掉浮层）。 */}
+                  {platform === "ios" && preview && clean && infoOverlay && playUrl && (
+                    <div className="absolute inset-x-0 z-20 pointer-events-none" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
+                      <div className="flex items-start justify-between px-3">
+                        <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          {vsize.w > 0 && vsize.h > 0 ? formatResolution(vsize.w, vsize.h) : "分辨率未知"}
+                        </span>
+                        <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          {playbackEngineLabel(playbackEngine)}
+                        </span>
+                      </div>
+                      <div className="mt-2 px-3 flex items-start gap-2">
+                        <button onClick={() => { void copyPlayUrl(); }} aria-label="复制播放地址"
+                          className="pointer-events-auto flex-1 min-w-0 text-left rounded-2xl px-3 py-2 backdrop-blur-md pressable"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          <span className="flex items-start gap-2">
+                            <span className="flex-1 min-w-0 text-[11px] hg-ink-2 break-all line-clamp-3">{playUrl}</span>
+                            <span className="shrink-0 text-[11px] font-bold hg-ink">复制</span>
+                          </span>
+                        </button>
+                        <button onClick={() => { rotateOrientation(); pokeInfoOverlay(); }} aria-label="切换横竖屏"
+                          className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          <IRotate size={19} className="hg-ink" />
+                        </button>
+                      </div>
                     </div>
                   )}
                   {/* 横拖定位浮层 */}
