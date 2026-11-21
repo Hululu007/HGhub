@@ -128,17 +128,20 @@ bash scripts/build-ios-unsigned.sh 0.0.4
 ## 分辨率显示（播放时）
 
 - WebView 路：`VideoSurface` 的 `onSize` 已回传 `videoWidth/videoHeight`，
-  `Feed.tsx` 在播放画面左上角叠一个角标（`1920×1080` 这种格式），
-  拿到尺寸才显示，未知时隐藏。
+  `Feed.tsx` 在播放画面标题栏下方叠一个角标（`1920×1080` 这种格式，
+  顶边 + 安全区 + 96px），拿到尺寸才显示，未知时隐藏；起播后显示
+  3 秒自动消失，切集重开一个 3 秒窗口。“原生播放”按钮在同一高度
+  贴右上角，不自动消失。
 - 原生路：`NativePlayerState` 与 `native-player-time` 事件都带
   `videoWidth/videoHeight`（0 表示未知）；`AVPlayerEngine` 用
   `AVPlayerItem.presentationSize` 取真实尺寸，在
-  `AVPlayerViewController.contentOverlayView` 右上角叠同款角标，
-  每 0.5s 的进度回调里刷新一次，HLS 切清晰度时能跟上。
+  `AVPlayerViewController.contentOverlayView` 右上角下方（顶边 +72px）
+  叠同款角标，每 0.5s 的进度回调里刷新一次，HLS 切清晰度时能跟上；
+  同样起播后显示 3 秒自动消失。
   MDK / KSPlayer / mpv 的 `videoSize` 目前返回 `.zero`（未接各家
   的尺寸 API），角标按未知隐藏，等 Mac 上接依赖时再按各家 API 补。
 - 真机验收时加一项：播 HLS/MP4 看角标是否出现、数值是否与实际
-  清晰度一致；切集后角标是否跟着变。
+  清晰度一致、3 秒后是否自动消失；切集后角标是否跟着变。
 
 ## 播放方向（横竖屏）
 

@@ -58,6 +58,17 @@ export default function Feed({media, position, active=true, preparing=false, err
   const phase = preparing || playback.key !== playKey ? 'loading' : playback.phase;
   const paused = phase === 'paused', waiting = phase === 'loading';
   const setPhase = (phase: typeof playback.phase) => setPlayback({ key: playKey, phase });
+  /* 分辨率角标：起播后显示 3 秒自动消失；切集重开一个 3 秒窗口。 */
+  const [resBadgeVisible, setResBadgeVisible] = useState(false);
+  const resHideTimer = useRef(0);
+  useEffect(() => { setResBadgeVisible(false); window.clearTimeout(resHideTimer.current); }, [playKey]);
+  useEffect(() => {
+    if (phase !== "playing" || vsize.w <= 0 || vsize.h <= 0) { setResBadgeVisible(false); window.clearTimeout(resHideTimer.current); return; }
+    setResBadgeVisible(true);
+    window.clearTimeout(resHideTimer.current);
+    resHideTimer.current = window.setTimeout(() => setResBadgeVisible(false), 3000);
+    return () => window.clearTimeout(resHideTimer.current);
+  }, [phase, vsize.w, vsize.h]);
   const [controlsLocked, setControlsLocked] = useState(false);
   const [rate, setRate] = useState(1);
   const [err, setErr] = useState("");
@@ -660,15 +671,15 @@ export default function Feed({media, position, active=true, preparing=false, err
                       onError={() => { setErr("播放失败"); onFailure(); }}
                     />
                   </div>
-                  {/* 分辨率角标（仅 iOS）：WebView 播出尺寸后显示“1920×1080”，未知时隐藏。 */}
-                  {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && (
-                    <div className="absolute left-3 top-3 z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
-                      style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                  {/* 分辨率角标（仅 iOS）：起播后显示 3 秒自动消失；位置在标题栏下方（顶边 + 安全区 + 96px），不贴顶边。 */}
+                  {platform === "ios" && playUrl && vsize.w > 0 && vsize.h > 0 && resBadgeVisible && (
+                    <div className="absolute left-3 z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
+                      style={{ top: "calc(var(--sat, 0px) + 96px)", background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                       {formatResolution(vsize.w, vsize.h)}
                     </div>
                   )}
                   {platform === "ios" && media && playbackEngine !== "webview" && (
-                    <div className="absolute right-3 top-3 z-20">
+                    <div className="absolute right-3 z-20" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
                       <button aria-label="原生播放" onClick={() => void openNative()} className="pointer-events-auto rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
                         style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                         原生播放 · {playbackEngineLabel(playbackEngine)}

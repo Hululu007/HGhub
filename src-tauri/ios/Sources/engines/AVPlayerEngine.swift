@@ -43,7 +43,8 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
     playerItem?.presentationSize ?? .zero
   }
 
-  /// 原生全屏里的分辨率角标（contentOverlayView 右上角），未知尺寸时隐藏。
+  /// 原生全屏里的分辨率角标（contentOverlayView 右上角下方），未知尺寸时隐藏；
+  /// 起播后显示 3 秒自动消失（与 WebView 路一致）。
   private let resolutionLabel: UILabel = {
     let label = UILabel()
     label.font = .systemFont(ofSize: 13, weight: .bold)
@@ -56,6 +57,9 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
     label.isHidden = true
     return label
   }()
+
+  /// 分辨率角标 3 秒自动消失的定时器；只在角标刚出现时起一次，0.5s 的刷新不续期。
+  private var resolutionHideTimer: Timer?
 
   var currentState: NativePlayerState {
     let position = player.map { $0.currentTime().seconds } ?? 0
@@ -139,18 +143,21 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
       self?.eventHandler?(.closed)
     }
     self.controller = controller
-    // 分辨率角标放在 AVPlayerViewController 的 contentOverlayView 右上角：
-    // 系统控制条之下、视频之上，全屏播放时一直可见；尺寸未知时隐藏。
+    // 分辨率角标放在 AVPlayerViewController 的 contentOverlayView 右上角下方：
+    // 顶部系统控制条之下、视频之上；起播显示 3 秒后自动消失。
     // contentOverlayView 是 UIView?，没有时只跳过角标，不影响起播。
     if resolutionLabel.superview == nil, let overlay = controller.contentOverlayView {
       overlay.addSubview(resolutionLabel)
       NSLayoutConstraint.activate([
         resolutionLabel.topAnchor.constraint(
-          equalTo: overlay.topAnchor, constant: 12),
+          equalTo: overlay.topAnchor, constant: 72),
         resolutionLabel.trailingAnchor.constraint(
           equalTo: overlay.trailingAnchor, constant: -12),
       ])
     }
+    resolutionHideTimer?.invalidate()
+    resolutionHideTimer = nil
+    resolutionLabel.isHidden = true
     updateResolutionLabel()
     present(controller)
 
@@ -175,15 +182,24 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
   }
 
   /// 刷新覆盖层角标：presentationSize 已知就显示“1920×1080”，否则隐藏。
-  /// 每 0.5s 的进度回调里调一次，HLS 切清晰度时也能跟上。
+  /// 每 0.5s 的进度回调里调一次，HLS 切清晰度时也能跟上；起播后显示
+  /// 3 秒自动消失（只在角标刚出现时起一次定时器，刷新不续期）。
   private func updateResolutionLabel() {
     let size = videoSize
     guard size.width > 0 && size.height > 0 else {
+      resolutionHideTimer?.invalidate()
+      resolutionHideTimer = nil
       resolutionLabel.isHidden = true
       return
     }
     resolutionLabel.text = " \(Int(size.width))×\(Int(size.height)) "
-    resolutionLabel.isHidden = false
+    if resolutionLabel.isHidden {
+      resolutionLabel.isHidden = false
+      resolutionHideTimer?.invalidate()
+      resolutionHideTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+        self?.resolutionLabel.isHidden = true
+      }
+    }
   }
 
   func play() {
@@ -218,6 +234,8 @@ final class AVPlayerEngine: NSObject, NativePlayerEngine {
   }
 
   func close() {
+    resolutionHideTimer?.invalidate()
+    resolutionHideTimer = nil
     if let observer = timeObserver {
       player?.removeTimeObserver(observer)
       timeObserver = nil
