@@ -513,6 +513,24 @@ impl InnerWebView {
           ns_view.setBackgroundColor(Some(&color));
         }
         webview.setBackgroundColor(Some(&color));
+        // HGHUB-PATCH (v0.0.18 candidate, NOT yet pushed — awaiting the user's
+        // version confirmation): the 80pt strip below the page is the
+        // scrollView's own background, not the webview's. The page is 844pt
+        // tall in a 926pt webview, so the bottom ~82pt of the scrollView
+        // shows its backgroundColor, which defaults to white — setting the
+        // webview's (and parent view's) background black left the strip
+        // white on the user's phone in v0.0.16. Paint the scrollView black
+        // too, and stop UIKit from insetting it for the safe area, so the
+        // layout viewport is the full webview and the page can reach the
+        // screen bottom instead of stopping at 844pt. The app already pads
+        // for the safe areas in CSS (--sat / env(safe-area-inset-*)),
+        // so a full-height viewport does not push content under the
+        // Dynamic Island or the home indicator.
+        let scroll_view: Retained<UIScrollView> = objc2::msg_send![&webview, scrollView];
+        scroll_view.setBackgroundColor(Some(&color));
+        scroll_view.setContentInsetAdjustmentBehavior(
+          objc2_ui_kit::UIScrollViewContentInsetAdjustmentBehavior::Never,
+        );
         webview
       };
 

@@ -95,3 +95,56 @@ and blends with the dark UI instead of a white bar.
 
 Keep this change on upgrade for the same reason: the app is dark-themed
 and must never show a system-light background.
+
+---
+
+# iOS scrollView background + contentInsetAdjustmentBehavior (v0.0.18 candidate, NOT yet pushed)
+
+Third change in this vendored copy, same file (`src/wkwebview/mod.rs`,
+iOS `WebView::new` branch). Prepared 2026-11-21 19:36 while waiting for
+the user to confirm which version they device-tested; it ships only if
+the user confirms the v0.0.16 white-strip fix did not work.
+
+## Why the v0.0.16 fix was not enough (hypothesis)
+
+The user's frame-by-frame video analysis (2026-11-21 19:30) showed the
+page still ends at 844pt of a 926pt screen, with a pure-white 80pt strip
+below the tab bar. The v0.0.16 black fallback sets the *webview's* (and
+its parent view's) background, but the area below the page lives inside
+the WKWebView's *scrollView*, which has its own `backgroundColor`
+(default white) — the webview's `setBackgroundColor` does not paint it.
+Separately, the layout viewport itself is inset by the safe areas
+(`100lvh` still resolves to 844pt), because UIKit insets the scrollView
+for the safe area by default (`contentInsetAdjustmentBehavior`
+`.automatic`).
+
+## The change
+
+In the iOS `WebView::new` branch, right after
+`webview.setBackgroundColor(Some(&color))`:
+
+1. `scroll_view.setBackgroundColor(Some(&color))` — paint the scrollView
+   black too, so any area the page does not cover reads as black.
+2. `scroll_view.setContentInsetAdjustmentBehavior(...::Never)` — stop
+   UIKit from insetting the scrollView for the safe area, so the layout
+   viewport is the full webview and the page can reach the screen bottom.
+
+Safety: the app already pads for the safe areas in CSS (`--sat` =
+`max(env(safe-area-inset-top), 12px)` on the root, headers use
+`calc(var(--sat) + ...)`, the bottom nav uses
+`env(safe-area-inset-bottom)`), and `env()` values come from the view's
+safeAreaInsets, which UIKit sets regardless of the scrollView's
+adjustment behavior — so a full-height viewport does not push content
+under the Dynamic Island or the home indicator. The page does not scroll
+inside the WebView's scrollView (body `overflow: hidden`, bouncing
+already disabled), so `.never` changes nothing about scrolling.
+
+## Verification status
+
+APIs confirmed present in `objc2-ui-kit 0.3.2`:
+`UIScrollViewContentInsetAdjustmentBehavior::Never`,
+`setContentInsetAdjustmentBehavior`, `setBackgroundColor` on `UIView`.
+The iOS branch cannot be compiled on this Linux machine (same as all
+previous native changes) — CI is the only compile check, then the
+user's device test proves whether the strip is gone and the page fills
+the screen.
