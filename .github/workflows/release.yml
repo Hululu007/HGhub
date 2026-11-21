@@ -1,6 +1,10 @@
 name: Release
 
-# 仅推送版本 tag（如 v1.2.3）时构建所有平台，并统一发布到该 tag 的 Release。
+# 仅推送版本 tag（如 v1.2.3）时构建并发布到该 tag 的 Release。
+# 2026-11-21 起只跑 iOS：免费额度每月 2000 分钟，macOS 按 10 倍计费，
+# 一轮全平台约 240 分钟，当天 19 轮已烧完额度。Windows/Android/macOS/Linux
+# 四个任务用 if: false 暂关（代码都在，删掉那行就恢复）；release 任务
+# 只等 ios，iOS 成功后自动把 IPA 发到 Release，不用再手动建。
 on:
   push:
     tags: ["v*"]
@@ -19,6 +23,7 @@ jobs:
   # ================= Windows：NSIS 安装包 + 便携包 =================
   windows:
     name: Windows (setup + portable)
+    if: false  # 暂关：只打 iOS 省额度，恢复时删掉这行
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +77,7 @@ jobs:
   # ================= Android：按 ABI 分包 + 签名 =================
   android:
     name: Android (split per ABI)
+    if: false  # 暂关：只打 iOS 省额度，恢复时删掉这行
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -167,6 +173,7 @@ jobs:
   # ================= macOS：三种架构的 DMG + APP =================
   macos:
     name: macOS (${{ matrix.name }})
+    if: false  # 暂关：只打 iOS 省额度，恢复时删掉这行
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -322,6 +329,7 @@ jobs:
   # ================= Linux：DEB + AppImage =================
   linux:
     name: Linux (deb + appimage)
+    if: false  # 暂关：只打 iOS 省额度，恢复时删掉这行
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -379,7 +387,8 @@ jobs:
   # ================= 发布 =================
   release:
     name: Publish GitHub Release
-    needs: [windows, android, macos, ios, linux]
+    # 只等 ios：其他平台已暂关；iOS 成功后自动发 Release（含 IPA）。
+    needs: [ios]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -401,19 +410,11 @@ jobs:
             ## 初期版本说明
             HGhub 目前处于初期开发阶段，功能和插件接口仍在完善，使用过程中可能遇到问题，欢迎反馈。
 
-            **iOS、macOS 安装包尚未验证可用性。提供构建产物仅供尝试，不代表已完成安装、启动或播放验证。**
+            **iOS 安装包尚未验证可用性。提供构建产物仅供尝试，不代表已完成安装、启动或播放验证。**
 
             ## 下载说明
-            - Windows：安装版 `.exe` 或便携版 `_portable.zip`。
-            - Android：根据设备架构选择签名 `.apk`。
-            - macOS（可用性未验证）：选择 `arm64`、`x64` 或 `universal` 的 `.dmg` / `.app.tar.gz`。
-            - iOS（可用性未验证）：`_ios.ipa` 为未签名包，需要通过 TrollStore 或自行签名安装。
-            - Linux：`.deb` 或 `.AppImage`。
-
-            macOS 构建未经过 Apple 开发者证书签名及公证；若系统拦截，请确认来源后执行：
-            ```bash
-            sudo xattr -rd com.apple.quarantine /Applications/HGhub.app
-            ```
+            - iOS：`_ios.ipa` 为未签名包，需要通过 TrollStore 或自行签名安装。
+            - Windows / Android / macOS / Linux 暂未构建（省 CI 额度），需要时恢复对应任务即可。
           files: artifacts/*
           generate_release_notes: true
           fail_on_unmatched_files: true
