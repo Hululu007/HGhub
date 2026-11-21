@@ -32,6 +32,17 @@ if [[ ! -s "$ADDR_FILE" ]]; then
   exit 1
 fi
 
+# 前端与图标必须在 xcodebuild 之前就位，不能指望 beforeBuildCommand：
+# 后台的 `tauri ios build --open` 只起 options server，beforeBuildCommand
+# （pnpm build）要等到 Xcode 的 "Build Rust Code" 脚本阶段才跑，而那个阶段
+# 在 "Copy Bundle Resources" 之后 —— 资源拷贝发生时 gen/apple/assets 还是
+# 空的，包里的前端就是空的；图标编译（actool）同样在脚本阶段之前。
+# v0.0.11 就是这么打出空前端 + 模板默认图标的。
+pnpm build
+rm -rf src-tauri/gen/apple/assets
+cp -R dist src-tauri/gen/apple/assets
+node scripts/sync-ios-icons.mjs
+
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.
 XCODE_TOOLCHAIN="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain"
