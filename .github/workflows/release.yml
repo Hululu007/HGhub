@@ -1,6 +1,8 @@
 name: Release
 
 # 仅推送版本 tag（如 v1.2.3）时构建并发布到该 tag 的 Release。
+# 发布流程：构建成功后先建草稿 Release（含 IPA），用户真机测试 OK
+# 后再手动发布，不自动公开（2026-11-21 用户要求）。
 # 2026-11-21 起只跑 iOS：免费额度每月 2000 分钟，macOS 按 10 倍计费，
 # 一轮全平台约 240 分钟，当天 19 轮已烧完额度。Windows/Android/macOS/Linux
 # 四个任务用 if: false 暂关（代码都在，删掉那行就恢复）；release 任务
@@ -387,7 +389,8 @@ jobs:
   # ================= 发布 =================
   release:
     name: Publish GitHub Release
-    # 只等 ios：其他平台已暂关；iOS 成功后自动发 Release（含 IPA）。
+    # 只等 ios；先建草稿 Release（含 IPA），用户真机测试 OK 后再手动
+    # 发布，不自动公开。
     needs: [ios]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -406,6 +409,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: HGhub ${{ github.ref_name }}
+          draft: true
           body: |
             ## 初期版本说明
             HGhub 目前处于初期开发阶段，功能和插件接口仍在完善，使用过程中可能遇到问题，欢迎反馈。
