@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "ios")]
 use serde_json::{json, Value};
+#[cfg(target_os = "ios")]
+use tauri::Manager;
 
 /// Swift 侧的插件入口（src-tauri/ios/NativePlayerPlugin.swift 里的
 /// `@_cdecl("init_plugin_native_player")`）。写法与官方 tauri-plugin-dialog

@@ -226,7 +226,13 @@ jobs:
           BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"
           mkdir -p artifacts
           cp "$BUNDLE"/dmg/*.dmg "artifacts/HGhub_${V}_${{ matrix.arch }}.dmg"
-          tar -czf "artifacts/HGhub_${V}_${{ matrix.arch }}.app.tar.gz" -C "$BUNDLE/macos" "HGhub.app"
+          # 产品名改名后 .app 文件名会跟着变（改名前是 HGhub.app），不写死名字，
+          # 直接取构建产物里唯一的 .app，避免改名后找不到包。
+          APP_DIR="$BUNDLE/macos"
+          APP_COUNT=$(find "$APP_DIR" -maxdepth 1 -name "*.app" -type d | wc -l)
+          if [ "$APP_COUNT" -ne 1 ]; then echo "Expected exactly one .app in $APP_DIR, found $APP_COUNT" >&2; ls -la "$APP_DIR" >&2 || true; exit 1; fi
+          APP_NAME=$(basename "$(find "$APP_DIR" -maxdepth 1 -name "*.app" -type d)")
+          tar -czf "artifacts/HGhub_${V}_${{ matrix.arch }}.app.tar.gz" -C "$APP_DIR" "$APP_NAME"
           ls -lh artifacts/
 
       - name: 上传构建产物
