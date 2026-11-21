@@ -36,6 +36,14 @@ init 时的 `.xcodeproj` 只包含当时已有的文件，`tauri ios build` 不�
 就是这么挂的）。CI 的 release.yml iOS 任务里，同步步骤后有一单独步骤
 在 `src-tauri/gen/apple` 下跑 `xcodegen generate`。
 
+链接说明：`src-tauri/Cargo.toml` 的 `[lib] crate-type` 含 `cdylib`，而
+Swift 插件符号只由 Xcode 编译 Swift 时才产生，cargo 在 Xcode 的
+Build Rust Code 阶段链接 cdylib 时它们还不存在。仓库根目录的
+`.cargo/config.toml` 给两个 iOS target 加了
+`-C link-args=-Wl,-undefined,dynamic_lookup`，让这次链接允许未定义
+符号（最终 App 链接的是 staticlib + Xcode 编出的 Swift 对象，符号在
+那里解析；cdylib 在 iOS 上只是构建副产物）。Android / 桌面构建不受影响。
+
 ## 引擎选择
 
 存在 store 的 `playbackEngine`（localStorage `hpp.playbackEngine`），

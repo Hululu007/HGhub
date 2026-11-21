@@ -1,0 +1,14 @@
+# iOS 链接说明：src-tauri/Cargo.toml 的 [lib] crate-type 含 cdylib，
+# 而原生插件的 Swift 符号（_init_plugin_native_player /
+# _init_plugin_orientation）只由 Xcode 编译 Swift 时才产生——cargo
+# 在 Xcode 的 Build Rust Code 阶段链接 cdylib 时它们还不存在，
+# 默认链接会报 Undefined symbols。-undefined dynamic_lookup
+# 让这次链接允许未定义符号（最终 App 链接的是 staticlib +
+# Xcode 编出的 Swift 对象，符号在那里解析；cdylib 本身在 iOS
+# 上只是构建副产物，不会被加载）。只对 iOS target 生效，
+# Android / 桌面构建不受影响。
+[target.aarch64-apple-ios]
+rustflags = ["-C", "link-args=-Wl,-undefined,dynamic_lookup"]
+
+[target.aarch64-apple-ios-sim]
+rustflags = ["-C", "link-args=-Wl,-undefined,dynamic_lookup"]
