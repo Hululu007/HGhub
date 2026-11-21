@@ -1,6 +1,8 @@
 mod commands;
 mod logging;
 mod native_player;
+#[cfg(target_os = "ios")]
+mod webkit_bundle;
 #[cfg(target_os = "macos")]
 mod macos_titlebar;
 mod network_policy;
@@ -21,6 +23,11 @@ use tauri::Manager;
 tauri::ios_plugin_binding!(init_plugin_orientation);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // iOS：先注册 WebKit 的 CFBundle（见 webkit_bundle.rs），否则 Wry::init
+    // 里的 webview_version() 会在 bundleWithIdentifier 时闪退（iOS 16.6.1
+    // 真机 .ips 已证实）。必须在 Builder::run() 之前。
+    #[cfg(target_os = "ios")]
+    webkit_bundle::preload();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "android")]
     let builder = builder.plugin(tauri::plugin::Builder::<tauri::Wry, ()>::new("web-login")

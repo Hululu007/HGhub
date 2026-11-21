@@ -65,6 +65,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
 
+# iOS 启动时预注册 WebKit 的 CFBundle（见 src/webkit_bundle.rs）。
+# objc2-foundation 已是 wry 的间接依赖，版本与 Cargo.lock 一致；只开启用到的 feature。
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSString"] }
+
 # Avoid invalid incremental object references on filesystems without hard links.
 [profile.dev]
 incremental = false
