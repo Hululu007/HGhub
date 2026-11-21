@@ -29,7 +29,12 @@ React（Feed.tsx 原生播放入口按钮）
 同步脚本：`scripts/sync-ios-native-player.mjs` 把 `src-tauri/ios/` 的 Swift
 源码拷进 `src-tauri/gen/apple/Sources/NativePlayer/`。`gen/apple/` 由
 `pnpm tauri ios init --ci` 生成，不进版本控制；`gen/apple` 不存在时脚本
-打印提示并正常退出 0，不中断构建。
+打印提示并正常退出 0，不中断构建。**同步后必须重新生成 Xcode 工程**：
+init 时的 `.xcodeproj` 只包含当时已有的文件，`tauri ios build` 不会重新
+生成工程，不重跑 `xcodegen generate` 的话新文件根本不编译，链接时报
+`_init_plugin_native_player` / `_init_plugin_orientation` 找不到（v0.0.6
+就是这么挂的）。CI 的 release.yml iOS 任务里，同步步骤后有一单独步骤
+在 `src-tauri/gen/apple` 下跑 `xcodegen generate`。
 
 ## 引擎选择
 
@@ -67,13 +72,14 @@ AVPlayer → MDK → KSPlayer → mpv → 回落 WebView。
 git clone <你的 fork> HGhub && cd HGhub
 pnpm install --frozen-lockfile
 
-# 2. 生成 iOS 工程，再同步 Swift 源码
+# 2. 生成 iOS 工程，再同步 Swift 源码，然后重新生成工程收录新文件
 pnpm tauri ios init --ci
 node scripts/sync-ios-native-player.mjs
 # 检查 gen/apple/Sources/NativePlayer/ 下有 NativePlayerPlugin.swift、OrientationPlugin.swift + engines/ 四个文件。
-# 收录问题不用手动处理：Tauri 的 iOS 模板 project.yml 里 target 的 sources 是 `- path: Sources`，
-# XcodeGen 会把 Sources/ 下的所有文件（含子目录）都编进工程，tauri ios build 时重新生成工程即收录。
-# CI 的 release.yml iOS 任务里也在 init 后跑了这个同步脚本。
+# 同步完必须重跑 xcodegen：init 时的 .xcodeproj 只含当时已有的文件，tauri ios build 不会重新生成工程，
+# 不重生成新文件根本不编译，链接报 _init_plugin_native_player / _init_plugin_orientation 找不到（v0.0.6 已验证）。
+cd src-tauri/gen/apple && xcodegen generate && cd ../../..
+# CI 的 release.yml iOS 任务里，同步步骤后也有一单独的 xcodegen 重新生成步骤。
 
 # 3. 按要测的引擎装依赖（AVPlayer 零依赖，跳过这步就能先测桥）
 #    MDK：CocoaPods pod 'mdk' 或 SPM swift-mdk，并向作者申请 key

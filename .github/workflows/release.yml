@@ -302,6 +302,15 @@ jobs:
       - name: 同步 iOS 原生 Swift 源码（原生播放器 + 方向插件）
         run: node scripts/sync-ios-native-player.mjs
 
+      - name: 重新生成 Xcode 工程（收录新同步的 Swift 源码）
+        run: |
+          # init 时生成的 .xcodeproj 只包含当时已有的文件；同步步骤后加的
+          # Sources/NativePlayer/*.swift 必须重新跑 xcodegen 才会编进工程。
+          # tauri ios build 不会重新生成工程，不加这步链接时会报
+          # _init_plugin_native_player / _init_plugin_orientation 找不到
+          # （v0.0.6 就是这么挂的：Rust 编过了，链接缺符号）。
+          cd src-tauri/gen/apple && xcodegen generate
+
       - name: 构建 iOS 应用与打包 IPA
         shell: bash
         env:
