@@ -106,6 +106,8 @@ pub fn run() {
             commands::adjust_brightness,
             commands::adjust_volume,
             commands::share_file,
+            commands::open_senplayer,
+            commands::export_to_photos,
             download::download_media,
             download::list_downloads,
             download::delete_download,

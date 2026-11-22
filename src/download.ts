@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { clearLocalNativePlayback, markLocalNativePlayback, openNativePlayer } from "./plugins/nativePlayer";
 
 /** Rust 侧 download-progress 事件的载荷（见 src-tauri/src/download.rs）。
  * total（字节）直链文件才有；segmentsDone/segmentsTotal 是 HLS 的分片进度。 */
@@ -39,6 +40,44 @@ export async function downloadMedia(
     return await invoke<DownloadResult>("download_media", { url, name, downloadId });
   } finally {
     unlisten();
+  }
+}
+
+/** 导出已下载的文件到相册：iOS 用 PHPhotoLibrary 直接存视频（见
+ * SharePlugin.saveToPhotos），不用走分享面；其他平台不支持。 */
+export async function exportDownloadToPhotos(path: string): Promise<void> {
+  await invoke("export_to_photos", { path });
+}
+
+/** AVPlayer 能直接播的本地文件扩展名。HLS 拼合的 .ts 不在内——
+ * AVPlayer / WebView 都播不了裸 .ts 文件（只有 .m3u8 清单能播），
+ * 这类文件点按会提示改用导出、到 SenPlayer 里打开。 */
+const NATIVE_PLAYABLE_EXT = /\.(mp4|mov|m4v)$/i;
+
+/** 点播一个已下载文件：用 iOS 原生 AVPlayer 全屏播本地文件，不走
+ * 插件会话（不占在线流、不写播放进度）。文件路径拼成 file:// URL
+ * 交给原生播放器；失败时清掉本地标记并把错抛给调用方提示。 */
+export async function playDownloadedFile(file: DownloadedFile): Promise<void> {
+  if (!isTauri()) throw new Error("仅在 App 内可用");
+  if (!NATIVE_PLAYABLE_EXT.test(file.name)) {
+    throw new Error("这是 HLS 拼合的 .ts 文件，本机播不了，请点导出、用 SenPlayer 打开");
+  }
+  const fileUrl = `file://${file.path.split("/").map(encodeURIComponent).join("/")}`;
+  markLocalNativePlayback();
+  try {
+    await openNativePlayer({
+      engine: "avplayer",
+      url: fileUrl,
+      sessionId: `local-${file.name}`,
+      position: 0,
+      rate: 1,
+      volume: 1,
+      muted: false,
+      title: file.name,
+    });
+  } catch (error) {
+    clearLocalNativePlayback();
+    throw error;
   }
 }
 

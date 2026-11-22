@@ -67,6 +67,22 @@ export function isNativePlayerAvailable(): boolean {
   return platform === "ios";
 }
 
+/** 本地已下载文件正在走原生播放（AVPlayer）：Feed 里注册的
+ * native-player-closed / native-player-error 回落逻辑（回到当前
+ * 在播的在线流）这时不适用——关掉就是回到下载管理，不回流。
+ * DownloadManager 点播前置位，Feed 的关闭/报错回调里读到就清位
+ * 并跳过回落。模块级标记即可，两边共用同一个原生播放器。 */
+let localPlayback = false;
+export function markLocalNativePlayback(): void {
+  localPlayback = true;
+}
+export function isLocalNativePlayback(): boolean {
+  return localPlayback;
+}
+export function clearLocalNativePlayback(): void {
+  localPlayback = false;
+}
+
 export function openNativePlayer(options: NativePlayerOpenOptions): Promise<NativePlayerState> {
   return invoke<NativePlayerState>("native_player_open", {
     engine: options.engine,

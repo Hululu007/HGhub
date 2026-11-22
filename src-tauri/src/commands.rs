@@ -120,6 +120,45 @@ pub async fn share_file(path: String, plugin: tauri::State<'_, SharePlugin>) -> 
         .map_err(|error| error.to_string())
 }
 
+/// 跳转 SenPlayer 播放：只接受 senplayer:// 地址（前端按公开 Scheme
+/// senplayer://x-callback-url/play?url=…&name=… 拼好传进来），iOS 经
+/// SharePlugin.openSenPlayer 用 canOpenURL 判是否装了 SenPlayer，未装
+/// 时明确报错，不静默无反应。open_external_media 走不了这条路——它
+/// 只放行 http/https 等协议，senplayer:// 会被拦下。
+/// 回环播放地址须播着才不断流，见 src/senplayer.ts。
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn open_senplayer(url: String, plugin: tauri::State<'_, SharePlugin>) -> Result<(), String> {
+    if !url.starts_with("senplayer://") {
+        return Err("不是 SenPlayer 地址".into());
+    }
+    plugin.0.run_mobile_plugin_async::<()>("openSenPlayer", serde_json::json!({"url": url})).await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn open_senplayer(url: String) -> Result<(), String> {
+    let _ = url;
+    Err("SenPlayer 跳转仅在 iOS App 内可用".into())
+}
+
+/// 导出已下载的文件到相册：iOS 经 SharePlugin.saveToPhotos 用
+/// PHPhotoLibrary 直接存视频；其他平台不支持。
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn export_to_photos(path: String, plugin: tauri::State<'_, SharePlugin>) -> Result<(), String> {
+    plugin.0.run_mobile_plugin_async::<()>("saveToPhotos", serde_json::json!({"path": path})).await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn export_to_photos(path: String) -> Result<(), String> {
+    let _ = path;
+    Err("保存到相册仅在 iOS App 内可用".into())
+}
+
 #[cfg(not(target_os = "ios"))]
 #[tauri::command]
 pub fn share_file(app: tauri::AppHandle, path: String) -> Result<(), String> {

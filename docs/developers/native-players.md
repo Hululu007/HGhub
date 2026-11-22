@@ -420,7 +420,7 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   锁定没做。另外 iOS 上 `set_orientation(false)` 是切回竖屏，与
   Android 的“恢复之前方向”语义不同。
 
-## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36）
+## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36；下载管理进更多菜单 + 导出 + 点播 + SenPlayer 跳转 v0.0.37）
 
 - 入口：详情页“更多播放选项”菜单与“影片信息”面板里各有一个“下载”
   按钮，播放器上（全屏右上角与非全屏顶栏、更多按钮旁）还有一个下载
@@ -475,6 +475,34 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   倒序，跳过 `.part` 未完成文件），每行显示文件名、大小与日期，可分
   享（系统分享面，导出）或删除（点两下确认；`delete_download` 只允许
   删 Downloads 目录里的文件，路径须落在该目录下）。
+- 下载管理进更多菜单、导出、点播（v0.0.37）：详情页与首页的“更多播放
+  选项”菜单里新增“下载管理”入口，打开同一份 `DownloadManager`（新
+  面板 `downloads`，不走 `onPanelChange`）；设置里的下载管理不变。
+  每行加导出图标，点按展开两个去向：保存到相册（新命令
+  `export_to_photos`，iOS 经 SharePlugin 的 `saveToPhotos` 用
+  `PHPhotoLibrary` 直接存视频，`NSPhotoLibraryAddUsageDescription`
+  由 `scripts/sync-ios-photo-library.mjs` 在构建时写进 Info.plist，
+  缺了这个键首次保存会崩溃；其他平台不支持）与保存到文件（走原来的
+  系统分享面，选“存储到‘文件’”）。点按文件名（或行首播放图标）直接
+  在本机播：`playDownloadedFile` 用原生 AVPlayer（`openNativePlayer`，
+  engine `avplayer`，`file://` URL，不走插件会话、不写播放进度），
+  关掉后回到下载管理，不回落到在线流（`nativePlayer.ts` 里的本地标记，
+  Feed 的关闭/报错回落回调读到就跳过）。HLS 拼合的 `.ts` 本机播不了
+  （AVPlayer / WebView 都播不了裸 .ts，只有 `.m3u8` 清单能播），点按
+  明确提示改用导出、到 SenPlayer 里打开；能播的是 `.mp4` / `.mov` /
+  `.m4v`。
+- SenPlayer 跳转（v0.0.37）：用 SenPlayer 的公开 URL Scheme
+  `senplayer://x-callback-url/play?url=<编码后的播放地址>&name=<标题>`
+  （goplexcli、OrivioTV、lampa 的外部播放器表都是同一格式，只传
+  url + name）。入口四处：首页清屏浮层（下载按钮旁）、详情页顶栏与
+  全屏右上角（下载按钮旁）、“更多播放选项”菜单（“SenPlayer 播放”）。
+  实现是新命令 `open_senplayer`（`commands.rs`），iOS 经 SharePlugin
+  的 `openSenPlayer` 用 `canOpenURL` 先判是否装了，未装明确报错，不
+  静默无反应；`LSApplicationQueriesSchemes: senplayer` 由
+  `scripts/sync-ios-senplayer.mjs` 在构建时写进 Info.plist，不登记时
+  `canOpenURL` 永远返回 false。`open_external_media` 走不了这条路，
+  它只放行 http/https 等协议。地址过期先拦下；回环地址与浏览器跳转
+  同理，须播着（有声音）切出才不断流。Swift 文件未编译（本机无 Xcode）。
 - 真机验收（待 Mac / 设备）：点“下载”后进度走到 100%，文件在
   “文件”App 里能找到、能播；HLS 点播能完整拼出来；直播存的是当前
   窗口的片段；点“分享”能弹出系统分享面、能存到“文件”；设置里下载
@@ -482,4 +510,8 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   时点下载不再直接报错，而是先显示“刷新地址…”再自动重下；播放器上
   （全屏右上角与非全屏顶栏）有下载图标按钮，点按同样开始下载。v0.0.36：
   首页清屏后双击，浮层里出现下载图标，点按能下载当前正在播的视频。
-  Swift 文件未编译（本机无 Xcode），与上面其他插件一样。
+  v0.0.37：更多播放选项里能打开下载管理；下载管理里点按文件名能播
+  （.mp4），.ts 点按提示改用导出；导出到相册能在相册里找到视频，导
+  出到文件能在“文件”App 里找到；首页浮层、详情页顶栏、全屏栏、更多
+  菜单都有 SenPlayer 按钮，装了 SenPlayer 时点按能跳过去播，播着切
+  出不断流，没装时提示未安装。Swift 文件未编译（本机无 Xcode），与上面其他插件一样。

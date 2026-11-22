@@ -16,12 +16,14 @@ import PlaybackLock from "./PlaybackLock";
 import { registerBackHandler } from "../back";
 import { useVerticalSwipe } from './useVerticalSwipe';
 import type { PreparedMedia } from "../plugins/client";
-import { closeNativePlayer, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
+import { closeNativePlayer, clearLocalNativePlayback, isLocalNativePlayback, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
+import DownloadManager from "../plugins/DownloadManager";
+import { openInSenPlayer } from "../senplayer";
 import { playbackEngineFallbackChain, playbackEngineLabel, type PlaybackEngine } from "../plugins/playbackEngine";
 import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IDownload, IInfo, IList, ILockF, IPauseF, IPlayF, IRotate, ISearch, ISettings, IVol, IVolMute } from "../icons";
 
 export type PlayerPanel = "detail" | "episodes" | "comments" | "playback";
-type SurfacePanel = PlayerPanel | "more" | "info";
+type SurfacePanel = PlayerPanel | "more" | "info" | "downloads";
 export interface FeedPresentation {
   playIntent?: number; mode?: "preview" | "full"; onOpenDetail?: () => void;
   title?: string; author?: string; description?: string; score?: number; poster?: string;
@@ -79,7 +81,7 @@ export default function Feed({media, position, active=true, preparing=false, err
   const [err, setErr] = useState("");
   /* 取播放地址失败后手动重试：递增即重新触发拉取 */
   const [panel, setPanel] = useState<SurfacePanel | null>(null);
-  useEffect(() => { if (panel && panel !== "more" && panel !== "info") onPanelChange?.(panel); }, [panel, onPanelChange]);
+  useEffect(() => { if (panel && panel !== "more" && panel !== "info" && panel !== "downloads") onPanelChange?.(panel); }, [panel, onPanelChange]);
   const resumeAfterOverlay = useRef(false);
   useEffect(() => {
     if (!active) resumeAfterOverlay.current = !paused;
@@ -330,6 +332,25 @@ export default function Feed({media, position, active=true, preparing=false, err
     } catch { toast("复制失败"); }
   };
 
+  /* 跳转 SenPlayer 播放（首页浮层、详情页顶栏/全屏栏、更多播放选项）：
+     把当前播放地址按 SenPlayer 的公开 Scheme 交过去，未装 SenPlayer
+     时 Swift 侧明确报错。地址过期先拦下（须重新播放拿新地址）；
+     回环地址只在播着（有声音）切出时不断流，暂停时 SenPlayer 那边
+     拿不到流——提示与复制地址同一口径。 */
+  const openSenPlayer = async () => {
+    if (!playUrl) return;
+    if (media?.playback.expiresAt && media.playback.expiresAt <= Date.now()) {
+      toast("地址已过期，请重新播放后再打开");
+      return;
+    }
+    try {
+      await openInSenPlayer(playUrl, title);
+      toast(phase !== "playing" ? "已跳转 SenPlayer，须先播放再切出" : muted ? "已跳转 SenPlayer，须先取消静音再切出" : "已跳转 SenPlayer");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "打开 SenPlayer 失败");
+    }
+  };
+
   /* 资源下载（更多播放选项 / 影片信息 / 播放器上的“下载”按钮）：经回环地址取流存到
      文稿/Downloads，直链文件直接存，HLS 拼分片；直播只存当前窗口的片段。
      下载中按钮显示进度，完成后变“已下载 · 分享”，点按弹系统分享面
@@ -429,8 +450,14 @@ export default function Feed({media, position, active=true, preparing=false, err
     void Promise.all([
       onNativePlayerTime((e) => { nativePosition.current = e.position; setTime(e.position); nativeCallbacks.current.onPosition(e.position, e.duration); }),
       onNativePlayerEnded((e) => { nativePosition.current = e.position; nativeCallbacks.current.onEnded?.(); }),
-      onNativePlayerError((e) => { toast(e.message || "原生播放失败，已回落 WebView"); fallbackToWebView(nativePosition.current); }),
-      onNativePlayerClosed((e) => { fallbackToWebView(e.position); }),
+      onNativePlayerError((e) => {
+        if (isLocalNativePlayback()) { clearLocalNativePlayback(); toast(e.message || "本地文件播放失败"); return; }
+        toast(e.message || "原生播放失败，已回落 WebView"); fallbackToWebView(nativePosition.current);
+      }),
+      onNativePlayerClosed((e) => {
+        if (isLocalNativePlayback()) { clearLocalNativePlayback(); return; }
+        fallbackToWebView(e.position);
+      }),
     ]).then((u) => { if (live) listeners = u; else u.forEach((l) => void l.unregister()); });
     return () => { live = false; listeners.forEach((l) => void l.unregister()); };
   }, []);
@@ -473,8 +500,8 @@ export default function Feed({media, position, active=true, preparing=false, err
     };window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);
   },[active,controlsLocked,panel,time,onNext,onPrevious,fs,preview,onNextEpisode,onPreviousEpisode]);
   const showDetails = () => { if (!isDesktop && fs) { setPanel('detail'); return; } setPanel(null); if (onOpenDetail) onOpenDetail(); else setPanel("detail"); };
-  const panelContent=panel && <><header className="legacy-panel-heading"><h2>{{detail:"作品详情",episodes:"选集",comments:"评论",playback:"画质与线路",more:"更多播放选项",info:"影片信息"}[panel]}</h2><button aria-label="关闭面板" onClick={()=>setPanel(null)}><IClose size={18}/></button></header><div className="legacy-panel-body">
-    {panel === "more" ? <div className="hg-more-menu">
+  const panelContent=panel && <><header className="legacy-panel-heading"><h2>{{detail:"作品详情",episodes:"选集",comments:"评论",playback:"画质与线路",more:"更多播放选项",info:"影片信息",downloads:"下载管理"}[panel]}</h2><button aria-label="关闭面板" onClick={()=>setPanel(null)}><IClose size={18}/></button></header><div className="legacy-panel-body">
+    {panel === "downloads" ? <DownloadManager/> : panel === "more" ? <div className="hg-more-menu">
       <div className="hg-more-shortcuts">
         <button onClick={showDetails}><IList size={22}/>作品详情</button>
         <button onClick={()=>setPanel("info")}><IInfo size={22}/>影片信息</button>
@@ -487,9 +514,11 @@ export default function Feed({media, position, active=true, preparing=false, err
       {platform === "ios" && <label>播放内核<select aria-label="播放内核" value={playbackEngine} onChange={e=>setPlaybackEngine(e.target.value as PlaybackEngine)}>{(["webview","avplayer","mdk","ksplayer","mpv","auto"] as const).map(engine=><option key={engine} value={engine}>{playbackEngineLabel(engine)}</option>)}</select></label>}
       <label>画面设置<select aria-label="画面设置" value={pictureMode} onChange={e=>setPictureMode(e.target.value as PictureMode)}><option value="fit">适应</option><option value="stretch">拉伸</option><option value="fill">铺满</option><option value="16:9">16:9</option><option value="4:3">4:3</option></select></label>
       {platform === "ios" && playbackEngine !== "webview" && <button onClick={()=>{setPanel(null);void openNative();}}><IPlayF size={19}/>原生播放</button>}
+      {platform === "ios" && playUrl && <button onClick={()=>{setPanel(null);void openSenPlayer();}}><IPlayF size={19}/>SenPlayer 播放</button>}
       <button onClick={()=>{setPanel(null);void togglePip();}}><IPip size={19}/>画中画</button>
       <button onClick={()=>{setPanel(null);lockControls();}}><ILockF size={18}/>锁定播放控制</button>
       {isTauri() && playUrl && <button onClick={()=>{void startDownload();}} disabled={dlActive}><IDownload size={19}/>{dlLabel}</button>}
+      {isTauri() && <button onClick={()=>setPanel("downloads")}><IDownload size={19}/>下载管理</button>}
       <details><summary>操作说明</summary><p>{isDesktop ? "空格 播放/暂停 · ← → 快退/快进 · M 静音 · F 全屏 · E 选集" : "单击显示/隐藏控制 · 双击播放/暂停 · 横滑调整进度 · 长按临时倍速 · 双指缩放画面"}</p></details>
       {onBack&&<button onClick={onBack}><IBack size={19}/>退出播放</button>}
     </div> : panel === "info" ? <div className="flex flex-col gap-3">
@@ -937,6 +966,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                       （与 3 秒角标同一位置），右对称显示当前播放内核；下方有
                       “复制播放地址”按钮（点按复制真实播放地址，不显示 URL 本身）、
                       下载按钮（点按下载当前视频，下载中禁用；下载完点按分享）、
+                      SenPlayer 按钮（点按跳到 SenPlayer 播当前视频，须装 SenPlayer）、
                       画面设置按钮（点按打开更多播放选项，可改画面设置）
                       与横竖屏切换按钮。竖屏时两行左右按横向安全区（--sal/--sar）
                       留白；横屏时左边两行改取固定 230px：实测本机 WKWebView 里
@@ -973,6 +1003,11 @@ export default function Feed({media, position, active=true, preparing=false, err
                           className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable disabled:opacity-40"
                           style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                           <IDownload size={19} className="hg-ink" />
+                        </button>}
+                        {platform === "ios" && playUrl && <button onClick={() => { void openSenPlayer(); pokeInfoOverlay(); }} aria-label="SenPlayer 播放"
+                          className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          <IPlayF size={19} className="hg-ink" />
                         </button>}
                         <button onClick={() => { setPanel("more"); pokeInfoOverlay(); }} aria-label="画面设置"
                           className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable"
@@ -1051,6 +1086,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                         </button>
                         <button aria-label="选集" onClick={()=>setPanel("episodes")} className="hg-chip-strong w-9 h-9 rounded-full flex items-center justify-center"><IList size={18}/></button>
                         {isTauri() && playUrl && <button aria-label={dlDone ? "已下载 · 分享" : "下载"} onClick={()=>{void startDownload();}} disabled={dlActive} className="hg-chip-strong w-9 h-9 rounded-full flex items-center justify-center disabled:opacity-40"><IDownload size={18}/></button>}
+                        {platform === "ios" && playUrl && <button aria-label="SenPlayer 播放" onClick={()=>{void openSenPlayer();}} className="hg-chip-strong w-9 h-9 rounded-full flex items-center justify-center"><IPlayF size={18}/></button>}
                         <button aria-label="更多" onClick={()=>setPanel("more")} className="hg-chip-strong w-9 h-9 rounded-full flex items-center justify-center"><IMore size={18}/></button>
                         <button onClick={exitFs} aria-label="退出全屏"
                           className="hg-chip-strong w-9 h-9 rounded-full backdrop-blur-md flex items-center justify-center pressable elev-1">
@@ -1183,7 +1219,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                 onMouseDown={e=>{if(isDesktop&&e.button===0&&!(e.target as HTMLElement).closest("button,input,select,a")){e.preventDefault();const win=getCurrentWindow();void (e.detail===2?win.toggleMaximize():win.startDragging()).catch(()=>{});}}}>
                 {onBack&&<button aria-label="返回" onClick={onBack}><IBack size={22}/></button>}
                 <div className="hg-watch-title"><h1>{title}</h1><p>{episodeLabel ? `${/^第/.test(episodeLabel)?episodeLabel:`第 ${episodeLabel} 集`}${episodeCount?` / 共 ${episodeCount} 集`:""}` : author}{qualityLabel ? ` · ${qualityLabel}` : ""}</p></div>
-                {!isDesktop&&<><button aria-label={muted?"取消静音":"静音"} onClick={()=>setMuted(v=>!v)}>{muted?<IVolMute size={23}/>:<IVol size={23}/>}</button>{panels.episodes&&<button aria-label="选集" onClick={()=>setPanel("episodes")}><IList size={24}/></button>}{isTauri() && playUrl && <button aria-label={dlDone ? "已下载 · 分享" : "下载"} onClick={()=>{void startDownload();}} disabled={dlActive}><IDownload size={23}/></button>}<button aria-label="更多" onClick={()=>setPanel("more")}><IMore size={24}/></button></>}
+                {!isDesktop&&<><button aria-label={muted?"取消静音":"静音"} onClick={()=>setMuted(v=>!v)}>{muted?<IVolMute size={23}/>:<IVol size={23}/>}</button>{panels.episodes&&<button aria-label="选集" onClick={()=>setPanel("episodes")}><IList size={24}/></button>}{isTauri() && playUrl && <button aria-label={dlDone ? "已下载 · 分享" : "下载"} onClick={()=>{void startDownload();}} disabled={dlActive}><IDownload size={23}/></button>}{platform === "ios" && playUrl && <button aria-label="SenPlayer 播放" onClick={()=>{void openSenPlayer();}}><IPlayF size={23}/></button>}<button aria-label="更多" onClick={()=>setPanel("more")}><IMore size={24}/></button></>}
                 {isDesktop&&store.watching&&<PlaybackWindowActions/>}
               </header>}
             </section>
