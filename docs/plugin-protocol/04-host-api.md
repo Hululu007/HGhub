@@ -402,9 +402,10 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 宿主注入桥后派发 `fmsdk` 自定义事件，窗口获得/失去焦点时派发 `fmresume` / `fmpause` 事件；
 宿主同时给页面根元素加上 `fm-native` 类。
 
-调用约定：`fm.req(method, payload)`（别名 `fm.invoke`）返回 Promise，成功为
-`{ code: 0, data }`，失败为 `{ code, message }`（`code` 为 [02 §8](02-runtime.md)
-的错误码字符串，`message` 为中文说明）。对象式与函数式别名都接受，例如
+调用约定：`fm.req(method, payload)`（别名 `fm.invoke`）返回 Promise，成功时
+直接返回该方法的返回值，失败时 Promise 以 `Error` 拒绝，`message` 为中文
+说明（形如 `NETWORK: 无法连接代理或目标服务器…`，冒号前是 [02 §8](02-runtime.md)
+的错误码）。对象式与函数式别名都接受，例如
 `fm.req("net.request", …)` 与 `fm.req("req", …)` 等价。v1 的方法表：
 
 | 方法 | 行为 |

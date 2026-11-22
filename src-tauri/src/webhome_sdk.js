@@ -22,7 +22,13 @@
     if (!fn) {
       return Promise.reject(new Error("WebHome 桥未就绪"));
     }
-    return fn("webhome_call", { method: method, payload: payload || {} });
+    // 宿主命令失败时以裸字符串拒绝（Result<Value, String>）；页面按
+    // e.message 取报错原因，字符串没有 message，原因会被吞掉，只剩页面
+    // 自己的兜底文案。包成 Error 后，页面才能看到真正的失败原因。
+    return fn("webhome_call", { method: method, payload: payload || {} }).catch(function (e) {
+      if (e instanceof Error) throw e;
+      throw new Error(typeof e === "string" ? e : (e && e.message) || "请求失败");
+    });
   }
   function closeWindow() {
     var fn = getInvoke();
