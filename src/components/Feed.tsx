@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isTauri } from "@tauri-apps/api/core";
 import { setMobileOrientation } from "../orientation";
 import { setStatusBarHidden } from "../statusBar";
+import { adjustBrightness, adjustVolume } from "../screenControl";
 import { isMobile, platform } from "../environment";
 import { fmtTime, formatResolution } from "../format";
 import { useStore } from "../store";
@@ -167,8 +169,26 @@ export default function Feed({media, position, active=true, preparing=false, err
   const [barPct, setBarPct] = useState<number | null>(null);
   const gesture = useRef<{
     x: number; y: number; startX: number; startY: number; t: number; timer: number | null;
-    mode: "idle" | "hold" | "scrub" | "pan"; base: number; width: number; playing: boolean;
+    mode: "idle" | "hold" | "scrub" | "pan" | "adjust"; base: number; width: number; playing: boolean;
+    adjustKind: "brightness" | "volume" | null; lastY: number;
   } | null>(null);
+
+  /* 详情页左右竖滑调亮度/音量（仅 iOS 原生应用）：左半屏亮度、右半屏音量，
+     上滑增大；指示条显示调完后的值，停 1 秒后收起。调用串行化（上一
+     次调完再调下一次），避免并发读到的旧值互相覆盖。 */
+  const [adjustIndicator, setAdjustIndicator] = useState<{ kind: "brightness" | "volume"; value: number } | null>(null);
+  const adjustChain = useRef(Promise.resolve());
+  const adjustTimer = useRef(0);
+  const adjustBy = (kind: "brightness" | "volume" | null, delta: number) => {
+    if (!kind || !Number.isFinite(delta) || delta === 0) return;
+    adjustChain.current = adjustChain.current.then(async () => {
+      const value = kind === "brightness" ? await adjustBrightness(delta) : await adjustVolume(delta);
+      if (value == null) return;
+      setAdjustIndicator({ kind, value });
+      window.clearTimeout(adjustTimer.current);
+      adjustTimer.current = window.setTimeout(() => setAdjustIndicator(null), 1000);
+    }).catch(() => {});
+  };
 
   /* 倍速：长按 / 锁定 → 2.0x，否则用基准倍速 */
   const effRate = holdSpeed || speedLock ? 2 : rate;
@@ -481,7 +501,8 @@ export default function Feed({media, position, active=true, preparing=false, err
       x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY,
       t: Date.now(), base: time, width: span,
       playing: videoRef.current?.el()?.paused === false,
-      mode: "idle" as "idle" | "hold" | "scrub" | "pan",
+      mode: "idle" as "idle" | "hold" | "scrub" | "pan" | "adjust",
+      adjustKind: null as "brightness" | "volume" | null, lastY: e.clientY,
       timer: window.setTimeout(() => {
         const cur = gesture.current;
         if (!cur || cur.mode !== "idle" || pinchRef.current) return;
@@ -528,9 +549,26 @@ export default function Feed({media, position, active=true, preparing=false, err
       } else if (Math.abs(dy) > 16) {
         clearTapTimer();
         if (g.timer) window.clearTimeout(g.timer);
-        g.mode = "pan";
-        swipe.move(dy, boxRef.current?.clientHeight || window.innerHeight);
+        // 详情页（仅 iOS 原生应用）：竖滑改调亮度/音量，不再切集（切集用
+        // 选集面板）；左半屏亮度、右半屏音量。首页卡片仍走 pan 切视频。
+        if (!preview && platform === "ios" && isTauri()) {
+          g.mode = "adjust";
+          g.adjustKind = g.startX < window.innerWidth / 2 ? "brightness" : "volume";
+          g.lastY = e.clientY;
+        } else {
+          g.mode = "pan";
+          swipe.move(dy, boxRef.current?.clientHeight || window.innerHeight);
+        }
       }
+      return;
+    }
+
+    if (g.mode === "adjust") {
+      // 全屏高拖满 = 100%：上滑增大，下滑减小；按增量调，指示条显示返回值。
+      const h = window.innerHeight || 1;
+      const delta = (g.lastY - e.clientY) / h;
+      g.lastY = e.clientY;
+      adjustBy(g.adjustKind, delta);
       return;
     }
 
@@ -572,6 +610,11 @@ export default function Feed({media, position, active=true, preparing=false, err
         videoRef.current?.seek(target, "mobile_gesture");
       }
       if (g.playing && active) videoRef.current?.play();
+      return;
+    }
+
+    if (g.mode === "adjust") {
+      // 指示条由 adjustBy 的 1 秒计时器收起；不触发点按/双击。
       return;
     }
 
@@ -761,6 +804,15 @@ export default function Feed({media, position, active=true, preparing=false, err
                     <div className="absolute z-20 pointer-events-none rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
                       style={{ top: "calc(var(--sat, 0px) + 96px)", left: "var(--sal, 12px)", background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                       {formatResolution(vsize.w, vsize.h)}
+                    </div>
+                  )}
+                  {/* 详情页左右竖滑指示（仅 iOS 原生应用）：左半屏亮度、右半屏
+                      音量；拖动时显示，停 1 秒后收起。 */}
+                  {adjustIndicator && (
+                    <div className="absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 pointer-events-none rounded-2xl px-5 py-4 text-center backdrop-blur-md"
+                      style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                      <div className="text-[14px] font-bold hg-ink tabular-nums">{adjustIndicator.kind === "brightness" ? "亮度" : "音量"} {Math.round(adjustIndicator.value * 100)}%</div>
+                      <div className="mt-2 h-1.5 w-40 rounded-full bg-white/20 overflow-hidden"><div className="h-full rounded-full bg-white" style={{ width: `${Math.round(adjustIndicator.value * 100)}%` }} /></div>
                     </div>
                   )}
                   {/* 详情页角标（仅 iOS）：分辨率在左、当前播放内核在右，与 3 秒角标

@@ -22,6 +22,51 @@ pub async fn set_status_bar_hidden(hidden: bool, plugin: tauri::State<'_, Orient
         .map_err(|error| error.to_string())
 }
 
+/// 详情页左右竖滑调亮度/音量（仅 iOS）：前端按拖动增量调，返回调完后的新值
+/// （0..1）供指示条显示。亮度走 UIScreen.main.brightness（下限 0.05）；
+/// 音量走系统音量（MPVolumeView 滑块）。Android 的同名插件没有这两个方法，
+/// 前端只在 iOS 上调用。
+#[derive(serde::Deserialize)]
+struct LevelResult {
+    value: f64,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn adjust_brightness(delta: f64, plugin: tauri::State<'_, OrientationPlugin>) -> Result<f64, String> {
+    let result: LevelResult = plugin
+        .0
+        .run_mobile_plugin_async("adjustBrightness", serde_json::json!({"delta": delta}))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result.value)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn adjust_volume(delta: f64, plugin: tauri::State<'_, OrientationPlugin>) -> Result<f64, String> {
+    let result: LevelResult = plugin
+        .0
+        .run_mobile_plugin_async("adjustVolume", serde_json::json!({"delta": delta}))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result.value)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+pub fn adjust_brightness(delta: f64) -> Result<f64, String> {
+    let _ = delta;
+    Err("当前平台不支持原生亮度调节".into())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+pub fn adjust_volume(delta: f64) -> Result<f64, String> {
+    let _ = delta;
+    Err("当前平台不支持原生音量调节".into())
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn set_status_bar_hidden(hidden: bool) -> Result<(), String> {

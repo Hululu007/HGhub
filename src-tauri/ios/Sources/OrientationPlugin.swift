@@ -29,6 +29,8 @@
 
 import Tauri
 import UIKit
+import AVFoundation
+import MediaPlayer
 
 /// Rust set_orientation 发来的 JSON（{"landscape": true/false}），
 // 与 Android OrientationArgs 的字段名一致。
@@ -99,6 +101,65 @@ public class OrientationPlugin: Plugin {
   DispatchQueue.main.async {
     UIApplication.shared.isStatusBarHidden = args.hidden
     invoke.resolve()
+  }
+}
+
+/// 详情页左右竖滑调亮度/音量（仅详情页，首页卡片上下滑仍切视频）：
+/// 前端按拖动增量调（上滑增大），每次返回调完后的新值（0..1）供指示条
+/// 显示。亮度走 UIScreen.main.brightness，下限 0.05，避免全黑后看不
+/// 见界面；音量走系统音量——读 AVAudioSession.outputVolume，写
+/// MPVolumeView 的滑块（iOS 没有公开的设置系统音量 API，这是标准做
+/// 法）。MPVolumeView 只有挂进窗口后滑块才能稳定读写系统音量，所以
+/// 第一次用时把它（1x1、隐藏）加进当前窗口；找不到滑块时 reject，
+/// 前端不更新指示条。两个方法都在主队列跑；本机无 Xcode，与本文件
+/// 其他方法一样未编译，真机验收时核对（亮度/音量是否跟着变、指示条
+/// 数字是否与系统值一致）。
+private var volumeView: MPVolumeView?
+
+private func volumeSlider() -> UISlider? {
+  if volumeView == nil {
+    let v = MPVolumeView(frame: CGRect(x: -100, y: -100, width: 1, height: 1))
+    v.isHidden = true
+    if let window = self.manager.viewController?.view.window
+      ?? UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first {
+      window.addSubview(v)
+    } else {
+      self.manager.viewController?.view.addSubview(v)
+    }
+    v.layoutIfNeeded()
+    volumeView = v
+  }
+  return volumeView?.subviews.compactMap { $0 as? UISlider }.first
+}
+
+@objc public func adjustBrightness(_ invoke: Invoke) throws {
+  struct AdjustArgs: Decodable {
+    var delta: Double
+  }
+  let args = try invoke.parseArgs(AdjustArgs.self)
+  DispatchQueue.main.async {
+    let current = Double(UIScreen.main.brightness)
+    let next = min(1.0, max(0.05, current + args.delta))
+    UIScreen.main.brightness = CGFloat(next)
+    invoke.resolve(["value": next])
+  }
+}
+
+@objc public func adjustVolume(_ invoke: Invoke) throws {
+  struct AdjustArgs: Decodable {
+    var delta: Double
+  }
+  let args = try invoke.parseArgs(AdjustArgs.self)
+  DispatchQueue.main.async {
+    let current = Double(AVAudioSession.sharedInstance().outputVolume)
+    let next = min(1.0, max(0.0, current + args.delta))
+    guard let slider = self.volumeSlider() else {
+      invoke.reject("找不到系统音量滑块")
+      return
+    }
+    slider.value = Float(next)
+    slider.sendActions(for: .valueChanged)
+    invoke.resolve(["value": next])
   }
 }
 }

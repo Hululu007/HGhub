@@ -84,6 +84,8 @@ pub fn run() {
             commands::security_set,
             commands::set_orientation,
             commands::set_status_bar_hidden,
+            commands::adjust_brightness,
+            commands::adjust_volume,
             commands::debug_log,
             commands::open_url,
             commands::open_external_media,
