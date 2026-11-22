@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore, type Tab } from "./store";
 import { isMobile } from "./environment";
+import { IGrid, IGridF, IHome, IHomeF, ISearch, IUser, IUserF } from "./icons";
 import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
 import ResizeHandles from "./components/ResizeHandles";
 import Plugins from "./pages/Plugins";
@@ -76,11 +77,11 @@ function MediaPage({pluginId,mediaId,onBack,manage,active,start,onSwitch}: {plug
 
 function TabBar() {
   const { tab, setTab, theme, glass } = useStore();
-  const items: { k: Tab; label: string }[] = [
-    { k: "home", label: "首页" },
-    { k: "search", label: "搜索" },
-    { k: "category", label: "分类" },
-    { k: "profile", label: "我的" },
+  const items: { k: Tab; label: string; Icon: typeof IHome; Filled: typeof IHome }[] = [
+    { k: "home", label: "首页", Icon: IHome, Filled: IHomeF },
+    { k: "search", label: "搜索", Icon: ISearch, Filled: ISearch },
+    { k: "category", label: "分类", Icon: IGrid, Filled: IGridF },
+    { k: "profile", label: "我的", Icon: IUser, Filled: IUserF },
   ];
   /* 细瘦纯文字分栏：只有选中项高亮，没有指示点。
      首页是沉浸视频 → 底栏压深色；搜索/分类/我的 是浅色内容页 →
@@ -94,22 +95,23 @@ function TabBar() {
         background: glass
           ? (lightBar ? "rgba(250, 250, 250, .55)" : overVideo ? "rgba(0, 0, 0, .55)" : "rgba(20, 20, 20, .55)")
           : (lightBar ? "rgba(250, 250, 250, .97)" : overVideo ? "#000000" : "#141414"),
-        borderTop: lightBar ? "1px solid rgba(0,0,0,.08)" : overVideo ? "none" : "1px solid rgba(255,255,255,.07)",
-        boxShadow: lightBar ? "0 -2px 14px rgba(0,0,0,.05)" : "none",
+        borderTop: glass ? "none" : (lightBar ? "1px solid rgba(0,0,0,.08)" : overVideo ? "none" : "1px solid rgba(255,255,255,.07)"),
+        boxShadow: glass ? "0 8px 32px rgba(0,0,0,.35)" : (lightBar ? "0 -2px 14px rgba(0,0,0,.05)" : "none"),
       }}>
-      <div className="h-[40px] flex items-center px-1">
-        {items.map(({ k, label }) => {
+      <div className="h-[56px] flex items-center px-1">
+        {items.map(({ k, label, Icon, Filled }) => {
           const on = tab === k;
           return (
             <button key={k} onClick={() => setTab(k)} className="flex-1 h-full flex items-center justify-center pressable">
-              <span className="text-[12.5px] leading-none transition-colors duration-200"
+              <span className={`flex flex-col items-center gap-[2px] transition-colors duration-200${on ? " hg-tab-active" : ""}`}
                 style={{
                   fontWeight: on ? 700 : 400,
                   color: lightBar
                     ? (on ? "var(--p-primary)" : "rgba(0,0,0,.45)")
                     : (on ? "#ffffff" : "rgba(255,255,255,.6)"),
                 }}>
-                {label}
+                {on ? <Filled size={22} /> : <Icon size={22} strokeWidth={1.7} />}
+                <span className="text-[11px] leading-none">{label}</span>
               </span>
             </button>
           );

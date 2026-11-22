@@ -1323,7 +1323,7 @@ export default function Feed({media, position, active=true, preparing=false, err
           面板左沿仍保持 330px（v0.0.29），只补右边。竖屏与桌面不受影响。 */}
       {isDesktop ? <div className={`desktop-dock-panel ${panel ? "is-open" : ""}`}><div className="desktop-dock-inner">{panelContent}</div></div> : <Sheet open={!!panel && active} z="z-[60]" onClose={() => setPanel(null)}><div role="dialog" aria-modal="true" aria-label="播放面板" className="hg-player-sheet flex flex-col" style={vpLandscape ? (panel === "info" ? { paddingLeft: 330, paddingRight: "var(--sar, 12px)" } : { paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }) : undefined}>{panelContent}</div></Sheet>}
       </div>
-      {hint&&<div role="status" className="absolute top-1/3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-black/70 text-white text-xs pointer-events-none">{hint}</div>}
+      {hint&&<div role="status" className="hg-hint absolute top-1/3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-black/70 text-white text-xs pointer-events-none">{hint}</div>}
       {controlsLocked && <PlaybackLock active={active} onUnlock={() => { setControlsLocked(false); wake(); }} />}
     </div>
     </div>
