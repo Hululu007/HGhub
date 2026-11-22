@@ -77,4 +77,10 @@ async function init() {
 - 窗口右上角有一个宿主注入的关闭按钮，页面自己的返回键关不掉窗口。
 - iOS 上第二个 WebView 窗口尚未真机验证。
 
+## 最小演示
+
+仓库里有一份能直接导入的演示源：`examples/webhome-demo.js`（演示页
+`examples/webhome-demo.html`，通过 jsDelivr 加载）。导入后在插件详情页点
+“打开 WebHome 首页”，页面上有搜索、打开详情、直链播放、查状态、弹提示五个按钮。
+
 [当前支持状态](status.md) · [协议 06 §18](../plugin-protocol/06-capabilities.md)

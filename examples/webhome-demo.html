@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebHome 演示页</title>
+<style>
+  body { margin: 0; padding: 24px 16px; background: #17121c; color: #fff; font-family: -apple-system, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { color: rgba(255,255,255,.6); font-size: 13px; margin: 0 0 20px; }
+  button { display: block; width: 100%; margin: 0 0 10px; padding: 14px; font-size: 15px;
+    color: #fff; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.2);
+    border-radius: 12px; }
+  button:active { background: rgba(255,255,255,.25); }
+  pre { white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,.4);
+    border-radius: 12px; padding: 12px; font-size: 12px; min-height: 60px; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<h1>WebHome 演示页</h1>
+<p id="status">正在等 window.fm …</p>
+<button id="b-search">搜索“演示”</button>
+<button id="b-vod">打开详情（演示作品）</button>
+<button id="b-play">直链播放（测试流）</button>
+<button id="b-stat">查询播放状态</button>
+<button id="b-toast">弹提示</button>
+<pre id="out">点上面任意按钮，结果显示在这里。</pre>
+<script>
+  var out = document.getElementById("out");
+  var status = document.getElementById("status");
+  function show(v) { out.textContent = JSON.stringify(v, null, 2); }
+  function bind(id, fn) { document.getElementById(id).addEventListener("click", function () {
+    if (!window.fm) { show({ error: "window.fm 不存在" }); return; }
+    Promise.resolve().then(fn).then(show).catch(function (e) { show({ error: String(e && e.message || e) }); });
+  }); }
+  function ready() {
+    status.textContent = window.fm ? "window.fm 已就绪，可以点了。" : "window.fm 不存在（不在 WebHome 窗口里打开？）";
+    if (!window.fm) return;
+    bind("b-search", function () { return window.fm.req("app.search", { keyword: "演示" }); });
+    bind("b-vod", function () { return window.fm.req("app.openVod", { vodId: "demo-1", siteKey: "demo.webhome" }); });
+    bind("b-play", function () { return window.fm.req("player.playUrl", { url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", title: "演示直链" }); });
+    bind("b-stat", function () { return window.fm.req("player.status"); });
+    bind("b-toast", function () { return window.fm.req("ext.toast", { message: "你好，WebHome" }); });
+  }
+  if (window.fm) ready();
+  else window.addEventListener("fmsdk", ready);
+</script>
+</body>
+</html>
