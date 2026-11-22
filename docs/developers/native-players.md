@@ -512,8 +512,11 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   静默无反应；`LSApplicationQueriesSchemes: senplayer` 由
   `scripts/sync-ios-senplayer.mjs` 在构建时写进 Info.plist，不登记时
   `canOpenURL` 永远返回 false。`open_external_media` 走不了这条路，
-  它只放行 http/https 等协议。地址过期先拦下；回环地址与浏览器跳转
-  同理，须播着（有声音）切出才不断流。Swift 文件未编译（本机无 Xcode）。
+  它只放行 http/https 等协议。地址过期先拦下；暂停、加载中或静音时
+  不跳转，直接提示先播起来、取消静音——回环地址只在播着（有声音）切
+  出时不断流（v0.0.30 复制地址同一结论），这几种状态跳过去流必断。
+  跳过去后红苹果还在后台播着（声音与 SenPlayer 重叠），不要在红苹果
+  里点暂停，否则流就断了。Swift 文件未编译（本机无 Xcode）。
 - 真机验收（待 Mac / 设备）：点“下载”后进度走到 100%，文件在
   “文件”App 里能找到、能播；HLS 点播能完整拼出来；直播存的是当前
   窗口的片段；点“分享”能弹出系统分享面、能存到“文件”；设置里下载

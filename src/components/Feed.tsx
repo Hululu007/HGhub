@@ -334,18 +334,29 @@ export default function Feed({media, position, active=true, preparing=false, err
 
   /* 跳转 SenPlayer 播放（首页浮层、详情页顶栏/全屏栏、更多播放选项）：
      把当前播放地址按 SenPlayer 的公开 Scheme 交过去，未装 SenPlayer
-     时 Swift 侧明确报错。地址过期先拦下（须重新播放拿新地址）；
-     回环地址只在播着（有声音）切出时不断流，暂停时 SenPlayer 那边
-     拿不到流——提示与复制地址同一口径。 */
+     时 Swift 侧明确报错。地址过期先拦下（须重新播放拿新地址）。
+     回环地址只在播着（有声音）切出时不断流：暂停、加载中或静音时
+     切出，红苹果的音频会话不活跃，切到后台后进程会被挂起、流就断了
+     （v0.0.30 复制地址同一结论），所以这几种状态下不跳转，直接提示
+     先播起来、取消静音。跳过去后红苹果还在后台播着（声音与 SenPlayer
+     重叠），不要在红苹果里点暂停，否则流就断了。 */
   const openSenPlayer = async () => {
     if (!playUrl) return;
     if (media?.playback.expiresAt && media.playback.expiresAt <= Date.now()) {
       toast("地址已过期，请重新播放后再打开");
       return;
     }
+    if (phase !== "playing") {
+      toast(phase === "paused" ? "先点播放，播起来再跳转" : "正在加载，播起来再跳转");
+      return;
+    }
+    if (muted) {
+      toast("先取消静音再跳转");
+      return;
+    }
     try {
       await openInSenPlayer(playUrl, title);
-      toast(phase !== "playing" ? "已跳转 SenPlayer，须先播放再切出" : muted ? "已跳转 SenPlayer，须先取消静音再切出" : "已跳转 SenPlayer");
+      toast("已跳转 SenPlayer");
     } catch (error) {
       toast(error instanceof Error ? error.message : "打开 SenPlayer 失败");
     }
