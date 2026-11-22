@@ -20,13 +20,16 @@ export interface DownloadResult {
 }
 
 /** 下载当前资源：url 是回环播放地址（media.url），name 是标题（不带扩展名，
- * 扩展名由 Rust 侧按实际内容定）。进度经 download-progress 事件回传，
- * 按 downloadId 过滤；完成返回保存路径与字节数，直播返回当前窗口的片段
- * 时长（durationSec）与 live=true。仅 App 内可用，网页版抛错。 */
+ * 扩展名由 Rust 侧按实际内容定）。folder 是可选的资源文件夹名（多集资源
+ * 如作品标题，分集文件存进 Downloads/<folder>/；单文件资源不传，散放在
+ * Downloads 下）。进度经 download-progress 事件回传，按 downloadId 过滤；
+ * 完成返回保存路径与字节数，直播返回当前窗口的片段时长（durationSec）与
+ * live=true。仅 App 内可用，网页版抛错。 */
 export async function downloadMedia(
   url: string,
   name: string,
   onProgress: (p: DownloadProgress) => void,
+  folder?: string,
 ): Promise<DownloadResult> {
   if (!isTauri()) throw new Error("下载仅在 App 内可用");
   const downloadId = crypto.randomUUID();
@@ -37,7 +40,8 @@ export async function downloadMedia(
     // Tauri invoke 参数默认按 camelCase 传（tauri-macros 默认
     // rename_all="camelCase"）：Rust 形参 download_id 对应 JS 键 downloadId。
     // 传 snake_case（download_id）会报 missing required key downloadId。
-    return await invoke<DownloadResult>("download_media", { url, name, downloadId });
+    // folder 是单字，无大小写问题；没传时不带这个键，Rust 侧得 None。
+    return await invoke<DownloadResult>("download_media", { url, name, downloadId, ...(folder ? { folder } : {}) });
   } finally {
     unlisten();
   }
@@ -87,12 +91,14 @@ export async function shareDownloadedFile(path: string): Promise<void> {
   await invoke("share_file", { path });
 }
 
-/** 设置里下载管理列出的一个已下载文件。modified 是修改时间的 Unix 秒。 */
+/** 设置里下载管理列出的一个已下载文件。modified 是修改时间的 Unix 秒。
+ * folder 是文件所在的资源文件夹名（多集资源才有）；单文件资源为 null。 */
 export interface DownloadedFile {
   name: string;
   path: string;
   bytes: number;
   modified: number | null;
+  folder: string | null;
 }
 
 /** 列出文稿/Downloads 里的已完成下载（按修改时间倒序）。仅 App 内可用。 */

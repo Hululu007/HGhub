@@ -491,6 +491,17 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   （AVPlayer / WebView 都播不了裸 .ts，只有 `.m3u8` 清单能播），点按
   明确提示改用导出、到 SenPlayer 里打开；能播的是 `.mp4` / `.mov` /
   `.m4v`。
+- 下载管理按文件夹归类（v0.0.37，同批）：多集资源下载时按文件夹归类，
+  文件夹名取作品标题（`Feed` 里总集数 `episodeCount > 1` 时传 `folder`，
+  文件名取分集 `episodeLabel`，如“1”/“第 1 集”；单文件资源不传
+  `folder`，直接散放在 Downloads 下）。Rust 侧 `download_media` 多了
+  可选参数 `folder`（`Option<String>`，文件夹名走与文件名同一套清理
+  规则；不传就是老行为），`list_downloads` 往下走一层、子目录里的文件
+  带上 `folder` 字段；`delete_download` 的路径检查本来就只要求落在
+  Downloads 目录下，文件夹里的文件照样能删，不用改。下载管理里文件
+  夹可折叠（默认展开），按文件夹里最新文件的修改时间倒序；单个资源
+  文件直接列在文件夹下面。已下载的老文件不动——以前是散放的“标题”、
+  “标题（1）”，分不出是哪集，不回头重分组；只有新下载的才进文件夹。
 - SenPlayer 跳转（v0.0.37）：用 SenPlayer 的公开 URL Scheme
   `senplayer://x-callback-url/play?url=<编码后的播放地址>&name=<标题>`
   （goplexcli、OrivioTV、lampa 的外部播放器表都是同一格式，只传
@@ -512,6 +523,7 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   首页清屏后双击，浮层里出现下载图标，点按能下载当前正在播的视频。
   v0.0.37：更多播放选项里能打开下载管理；下载管理里点按文件名能播
   （.mp4），.ts 点按提示改用导出；导出到相册能在相册里找到视频，导
-  出到文件能在“文件”App 里找到；首页浮层、详情页顶栏、全屏栏、更多
-  菜单都有 SenPlayer 按钮，装了 SenPlayer 时点按能跳过去播，播着切
-  出不断流，没装时提示未安装。Swift 文件未编译（本机无 Xcode），与上面其他插件一样。
+  出到文件能在“文件”App 里找到；多集资源下载后收进以作品名命名的
+  文件夹里（文件名是分集），单个资源直接散放，下载管理里文件夹可折
+  叠；首页浮层、详情页顶栏、全屏栏、更多菜单都有 SenPlayer 按钮，装
+  了 SenPlayer 时点按能跳过去播，播着切出不断流，没装时提示未安装。Swift 文件未编译（本机无 Xcode），与上面其他插件一样。

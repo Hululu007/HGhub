@@ -353,6 +353,8 @@ export default function Feed({media, position, active=true, preparing=false, err
 
   /* 资源下载（更多播放选项 / 影片信息 / 播放器上的“下载”按钮）：经回环地址取流存到
      文稿/Downloads，直链文件直接存，HLS 拼分片；直播只存当前窗口的片段。
+     多集资源按文件夹归类（文件夹名取作品标题，文件名取分集），单文件
+     资源不建文件夹、直接散放在 Downloads 下。
      下载中按钮显示进度，完成后变“已下载 · 分享”，点按弹系统分享面
      （可存到“文件”、发到微信等）。切集后状态复位。仅 App 内可用。
      播放地址有有效期（expiresAt），播着播着过期时取流会报“已失效”
@@ -361,14 +363,14 @@ export default function Feed({media, position, active=true, preparing=false, err
   const [dlActive, setDlActive] = useState(false);
   const [dlLabel, setDlLabel] = useState("下载");
   const [dlDone, setDlDone] = useState<DownloadResult | null>(null);
-  // 地址过期时等刷新后重下：存下要重下的分集（sessionId）与标题。
-  const dlRetryRef = useRef<{ sessionId: string; title: string } | null>(null);
+  // 地址过期时等刷新后重下：存下要重下的分集（sessionId）与标题、文件夹。
+  const dlRetryRef = useRef<{ sessionId: string; title: string; folder?: string } | null>(null);
   const dlRetryTimerRef = useRef<number | null>(null);
-  const runDownload = async (url: string, name: string) => {
+  const runDownload = async (url: string, name: string, folder?: string) => {
     const result = await downloadMedia(url, name, (p) => {
       const pct = downloadPercent(p);
       setDlLabel(pct != null ? `下载中 ${pct}%` : `下载中 ${downloadMB(p.downloaded)}`);
-    });
+    }, folder);
     setDlDone(result);
     setDlLabel("已下载 · 分享");
     toast(result.live
@@ -383,7 +385,7 @@ export default function Feed({media, position, active=true, preparing=false, err
       dlRetryRef.current = null;
       if (dlRetryTimerRef.current) { window.clearTimeout(dlRetryTimerRef.current); dlRetryTimerRef.current = null; }
       setDlLabel("下载中…");
-      void runDownload(playUrl, retry.title).catch((error) => {
+      void runDownload(playUrl, retry.title, retry.folder).catch((error) => {
         setDlLabel("下载");
         toast(error instanceof Error ? error.message : String(error));
       }).finally(() => setDlActive(false));
@@ -400,15 +402,20 @@ export default function Feed({media, position, active=true, preparing=false, err
     if (!playUrl || dlActive || !media) return;
     setDlActive(true);
     setDlLabel("下载中…");
+    // 多集资源按文件夹归类：总集数 > 1 时文件夹名取作品标题，文件名取
+    // 分集（分集标题或集号，如“第 1 集”/“1”）；单文件资源不建文件夹，
+    // 文件名就是作品标题。首页卡片与详情页共用同一套 props。
+    const dlFolder = episodeCount > 1 && title ? title : undefined;
+    const dlName = episodeCount > 1 ? (episodeLabel || title || "视频") : (title || "视频");
     try {
-      await runDownload(playUrl, title || "视频");
+      await runDownload(playUrl, dlName, dlFolder);
       setDlActive(false);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       // 地址过期（410/401）：刷新播放地址后用新地址重下一次。刷新由父组件
       // 的 onRetry 完成（media.refresh），新地址到后上面的 effect 会重下。
       if (msg.includes("已失效") && onRetry && !dlRetryRef.current) {
-        dlRetryRef.current = { sessionId: media.sessionId, title: title || "视频" };
+        dlRetryRef.current = { sessionId: media.sessionId, title: dlName, folder: dlFolder };
         setDlLabel("刷新地址…");
         if (dlRetryTimerRef.current) window.clearTimeout(dlRetryTimerRef.current);
         dlRetryTimerRef.current = window.setTimeout(() => {

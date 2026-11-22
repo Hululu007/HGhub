@@ -71,9 +71,10 @@ pub async fn download_media(
     url: String,
     name: String,
     download_id: String,
+    folder: Option<String>,
 ) -> Result<DownloadResult, String> {
     let _guard = DownloadGuard::acquire()?;
-    download_inner(&app, &url, &name, &download_id).await
+    download_inner(&app, &url, &name, &download_id, folder.as_deref()).await
 }
 
 async fn download_inner(
@@ -81,6 +82,7 @@ async fn download_inner(
     url: &str,
     name: &str,
     download_id: &str,
+    folder: Option<&str>,
 ) -> Result<DownloadResult, String> {
     let base = Url::parse(url).map_err(|_| "播放地址无效".to_string())?;
     let client = reqwest::Client::builder()
@@ -92,6 +94,14 @@ async fn download_inner(
         .document_dir()
         .map_err(|e| e.to_string())?
         .join("Downloads");
+    // 多集资源按文件夹归类：folder 是资源名（如作品标题），分集文件
+    // 存进 Downloads/<folder>/；单文件资源不传 folder，直接散放在
+    // Downloads 下。文件夹名走与文件名同一套清理规则（非法字符换 _、
+    // 超长截断），空串当没传。
+    let dir = match folder.map(str::trim).filter(|f| !f.is_empty()) {
+        Some(folder) => dir.join(sanitize_filename(folder)),
+        None => dir,
+    };
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("无法创建下载目录：{e}"))?;
@@ -525,6 +535,8 @@ fn path_string(path: &PathBuf) -> String {
 }
 
 /// 已下载的文件（供设置里的下载管理列出、分享、删除）。
+/// folder 是文件所在的资源文件夹名（多集资源按文件夹归类时才有，
+/// 如作品标题）；单文件资源散放在 Downloads 下，folder 为 null。
 #[derive(Serialize, Clone)]
 pub struct DownloadedFile {
     pub name: String,
@@ -532,10 +544,13 @@ pub struct DownloadedFile {
     pub bytes: u64,
     /// 修改时间的 Unix 秒；取不到时为 null。
     pub modified: Option<u64>,
+    pub folder: Option<String>,
 }
 
 /// 列出文稿/Downloads 里的已完成下载（跳过 .part 未完成文件），按修改时间倒序。
 /// 目录不存在时返回空列表（还没下过东西，不是错误）。
+/// 只往下走一层：顶层文件是单文件资源，子目录是一个资源的分集文件夹，
+/// 里面的文件带上 folder；更深的嵌套不会出现（下载只建一层文件夹）。
 #[tauri::command]
 pub async fn list_downloads(app: AppHandle) -> Result<Vec<DownloadedFile>, String> {
     let dir = app
@@ -559,23 +574,59 @@ pub async fn list_downloads(app: AppHandle) -> Result<Vec<DownloadedFile>, Strin
             continue;
         }
         let meta = match entry.metadata().await {
-            Ok(m) if m.is_file() => m,
+            Ok(m) => m,
             _ => continue,
         };
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
+        if meta.is_dir() {
+            // 资源文件夹：列出里面的一层文件。
+            let folder_name = entry.file_name().to_string_lossy().into_owned();
+            let mut sub = match tokio::fs::read_dir(&path).await {
+                Ok(sub) => sub,
+                Err(_) => continue,
+            };
+            while let Some(sub_entry) = sub
+                .next_entry()
+                .await
+                .map_err(|e| format!("无法读取下载目录：{e}"))?
+            {
+                let sub_path = sub_entry.path();
+                if sub_path.extension().and_then(|e| e.to_str()) == Some("part") {
+                    continue;
+                }
+                let sub_meta = match sub_entry.metadata().await {
+                    Ok(m) if m.is_file() => m,
+                    _ => continue,
+                };
+                files.push(DownloadedFile {
+                    name: sub_entry.file_name().to_string_lossy().into_owned(),
+                    path: path_string(&sub_path),
+                    bytes: sub_meta.len(),
+                    modified: file_modified(&sub_meta),
+                    folder: Some(folder_name.clone()),
+                });
+            }
+            continue;
+        }
+        if !meta.is_file() {
+            continue;
+        }
         files.push(DownloadedFile {
             name: entry.file_name().to_string_lossy().into_owned(),
             path: path_string(&path),
             bytes: meta.len(),
-            modified,
+            modified: file_modified(&meta),
+            folder: None,
         });
     }
     files.sort_by_key(|f| std::cmp::Reverse(f.modified.unwrap_or(0)));
     Ok(files)
+}
+
+fn file_modified(meta: &std::fs::Metadata) -> Option<u64> {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
 }
 
 /// 删除一个已下载文件。只允许删 Downloads 目录里的文件（路径须落在该目录下），
