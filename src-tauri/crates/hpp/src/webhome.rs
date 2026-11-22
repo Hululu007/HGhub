@@ -77,11 +77,10 @@ pub async fn dispatch(
     Ok(match method {
         "net.request" => {
             let network = manager.network(plugin_id).await?;
-            let transfer = Transfer::from_json(json!({
+            let mut transfer_json = json!({
                 "url": text(p, "url")?,
                 "method": p["method"].as_str().unwrap_or("GET"),
                 "headers": p["headers"].clone(),
-                "body": p["body"].clone(),
                 "responseType": p["responseType"].as_str().unwrap_or("text"),
                 "timeoutMs": p["timeoutMs"].clone(),
                 "redirect": p["redirect"].clone(),
@@ -89,7 +88,13 @@ pub async fn dispatch(
                 "cache": p["cache"].clone(),
                 "retry": p["retry"].clone(),
                 "credentials": p["credentials"].clone(),
-            }));
+            });
+            // 页面 GET 不带 body：缺失的键不能写成 null，否则 fetch_once 会把
+            // “body 键存在”当成带了请求体，GET 直接报 INVALID_ARGUMENT。
+            if !p["body"].is_null() {
+                transfer_json["body"] = p["body"].clone();
+            }
+            let transfer = Transfer::from_json(transfer_json);
             transfer.validate(8 * 1024 * 1024)?;
             Outcome::Value(network.fetch(transfer, CancellationToken::new()).await?.json())
         }

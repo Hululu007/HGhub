@@ -180,3 +180,30 @@ async fn local_page_served_over_loopback() {
         .unwrap();
     assert_eq!(missing.status(), 404);
 }
+
+#[tokio::test]
+async fn webhome_net_request_get_without_body_reaches_network() {
+    // 回归：页面 GET 不带 body 时，dispatch 不能把缺失的 body 写成 null，
+    // 否则 fetch_once 会以 INVALID_ARGUMENT “GET/HEAD 不允许 body”拒绝，
+    // 请求根本出不了宿主（v0.0.49 的“全部域名失败”就是这么来的）。
+    // 用 .invalid 保留域名：能过目标校验、死在 DNS 层，刚好卡在 body 检查之后。
+    let (_dir, manager) = host().await;
+    let err = match webhome::dispatch(
+        &manager,
+        ID,
+        "net.request",
+        json!({
+            "url": "https://example.invalid/",
+            "method": "GET",
+            "headers": {"User-Agent": "Mozilla/5.0"},
+            "responseType": "text"
+        }),
+        state(),
+    )
+    .await
+    {
+        Ok(_) => panic!("expected the unresolvable host to fail"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code, "NETWORK", "{}", err.message);
+}
