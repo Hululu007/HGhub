@@ -16,6 +16,37 @@ fn main() {
     // 其他目标直接返回；macOS host 以外也直接返回（但函数本身不
     // 加 target_os cfg，让 Linux 上的 cargo check 也能验证它）。
     link_ios_native_plugins();
+    // iOS 上 Rust 链接期找 Python.framework（见 link_python_framework）。
+    link_python_framework();
+}
+
+/// iOS 上 Rust 链接期找 Python.framework。
+///
+/// `src/python.rs` 的裸 FFI 用 `#[link(name = "Python", kind = "framework")]`，
+/// 只给链接器 `-framework Python`，不给搜索路径；Xcode 的
+/// FRAMEWORK_SEARCH_PATHS 只对 Xcode 自己的链接生效，cargo 调 `cc` 链接
+/// cdylib/staticlib 时拿不到，v0.0.54 在此挂掉（`ld: framework 'Python'
+/// not found`）。这里在 iOS target 时把 xcframework 对应切片目录加进
+/// framework 搜索路径；xcframework 由 sync-ios-python.mjs 在 xcodebuild
+/// 之前解包到 gen/apple（CI 与本地同一套路径）。
+fn link_python_framework() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let slice = match target.as_str() {
+        "aarch64-apple-ios" => "ios-arm64",
+        "aarch64-apple-ios-sim" => "ios-arm64-simulator",
+        _ => return,
+    };
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let framework_dir = manifest_dir
+        .join("gen")
+        .join("apple")
+        .join("Python.xcframework")
+        .join(slice);
+    println!(
+        "cargo:rustc-link-search=framework={}",
+        framework_dir.display()
+    );
+    println!("cargo:rerun-if-changed=gen/apple/Python.xcframework");
 }
 
 /// 把 src-tauri/ios/ 的 Swift 插件包（NativePlugins）编成静态库链进 Rust。
