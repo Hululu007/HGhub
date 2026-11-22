@@ -12,6 +12,23 @@ pub async fn set_orientation(landscape: bool, plugin: tauri::State<'_, Orientati
         .map_err(|error| error.to_string())
 }
 
+/// 横屏播放时隐藏 iOS 状态栏（时间、电量、网速等不再压在视频上方），回竖屏
+/// 或离开播放页时再显示。iOS 上调 OrientationPlugin.setStatusBarHidden；
+/// Android 的同名插件没有这个方法，调了会返回错误，前端只在 iOS 上调用。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn set_status_bar_hidden(hidden: bool, plugin: tauri::State<'_, OrientationPlugin>) -> Result<(), String> {
+    plugin.0.run_mobile_plugin_async::<()>("setStatusBarHidden", serde_json::json!({"hidden": hidden})).await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+pub fn set_status_bar_hidden(hidden: bool) -> Result<(), String> {
+    let _ = hidden;
+    Err("当前平台不支持原生状态栏切换".into())
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 pub fn set_orientation(landscape: bool) -> Result<(), String> {

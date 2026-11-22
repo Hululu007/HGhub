@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "node scripts/sync-android-network.mjs && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build && node scripts/sync-android-icons.mjs && node scripts/sync-android-network.mjs && node scripts/sync-ios-icons.mjs && node scripts/sync-ios-launch-screen.mjs",
+    "beforeBuildCommand": "pnpm build && node scripts/sync-android-icons.mjs && node scripts/sync-android-network.mjs && node scripts/sync-ios-icons.mjs && node scripts/sync-ios-launch-screen.mjs && node scripts/sync-ios-status-bar.mjs",
     "frontendDist": "../dist"
   },
   "app": {

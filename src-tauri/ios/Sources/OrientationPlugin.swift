@@ -84,6 +84,23 @@ public class OrientationPlugin: Plugin {
       }
     }
   }
+/// 状态栏：横屏播放时隐藏（时间、电量、网速等系统信息不再压在视频上方），
+/// 回竖屏或离开播放页时再显示。走 UIApplication.isStatusBarHidden，需要
+/// Info.plist 里 UIViewControllerBasedStatusBarAppearance=false（由
+/// scripts/sync-ios-status-bar.mjs 在 CI 生成工程后写入），否则调用会被
+/// 按视图控制器的 appearance 忽略。isStatusBarHidden 自 iOS 9 起
+/// deprecated，但在按视图控制器 appearance 关掉时仍可用；本机无 Xcode，
+/// 与本文件其他方法一样未编译，真机验收时核对。
+@objc public func setStatusBarHidden(_ invoke: Invoke) throws {
+  struct StatusBarArgs: Decodable {
+    var hidden: Bool
+  }
+  let args = try invoke.parseArgs(StatusBarArgs.self)
+  DispatchQueue.main.async {
+    UIApplication.shared.isStatusBarHidden = args.hidden
+    invoke.resolve()
+  }
+}
 }
 
 /// Rust 侧 `tauri::ios_plugin_binding!(init_plugin_orientation)` 找的就是

@@ -83,6 +83,7 @@ pub fn run() {
             commands::app_boot,
             commands::security_set,
             commands::set_orientation,
+            commands::set_status_bar_hidden,
             commands::debug_log,
             commands::open_url,
             commands::open_external_media,

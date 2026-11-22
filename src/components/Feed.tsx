@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setMobileOrientation } from "../orientation";
+import { setStatusBarHidden } from "../statusBar";
 import { isMobile, platform } from "../environment";
 import { fmtTime, formatResolution } from "../format";
 import { useStore } from "../store";
@@ -222,6 +223,17 @@ export default function Feed({media, position, active=true, preparing=false, err
     };
   }, [isDesktop, active, preview, setFs, keepPlayingThroughTransition]);
 
+  /* 横屏播放时隐藏 iOS 状态栏：时间、电量、网速等系统信息不再压在视频
+     上方；回竖屏或离开播放页时恢复（cleanup 里恢复，卸载时也恢复）。
+     只在 iOS 上调原生命令（setStatusBarHidden），其他平台没有这条
+     命令；原生侧失败时静默，不影响播放。 */
+  useEffect(() => {
+    if (platform !== "ios") return undefined;
+    if (!(vpLandscape && active)) return undefined;
+    void setStatusBarHidden(true).catch(() => {});
+    return () => { void setStatusBarHidden(false).catch(() => {}); };
+  }, [platform, vpLandscape, active]);
+
   /* 进入 / 退出全屏：方向由上面的播放方向 effect 按分辨率自动处理，这里只切全屏状态 */
   const enterFs = useCallback(() => {
     keepPlayingThroughTransition();
@@ -280,7 +292,7 @@ export default function Feed({media, position, active=true, preparing=false, err
      textarea + execCommand 兜底；失败给提示，不静默。 */
   const copyPlayUrl = async () => {
     if (!playUrl) return;
-    const done = () => { toast("已复制"); pokeInfoOverlay(); };
+    const done = () => { toast("已复制，切出应用后地址会失效"); pokeInfoOverlay(); };
     try { await navigator.clipboard.writeText(playUrl); done(); return; } catch { /* 走兜底 */ }
     try {
       const ta = document.createElement("textarea");
@@ -772,13 +784,17 @@ export default function Feed({media, position, active=true, preparing=false, err
                   {/* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒。左为分辨率
                       （与 3 秒角标同一位置），右对称显示当前播放内核；下方只有
                       “复制播放地址”按钮（点按复制真实播放地址，不显示 URL 本身）
-                      与横竖屏切换按钮。两行左右都按横向安全区留白：横屏时刘海侧
-                      安全区约 44px，固定 12px 会把左边角标顶到刘海下面挡住。
+                      与横竖屏切换按钮。竖屏时两行左右按横向安全区（--sal/--sar）
+                      留白；横屏时左边两行改取固定 230px：实测本机 WKWebView 里
+                      横屏的 env(safe-area-inset-left) 是 0，--sal 只剩 12px，
+                      角标仍贴在左边缘、落在刘海/黑边区（v0.0.24 以为横屏安全区
+                      约 44px 是错的，见 v0.0.29 真机截图测量）。230px 是用户
+                      横屏截图上红框的左沿位置，角标行从该位置起、落在视频区内。
                       容器本身不接指针事件，只有复制按钮与旋转按钮可点，其余点按
                       仍走视频手势（单击退出清屏会关掉浮层）。 */}
                   {platform === "ios" && preview && clean && infoOverlay && playUrl && (
                     <div className="absolute inset-x-0 z-20 pointer-events-none" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
-                      <div className="flex items-start justify-between" style={{ paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
+                      <div className="flex items-start justify-between" style={{ paddingLeft: vpLandscape ? 230 : "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
                         <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
                           style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                           {vsize.w > 0 && vsize.h > 0 ? formatResolution(vsize.w, vsize.h) : "分辨率未知"}
@@ -788,7 +804,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                           {playbackEngineLabel(playbackEngine)}
                         </span>
                       </div>
-                      <div className="mt-2 flex items-start gap-2" style={{ paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
+                      <div className="mt-2 flex items-start gap-2" style={{ paddingLeft: vpLandscape ? 230 : "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
                         <button onClick={() => { void copyPlayUrl(); }} aria-label="复制播放地址"
                           className="pointer-events-auto shrink-0 rounded-full px-3 py-2 backdrop-blur-md pressable"
                           style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
@@ -1041,7 +1057,10 @@ export default function Feed({media, position, active=true, preparing=false, err
         />
       )}
 
-      {isDesktop ? <div className={`desktop-dock-panel ${panel ? "is-open" : ""}`}><div className="desktop-dock-inner">{panelContent}</div></div> : <Sheet open={!!panel && active} z="z-[60]" onClose={() => setPanel(null)}><div role="dialog" aria-modal="true" aria-label="播放面板" className="hg-player-sheet flex flex-col">{panelContent}</div></Sheet>}
+      {/* 影片信息面板横屏时内容右移 330px：横屏下弹层是全宽的，内容贴左沿、
+          用户要求移到截图红框位置（红框左沿约 330px）；只动 info 面板，
+          其他面板与竖屏不受影响。 */}
+      {isDesktop ? <div className={`desktop-dock-panel ${panel ? "is-open" : ""}`}><div className="desktop-dock-inner">{panelContent}</div></div> : <Sheet open={!!panel && active} z="z-[60]" onClose={() => setPanel(null)}><div role="dialog" aria-modal="true" aria-label="播放面板" className="hg-player-sheet flex flex-col" style={panel === "info" && vpLandscape ? { paddingLeft: 330 } : undefined}>{panelContent}</div></Sheet>}
       </div>
       {hint&&<div role="status" className="absolute top-1/3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-black/70 text-white text-xs pointer-events-none">{hint}</div>}
       {controlsLocked && <PlaybackLock active={active} onUnlock={() => { setControlsLocked(false); wake(); }} />}
