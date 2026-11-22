@@ -381,7 +381,7 @@ impl PluginManager {
                 let code = candidate
                     .code
                     .ok_or_else(|| PluginError::invalid("暂存更新缺少文件"))?;
-                let meta = Self::inspect_document(&code).await?;
+                let meta = Self::inspect_document(&code, Some(&candidate.origin.location)).await?;
                 if meta.id != item.id || meta.version != item.version {
                     return Err(PluginError::invalid("暂存更新身份不一致"));
                 }

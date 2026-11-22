@@ -48,6 +48,9 @@ node scripts/sync-ios-background-audio.mjs
 node scripts/sync-ios-file-sharing.mjs
 node scripts/sync-ios-senplayer.mjs
 node scripts/sync-ios-photo-library.mjs
+# Python 运行时：下载 BeeWare xcframework 并暂存边车源码（gen/apple 里），
+# 链接与装包分别在下面的 xcodebuild 参数与 --install-app 里。
+node scripts/sync-ios-python.mjs
 
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.
@@ -62,7 +65,9 @@ xcodebuild build \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$ROOT/build_output" \
   TOOLCHAIN_DIR="$XCODE_TOOLCHAIN" \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+  FRAMEWORK_SEARCH_PATHS='$(inherited) $(PROJECT_DIR)' \
+  OTHER_LDFLAGS='$(inherited) -framework Python'
 
 APP_DIR="$ROOT/build_output/Build/Products/release-iphoneos"
 # 产品名改名后 .app 文件名会跟着变（改名前是 HGhub.app），不写死名字，
@@ -83,6 +88,10 @@ if grep -F 'localhost:1420' "$ROOT/ios-binary-strings.txt"; then
   echo 'Refusing to package a development build' >&2
   exit 1
 fi
+
+# Python 运行时装包：标准库 + Python.framework + 边车源码进 .app，
+# 再打 IPA 之前完成（.app 是每次现编的，装包步骤不可省略）。
+node scripts/sync-ios-python.mjs --install-app "$APP"
 
 PACKAGE_DIR=$(mktemp -d)
 mkdir -p "$PACKAGE_DIR/Payload"

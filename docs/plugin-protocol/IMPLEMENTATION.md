@@ -73,6 +73,10 @@
 - `auth.getMethods`、`auth.submit`、`auth.getProfile`、`auth.logout`
 - `ui.getActions`、`ui.submit`
 
+Python 蜘蛛 v1 只映射其中一部分（见 [06 §19](06-capabilities.md)）：
+`catalog.getCategories`、`home.getSections`、`feed.list`、`catalog.list`、
+`search.search`、`media.getDetail`、`media.resolvePlayback`；其余能力 v1 不映射。
+
 当前启用检查要求 source 实现 `media` 或 `live` 的全部必需方法，resolver 实现 `resolver.resolve`。
 纯直播源不得声明返回点播 MediaItem 的 home/catalog/search/feed/library 能力而不实现 media。
 声明 `auth` 时必须实现全部四个方法，声明 `ui` 时必须实现两个方法；不完整命名空间初始化失败。
@@ -114,6 +118,44 @@ v0.0.48 支持直接导入 HTML 文件为 WebHome 源：导入时按内容识别
 只支持单个自包含的 HTML 文件，相对本地资源不打包。恢复旧版本时页面文件不回滚，
 只保留磁盘上当前的文件；删除插件时整个目录（含页面文件）一起删。
 hpp 集成测试：远程/本地 HTML 导入、站点 JSON 识别、Meta 二选一校验、回环取页。
+
+Python 运行时 v1（v0.0.53）已落地：TVBox Python 蜘蛛（`.py` 源）可在 iOS 上导入运行。
+架构是 HTTP/JSON 边车（与 ant-video 2.0.6 实证过的路线一致）：CPython 解释器跑在应用
+进程内的独立线程里，Flask 服务监听回环地址；Rust 侧只是 HTTP 客户端，不直接调
+Python C API，不写 FFI 绑定；解释器线程一旦启动永不退出（CPython 同进程不支持
+二次初始化）。CPython 用 BeeWare Python-Apple-support **3.12-b13（CPython 3.12.16，
+最低 iOS 13.0）**，与 ant-video 实证过的 CPython 3.12.13 同一 3.12 线；
+CI 在构建时下载 pinned tarball（校验大小与 sha256），xcframework 不进 git，
+见 `scripts/sync-ios-python.mjs`（`.so` → Frameworks，stdlib 打进包）与
+`scripts/build-ios-unsigned.sh` 的接线。iOS 引导在 `src-tauri/src/python.rs`
+（裸 FFI 调 `Py_BytesMain` 式启动，info 文件 + `/health` 轮询）；非 iOS 目标用桩后端，
+Python 插件初始化报 `UNSUPPORTED`，全仓仍能编译。
+Rust 宿主在 `src-tauri/crates/hpp/src/python/`（`scan` 静态扫描与内容识别、
+`convert` TVBox 形状 → HPP 形状、`client` 边车 HTTP 客户端、`worker` PyWorker；
+`PyWorker` 与 JS Worker 对外同一组接口，由 `RuntimeWorker` 枚举统一持有），
+边车在 `src-tauri/python-sidecar/`（`main.py`、`spider_server.py`、`spider_runner.py`、
+`proxy_response.py`、`base/spider.py`）。`base.spider` 提供 `Spider` / `BaseSpider`
+双名、单例、fetch/post（优先走宿主 `/pyfetch`，不可用时 `requests` 直连兜底）、
+`getProxyUrl`（边车代理入口，默认 9978，被占时换临时端口）、按站点隔离的进程级缓存。
+`localProxy` 接通边车 `/proxy`（与 JS 插件的代理行为一致）；`playerContent` 返回的
+播放地址可带 `siteKey`，由边车绑定归属。site-packages 只打纯 Python 包
+（requests 2.34.2 + urllib3/certifi/idna/charset-normalizer、flask/werkzeug、
+beautifulsoup4/soupsieve、httpx）；`lxml` / `pyquery` / `pycryptodome` 含 C 扩展，
+v1 不带——`base.spider.html()` 在缺 `lxml` 时报明错。导入按内容识别（不认扩展名），
+文件存为插件目录里的 `plugin.py`，meta 派生为 `py.<词干>` / 版本恒 `1.0.0` /
+`runtime: "python"`；文件选择器加了 `py` 筛选，插件中心给 Python 源标 `Python`。
+演示源 `examples/demo-spider.py`（Mux 与 BipBop 公开测试流，home/category/detail/search/play 全通）。
+hpp 集成测试 `tests/python_spider.rs` 5 项通过（导入与调用、必需方法缺失报明错、
+形状错误与蜘蛛异常为 INTERNAL、非蜘蛛拒绝与 JS 优先、无 init 仍可初始化）；
+边车 `tests/test_sidecar.py` 全模式与 v1-only 模式（模拟 iOS 缺二进制包）均通过。
+**iOS 真机编译与设备验收待 CI/真机**：本机无 Xcode，iOS 专属代码用 cfg 隔开，
+非 iOS 目标已验证编译通过；不要把"CI 能编过"写成"真机验收通过"。
+v1 已知缺口：Python 插件没有 `meta.settings`（`init("")` 只传空串）；
+`liveContent` / `suggest` / `trending` / `transformResource` / `endpoints` 未映射；
+Store 桥未建（缓存只在边车进程内存里，重启即失）；更新检查对 Python 源不触发
+（版本恒 1.0.0，靠手动重导）；`homeContent` 在同一次初始化里可能被调多次，
+蜘蛛必须幂等；`resolvePlayback` 收不到 `reason` / `codecs` / `maxHeight`，
+刷新只是重新跑一次 `playerContent`；代理端口 9978 被占时换临时端口。
 
 ## 仍需完成
 

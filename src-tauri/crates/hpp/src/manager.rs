@@ -2,6 +2,7 @@ use crate::{
     model::{self, Meta},
     native::Logs,
     network::Network,
+    python::{PyWorker, PythonBootstrap, RuntimeWorker, UnavailablePython},
     runtime::{self, Worker},
     store::{atomic_write, Store},
     wire::Transfer,
@@ -42,7 +43,7 @@ struct IndexEntry {
 }
 struct Installed {
     entry: IndexEntry,
-    worker: Option<Worker>,
+    worker: Option<RuntimeWorker>,
     network: Arc<Network>,
     store: Arc<Store>,
     logs: Logs,
@@ -69,6 +70,12 @@ pub struct PluginManager {
     root: PathBuf,
     document_reader: Option<Arc<dyn DocumentReader>>,
     web_login: Option<Arc<dyn crate::web_login::WebLoginProvider>>,
+    /// Python 边车引导：iOS 实现启动 CPython，非 iOS 用桩实现（见
+    /// `python::UnavailablePython`）。未注入时默认用桩实现。
+    python_bootstrap: Arc<dyn PythonBootstrap>,
+    /// 边车代理入口的实际地址（/health 返回；9978 被占时会换临时端口），
+    /// 供回环取流时识别自家代理地址用。
+    py_proxy_base: Mutex<Option<String>>,
     plugins: tokio::sync::RwLock<BTreeMap<String, Arc<tokio::sync::Mutex<Installed>>>>,
     mutation: tokio::sync::Mutex<()>,
     strict: Option<bool>,
@@ -97,9 +104,19 @@ impl PluginManager {
         };
         for mut entry in index {
             let indexed = Meta::parse(serde_json::to_value(&entry.meta).unwrap())?;
-            let recovered = std::fs::read_to_string(root.join(&indexed.id).join("plugin.js"))
-                .map_err(PluginError::from)
-                .and_then(|code| runtime::inspect(&code));
+            // 启动恢复：JS 读 plugin.js 做完整检查；Python 读 plugin.py
+            // 只做静态扫描（名字与 id 已在索引里，不从代码重新派生）。
+            let recovered = if indexed.runtime == "python" {
+                std::fs::read_to_string(root.join(&indexed.id).join("plugin.py"))
+                    .map_err(PluginError::from)
+                    .and_then(|code| {
+                        crate::python::scan_source(&code).map(|_| indexed.clone())
+                    })
+            } else {
+                std::fs::read_to_string(root.join(&indexed.id).join("plugin.js"))
+                    .map_err(PluginError::from)
+                    .and_then(|code| runtime::inspect(&code))
+            };
             let mut error = None;
             match recovered {
                 Ok(meta) if meta.id == indexed.id => {
@@ -128,6 +145,8 @@ impl PluginManager {
             root,
             document_reader: None,
             web_login: None,
+            python_bootstrap: Arc::new(UnavailablePython),
+            py_proxy_base: Default::default(),
             plugins: tokio::sync::RwLock::new(plugins),
             mutation: tokio::sync::Mutex::new(()),
             strict,
@@ -143,6 +162,23 @@ impl PluginManager {
     pub fn with_web_login(mut self, provider: Arc<dyn crate::web_login::WebLoginProvider>) -> Self {
         self.web_login = Some(provider);
         self
+    }
+    /// 注入 Python 边车引导（iOS 实现启动 CPython；不注入时默认桩实现，
+    /// Python 插件初始化报 UNSUPPORTED）。
+    pub fn with_python_bootstrap(mut self, provider: Arc<dyn PythonBootstrap>) -> Self {
+        self.python_bootstrap = provider;
+        self
+    }
+    /// 记录边车代理入口的实际地址（PyWorker spawn 成功后调）。
+    pub(crate) fn set_py_proxy_base(&self, base: String) {
+        *self.py_proxy_base.lock().unwrap() = Some(base);
+    }
+    /// 该地址是不是自家 Python 代理入口（回环取流时豁免网络目标校验）。
+    pub(crate) fn is_py_proxy_url(&self, url: &str) -> bool {
+        let Some(base) = self.py_proxy_base.lock().unwrap().clone() else {
+            return false;
+        };
+        url.starts_with(base.as_str())
     }
     pub fn with_document_reader(mut self, reader: Arc<dyn DocumentReader>) -> Self {
         self.document_reader = Some(reader);
@@ -289,7 +325,7 @@ impl PluginManager {
         }
         Ok(())
     }
-    async fn initialize(&self, p: &mut Installed, full: bool) -> Result<Worker> {
+    async fn initialize(&self, p: &mut Installed, full: bool) -> Result<RuntimeWorker> {
         if p.retired {
             return Err(PluginError::cancelled());
         }
@@ -317,6 +353,31 @@ impl PluginManager {
         self.requirements(&p.entry.meta)?;
         if let Some(w) = p.worker.take() {
             w.stop();
+        }
+        // Python 运行时：读 plugin.py，走 CPython 边车（PyWorker），不走
+        // QuickJS。media_base 是宿主回环地址，/load 时传给边车，
+        // 蜘蛛的 fetch/log 桥以它为目标；服务已在管理器创建时预热，
+        // 这里只读不启动。
+        if p.entry.meta.runtime == "python" {
+            let code =
+                std::fs::read_to_string(self.root.join(&p.entry.meta.id).join("plugin.py"))?;
+            let media_base = crate::media::MediaSessions::base(self)?;
+            let media_caps = self.media_capabilities.lock().unwrap().clone();
+            let (py, proxy_base) = PyWorker::spawn(
+                p.entry.meta.id.clone(),
+                code,
+                media_base,
+                media_caps,
+                &self.python_bootstrap,
+                p.entry.meta.budget("media.getDetail"),
+            )
+            .await?;
+            self.set_py_proxy_base(proxy_base);
+            let w = RuntimeWorker::Py(py);
+            p.worker = Some(w.clone());
+            p.error = None;
+            p.entry.usable = true;
+            return Ok(w);
         }
         let source = std::fs::read_to_string(self.root.join(&p.entry.meta.id).join("plugin.js"))?;
         let spawn = |endpoint: Value| {
@@ -363,20 +424,20 @@ impl PluginManager {
                 p.entry.endpoint = selected;
             }
         }
-        p.worker = Some(w.clone());
+        p.worker = Some(RuntimeWorker::Js(w.clone()));
         p.error = None;
         p.entry.usable = true;
-        Ok(w)
+        Ok(RuntimeWorker::Js(w))
     }
     fn info(p: &Installed) -> PluginInfo {
         let error = p
             .error
             .clone()
-            .or_else(|| p.worker.as_ref().and_then(Worker::fault));
+            .or_else(|| p.worker.as_ref().and_then(RuntimeWorker::fault));
         let methods = p
             .worker
             .as_ref()
-            .map(|w| w.methods.clone())
+            .map(|w| w.methods().to_vec())
             .unwrap_or_default();
         let status = if !p.entry.enabled {
             "disabled"
@@ -496,10 +557,7 @@ impl PluginManager {
             _ = cancel.cancelled() => return Err(PluginError::cancelled()),
             guard = self.mutation.lock() => guard,
         };
-        let copy = code.clone();
-        let meta = tokio::task::spawn_blocking(move || runtime::inspect(&copy))
-            .await
-            .map_err(|_| PluginError::internal("插件检查失败"))??;
+        let meta = Self::inspect_document(&code, source.as_deref()).await?;
         if cancel.is_cancelled() {
             return Err(PluginError::cancelled());
         }
@@ -522,8 +580,16 @@ impl PluginManager {
             endpoint = p.entry.endpoint.clone();
             was_enabled = p.entry.enabled;
             if !restoring && p.entry.usable {
+                // 快照读旧运行时的文件：JS 是 plugin.js，Python 是 plugin.py。
+                let old_file = if p.entry.meta.runtime == "python" {
+                    "plugin.py"
+                } else {
+                    "plugin.js"
+                };
                 previous = Some(distribution::Snapshot {
-                    code: std::fs::read_to_string(self.root.join(&meta.id).join("plugin.js"))?,
+                    code: std::fs::read_to_string(
+                        self.root.join(&meta.id).join(old_file),
+                    )?,
                     entry: p.entry.clone(),
                 });
             }
@@ -550,7 +616,13 @@ impl PluginManager {
         }
         let dir = self.root.join(&meta.id);
         std::fs::create_dir_all(&dir)?;
-        let file = dir.join("plugin.js");
+        // 运行时切换时旧文件是死文件：保存成功后再清（回滚路径不动它，
+        // 回滚后旧文件仍是旧运行时的正确内容）。
+        let file = dir.join(if meta.runtime == "python" {
+            "plugin.py"
+        } else {
+            "plugin.js"
+        });
         if let Some(previous) = previous {
             atomic_write(
                 &dir.join("plugin.previous.json"),
@@ -643,6 +715,13 @@ impl PluginManager {
             }
             return Err(e);
         }
+        // 保存成功：清掉另一运行时的旧文件（js↔py 切换时）。
+        let stale = dir.join(if meta.runtime == "python" {
+            "plugin.js"
+        } else {
+            "plugin.py"
+        });
+        let _ = std::fs::remove_file(stale);
         Ok(info)
     }
     pub async fn retry(&self, id: &str) -> Result<PluginInfo> {
@@ -726,7 +805,7 @@ impl PluginManager {
             let mut p = plugin.lock().await;
             let full = p.worker.is_none();
             let w = self.initialize(&mut p, full).await?;
-            if !w.methods.iter().any(|m| m == method) {
+            if !w.methods().iter().any(|m| m == method) {
                 return Err(PluginError::new("UNSUPPORTED", "插件未实现该方法"));
             }
             if matches!(
@@ -736,7 +815,7 @@ impl PluginManager {
                 let Transfer::Object(ref mut fields) = params else {
                     return Err(PluginError::invalid("播放参数必须是对象"));
                 };
-                fields.insert("codecs".into(), Transfer::from_json(json!(w.media.codecs)));
+                fields.insert("codecs".into(), Transfer::from_json(json!(w.media().codecs)));
             }
             (w, p.entry.meta.clone(), p.logs.clone())
         };
@@ -896,6 +975,20 @@ impl PluginManager {
             .lock()
             .map_err(|_| PluginError::internal("日志锁不可用"))?
             .push("info", text, "webhome", None);
+        Ok(())
+    }
+
+    /// Python 蜘蛛日志（/pylog 桥）：写进该插件的日志面板，来源记 "python"。
+    pub(crate) async fn python_log(&self, id: &str, level: &str, text: &str) -> Result<()> {
+        let p = self.get(id).await?;
+        let p = p.lock().await;
+        if !p.entry.enabled {
+            return Err(PluginError::new("UNSUPPORTED", "插件已停用"));
+        }
+        p.logs
+            .lock()
+            .map_err(|_| PluginError::internal("日志锁不可用"))?
+            .push(level, text, "python", None);
         Ok(())
     }
     pub async fn meta(&self, id: &str) -> Result<Meta> {

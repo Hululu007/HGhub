@@ -1,0 +1,327 @@
+//! Python worker：把 HPP 方法调用翻译成边车 /call。
+//!
+//! 与 JS 的 `Worker`（runtime.rs）对外同一组接口，供 `PluginManager`
+//! 用 `RuntimeWorker` 枚举统一持有：`methods / media / closed / fault /
+//! stop / stop_and_wait / cancel / call / call_scoped`。
+//!
+//! 解释器本身不在 Rust 进程里：边车（CPython + Flask）由平台引导启动
+//! 一次（`PythonBootstrap`），之后所有蜘蛛调用都走回环 HTTP。
+//! 边车不可用（非 iOS 目标）时引导返回 `UNSUPPORTED`，初始化失败，
+//! 插件保留文件、状态 failed、可重试。
+use crate::{
+    capabilities::MediaCapabilities,
+    python::{
+        client::{LoadInfo, SidecarClient, SidecarInfo},
+        convert,
+    },
+    wire::Transfer,
+    PluginError, Result,
+};
+use futures_util::future::BoxFuture;
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
+
+/// 平台引导：保证边车已启动并返回入口地址。
+/// iOS 实现负责启动 CPython 解释器线程；非 iOS 目标返回 UNSUPPORTED。
+pub trait PythonBootstrap: Send + Sync {
+    fn ensure_started(&self) -> BoxFuture<'static, Result<SidecarInfo>>;
+}
+
+/// 非 iOS 目标的桩引导：编译通过，但任何 Python 插件初始化都报明错。
+pub struct UnavailablePython;
+
+impl PythonBootstrap for UnavailablePython {
+    fn ensure_started(&self) -> BoxFuture<'static, Result<SidecarInfo>> {
+        Box::pin(async {
+            Err(PluginError::new(
+                "UNSUPPORTED",
+                "Python 运行时仅支持 iOS，当前平台不可用",
+            ))
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct PyWorker {
+    plugin_id: String,
+    client: Arc<SidecarClient>,
+    methods: Vec<String>,
+    /// 边车探测到的蜘蛛方法名（TVBox 名字），供调用时选来源方法。
+    spider_methods: Vec<String>,
+    media: MediaCapabilities,
+    fault: Arc<Mutex<Option<PluginError>>>,
+    closed: Arc<AtomicBool>,
+    tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+}
+
+impl PyWorker {
+    /// 加载蜘蛛并探测方法面。`media_base` 是宿主回环地址（取数桥目标）。
+    /// 成功时返回 worker 与边车代理入口地址（供回环取流豁免用）。
+    pub async fn spawn(
+        plugin_id: String,
+        code: String,
+        media_base: String,
+        media: MediaCapabilities,
+        bootstrap: &Arc<dyn PythonBootstrap>,
+        budget: Duration,
+    ) -> Result<(Self, String)> {
+        let info = bootstrap.ensure_started().await?;
+        let client = Arc::new(SidecarClient::new(info.api_base.clone())?);
+        let health = client.health(Duration::from_secs(5)).await?;
+        let loaded: LoadInfo = client
+            .load(&plugin_id, &code, &media_base, budget)
+            .await?;
+        convert::check_required(&loaded.methods)?;
+        let methods = convert::hpp_methods(&loaded.methods);
+        // init(extend="")：只有蜘蛛自己实现了 init 才调；没实现的用基类
+        // 空实现（类式，BaseSpider.init 是 pass）或直接跳过（函数式），
+        // 不因此初始化失败。v1 无配置来源，传空串；以后 meta.settings
+        // 接入时再把设置 JSON 串进来。init 抛异常即初始化失败。
+        if loaded.methods.iter().any(|m| m == "init") {
+            client
+                .call(&plugin_id, "init", vec![Value::String(String::new())], budget)
+                .await?;
+        }
+        Ok((
+            Self {
+                plugin_id,
+                client,
+                methods,
+                spider_methods: loaded.methods,
+                media,
+                fault: Arc::new(Mutex::new(None)),
+                closed: Arc::new(AtomicBool::new(false)),
+                tokens: Arc::new(Mutex::new(HashMap::new())),
+            },
+            health.proxy_base,
+        ))
+    }
+
+    pub fn methods(&self) -> &[String] {
+        &self.methods
+    }
+
+    pub fn media(&self) -> &MediaCapabilities {
+        &self.media
+    }
+
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
+    pub fn fault(&self) -> Option<PluginError> {
+        self.fault.lock().unwrap().clone()
+    }
+
+    pub fn stop(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        for t in self.tokens.lock().unwrap().values() {
+            t.cancel();
+        }
+    }
+
+    pub async fn stop_and_wait(&self) -> Result<()> {
+        self.stop();
+        // 尽力卸载边车里的蜘蛛：失败不报错，/load 同 key 会覆盖。
+        self.client
+            .unload(&self.plugin_id, Duration::from_secs(1))
+            .await;
+        Ok(())
+    }
+
+    pub fn cancel(&self, id: &str) {
+        if let Some(t) = self.tokens.lock().unwrap().get(id) {
+            t.cancel();
+        }
+    }
+
+    pub async fn call(
+        &self,
+        id: String,
+        method: String,
+        params: Transfer,
+        budget: Duration,
+    ) -> Result<Transfer> {
+        self.call_scoped(id, method, params, budget, false).await
+    }
+
+    pub async fn call_scoped(
+        &self,
+        id: String,
+        method: String,
+        params: Transfer,
+        budget: Duration,
+        _user_auth: bool,
+    ) -> Result<Transfer> {
+        if self.closed() {
+            return Err(PluginError::internal("Python 运行时已停止"));
+        }
+        params.validate(8 * 1024 * 1024)?;
+        let args = params.json();
+        // home.getSections 的来源按蜘蛛实际有的方法选：有 homeVideoContent
+        // 用它，否则退回 homeContent 的 list（两者不能同时调，避免两份推荐打架）。
+        let (spider_method, spider_args, home_section) =
+            if method == "home.getSections" {
+                if self.spider_methods.iter().any(|m| m == "homeVideoContent") {
+                    ("homeVideoContent", vec![], Some(("hot", "row")))
+                } else {
+                    ("homeContent", vec![], Some(("home", "grid")))
+                }
+            } else {
+                let (m, a) = convert::dispatch(&method, &args).ok_or_else(|| {
+                    PluginError::new("UNSUPPORTED", "Python 蜘蛛不支持该方法")
+                })?;
+                (m, a, None)
+            };
+        let cancel = CancellationToken::new();
+        {
+            let mut tokens = self.tokens.lock().unwrap();
+            if tokens.contains_key(&id) {
+                return Err(PluginError::invalid("requestId 重复"));
+            }
+            tokens.insert(id.clone(), cancel.clone());
+        }
+        let client = self.client.clone();
+        let key = self.plugin_id.clone();
+        let method_name = spider_method.to_string();
+        let result = tokio::select! {
+            _ = cancel.cancelled() => Err(PluginError::cancelled()),
+            r = client.call(&key, &method_name, spider_args, budget) => r,
+        };
+        self.tokens.lock().unwrap().remove(&id);
+        let raw = match result {
+            Ok(v) => v,
+            Err(mut e) => {
+                // 边车连不上说明解释器已死：记一次故障，下次调用重新初始化。
+                if e.code == "INTERNAL" && e.message.contains("边车连接失败") {
+                    *self.fault.lock().unwrap() = Some(e.clone());
+                }
+                if e.code == "TIMEOUT" {
+                    e = PluginError::timeout();
+                }
+                return Err(e);
+            }
+        };
+        let converted = if let Some((section_id, layout)) = home_section {
+            convert::sections(&raw, section_id, layout)?
+        } else {
+            self.convert(&method, &raw, &args)?
+        };
+        Ok(Transfer::from_json(converted))
+    }
+
+    fn convert(&self, method: &str, raw: &Value, args: &Value) -> Result<Value> {
+        match method {
+            "catalog.getCategories" => convert::categories(raw),
+            "feed.list" => convert::page(raw),
+            "catalog.list" => convert::page(raw),
+            "search.search" => convert::page(raw),
+            "media.getDetail" => convert::detail(raw),
+            "media.resolvePlayback" => {
+                let flag = args
+                    .get("playlistId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                convert::playback(raw, flag)
+            }
+            _ => Err(PluginError::new("UNSUPPORTED", "Python 蜘蛛不支持该方法")),
+        }
+    }
+}
+
+/// JS Worker 与 Python Worker 的统一持有：对外同一组方法。
+#[derive(Clone)]
+pub enum RuntimeWorker {
+    Js(crate::runtime::Worker),
+    Py(PyWorker),
+}
+
+impl RuntimeWorker {
+    pub fn methods(&self) -> &[String] {
+        match self {
+            RuntimeWorker::Js(w) => &w.methods,
+            RuntimeWorker::Py(w) => w.methods(),
+        }
+    }
+
+    pub fn media(&self) -> &MediaCapabilities {
+        match self {
+            RuntimeWorker::Js(w) => &w.media,
+            RuntimeWorker::Py(w) => w.media(),
+        }
+    }
+
+    pub fn closed(&self) -> bool {
+        match self {
+            RuntimeWorker::Js(w) => w.closed(),
+            RuntimeWorker::Py(w) => w.closed(),
+        }
+    }
+
+    pub fn fault(&self) -> Option<PluginError> {
+        match self {
+            RuntimeWorker::Js(w) => w.fault(),
+            RuntimeWorker::Py(w) => w.fault(),
+        }
+    }
+
+    pub fn stop(&self) {
+        match self {
+            RuntimeWorker::Js(w) => w.stop(),
+            RuntimeWorker::Py(w) => w.stop(),
+        }
+    }
+
+    pub async fn stop_and_wait(&self) -> Result<()> {
+        match self {
+            RuntimeWorker::Js(w) => w.stop_and_wait().await,
+            RuntimeWorker::Py(w) => w.stop_and_wait().await,
+        }
+    }
+
+    pub fn cancel(&self, id: &str) {
+        match self {
+            RuntimeWorker::Js(w) => w.cancel(id),
+            RuntimeWorker::Py(w) => w.cancel(id),
+        }
+    }
+
+    pub async fn call(
+        &self,
+        id: String,
+        method: String,
+        params: Transfer,
+        budget: Duration,
+    ) -> Result<Transfer> {
+        match self {
+            RuntimeWorker::Js(w) => w.call(id, method, params, budget).await,
+            RuntimeWorker::Py(w) => w.call(id, method, params, budget).await,
+        }
+    }
+
+    pub async fn call_scoped(
+        &self,
+        id: String,
+        method: String,
+        params: Transfer,
+        budget: Duration,
+        user_auth: bool,
+    ) -> Result<Transfer> {
+        match self {
+            RuntimeWorker::Js(w) => {
+                w.call_scoped(id, method, params, budget, user_auth).await
+            }
+            RuntimeWorker::Py(w) => {
+                w.call_scoped(id, method, params, budget, user_auth).await
+            }
+        }
+    }
+}

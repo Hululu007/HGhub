@@ -7,9 +7,9 @@ use crate::{
 };
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Json, Path, Query, State},
     http::{HeaderMap, Method, Response, StatusCode},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use base64::Engine;
@@ -174,6 +174,9 @@ impl MediaSessions {
                         "/webhome/:id",
                         get(serve_webhome_page).head(serve_webhome_page),
                     )
+                    // Python 边车桥：取数走插件自己的 Network，日志写插件日志面板。
+                    .route("/pyfetch", post(pyfetch).options(preflight))
+                    .route("/pylog", post(pylog).options(preflight))
                     .with_state(weak);
                 tokio::spawn(async move {
                     let _ = axum::serve(listener, router)
@@ -184,6 +187,19 @@ impl MediaSessions {
             })
             .await
             .cloned()
+    }
+
+    /// 已启动的回环服务地址。只读，不启动——`initialize` 在媒体请求
+    /// 的处理路径上（serve_resource → initialize），不能在这里现启动
+    /// 服务（路由构造会引用 serve_resource，形成 Send 循环依赖）；
+    /// 服务由 app 层在管理器第一次建好时预热（见 plugins.rs 的 manager()）。
+    pub(crate) fn base(manager: &PluginManager) -> Result<String> {
+        manager
+            .sessions
+            .base
+            .get()
+            .cloned()
+            .ok_or_else(|| PluginError::internal("回环媒体服务未启动"))
     }
     /// 把一个已下载文件挂到回环服务上，返回 SenPlayer 可直接取流的地址。
     /// 调用方须先确认路径落在 Downloads 目录下（见 download.rs 的
@@ -1018,25 +1034,48 @@ async fn proxy_upstream(
             }
         }
     }
-    let upstream = tokio::time::timeout(
-        Duration::from_secs(20),
-        network.request(
-            &r.url,
-            if buffered {
-                Method::GET
-            } else {
-                method.clone()
-            },
-            headers,
-            None,
-            true,
-            true,
-            network::Queue::Media,
-            &session.cancel,
-        ),
-    )
-    .await
-    .map_err(|_| PluginError::timeout())??;
+    // 自家 Python 代理入口是回环地址，Network::target 会拦回环；但地址由
+    // 边车 /load 时登记、可信，用裸 reqwest 直取（不经过系统代理）。
+    let upstream = if manager.is_py_proxy_url(&r.url) {
+        let plain = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| PluginError::internal(format!("创建取流客户端失败：{e}")))?;
+        let request = plain
+            .request(
+                if buffered {
+                    Method::GET
+                } else {
+                    method.clone()
+                },
+                &r.url,
+            )
+            .headers(headers);
+        tokio::time::timeout(Duration::from_secs(20), request.send())
+            .await
+            .map_err(|_| PluginError::timeout())?
+            .map_err(|e| PluginError::new("NETWORK", format!("Python 代理取流失败：{e}")))?
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            network.request(
+                &r.url,
+                if buffered {
+                    Method::GET
+                } else {
+                    method.clone()
+                },
+                headers,
+                None,
+                true,
+                true,
+                network::Queue::Media,
+                &session.cancel,
+            ),
+        )
+        .await
+        .map_err(|_| PluginError::timeout())??
+    };
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
     let final_url = upstream.url().clone();
@@ -1149,7 +1188,10 @@ async fn proxy_upstream(
             let url = final_url
                 .join(raw)
                 .map_err(|_| PluginError::invalid("HLS 子资源 URL 无效"))?;
-            network.target(url.as_str())?;
+            // 自家 Python 代理入口免目标校验（回环地址；取流时走裸 reqwest）。
+            if !manager.is_py_proxy_url(url.as_str()) {
+                network.target(url.as_str())?;
+            }
             let index = session.register(Resource {
                 url: url.to_string(),
                 kind: kind.into(),
@@ -1379,6 +1421,103 @@ async fn serve_webhome_page(
     .await;
     cors(result.unwrap_or_else(error_response))
 }
+fn json_response(v: Value) -> Response<Body> {
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&v).unwrap()))
+        .unwrap()
+}
+
+/// Python 边车的取数桥：POST /pyfetch
+/// {pluginId, url, method?, headers?, bodyBase64?, timeoutMs?, maxBytes?}
+/// → {status, headers, bodyBase64, url}。
+/// 走该插件自己的 Network（同插件的 Cookie 罐、目标校验、限速与重试，
+/// 与 JS 插件的 hg.http 一致）。请求体与响应体都按 Base64 传，
+/// 避免二进制在 JSON 里损坏。桥不可用时蜘蛛侧 requests 直连兜底。
+async fn pyfetch(
+    State(weak): State<Weak<PluginManager>>,
+    Json(body): Json<Value>,
+) -> Response<Body> {
+    let result: Result<Value> = async {
+        let manager = weak.upgrade().ok_or_else(PluginError::cancelled)?;
+        let plugin_id = body["pluginId"]
+            .as_str()
+            .ok_or_else(|| PluginError::invalid("pyfetch 缺少 pluginId"))?;
+        let url = body["url"]
+            .as_str()
+            .ok_or_else(|| PluginError::invalid("pyfetch 缺少 url"))?;
+        let network = manager.network(plugin_id).await?;
+        let mut params = Transfer::Object(BTreeMap::from([
+            ("url".into(), Transfer::String(url.to_string())),
+            (
+                "method".into(),
+                Transfer::String(body["method"].as_str().unwrap_or("GET").to_string()),
+            ),
+            (
+                "headers".into(),
+                Transfer::from_json(body["headers"].clone()),
+            ),
+            (
+                "timeoutMs".into(),
+                Transfer::from_json(json!(body["timeoutMs"].as_u64().unwrap_or(15_000))),
+            ),
+        ]));
+        if let Some(b64) = body["bodyBase64"].as_str() {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|_| PluginError::invalid("pyfetch 请求体不是合法 Base64"))?;
+            if let Transfer::Object(ref mut fields) = params {
+                fields.insert("body".into(), Transfer::Bytes(bytes));
+            }
+        }
+        params.validate(8 * 1024 * 1024)?;
+        let transfer = network.fetch(params, CancellationToken::new()).await?;
+        let v = transfer.json();
+        let data: Vec<u8> = match transfer.field("data") {
+            Some(Transfer::Bytes(b)) => b.clone(),
+            Some(Transfer::String(s)) => s.as_bytes().to_vec(),
+            _ => vec![],
+        };
+        Ok(json!({
+            "status": v["status"],
+            "headers": v["headers"],
+            "bodyBase64": base64::engine::general_purpose::STANDARD.encode(data),
+            "url": v["url"],
+        }))
+    }
+    .await;
+    match result {
+        Ok(v) => json_response(v),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Python 边车的日志桥：POST /pylog {pluginId, level?, text} → {"ok": true}。
+/// 写进该插件的日志面板（与 webhome_log 同一条路）；失败不影响蜘蛛调用。
+async fn pylog(
+    State(weak): State<Weak<PluginManager>>,
+    Json(body): Json<Value>,
+) -> Response<Body> {
+    let result: Result<Value> = async {
+        let manager = weak.upgrade().ok_or_else(PluginError::cancelled)?;
+        let plugin_id = body["pluginId"]
+            .as_str()
+            .ok_or_else(|| PluginError::invalid("pylog 缺少 pluginId"))?;
+        let level = body["level"].as_str().unwrap_or("info");
+        let text = body["text"].as_str().unwrap_or("");
+        manager
+            .python_log(plugin_id, level, text)
+            .await?;
+        Ok(json!({"ok": true}))
+    }
+    .await;
+    match result {
+        Ok(v) => json_response(v),
+        Err(e) => error_response(e),
+    }
+}
+
 fn rewrite_hls(
     text: &str,
     mut rewrite: impl FnMut(&str, &str) -> Result<String>,

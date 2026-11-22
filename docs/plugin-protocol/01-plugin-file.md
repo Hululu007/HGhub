@@ -132,15 +132,16 @@ settings: [
 | 方式 | 说明 |
 | --- | --- |
 | 本地 `.js` 文件 | 可一次选择多个 |
+| 本地 `.py` 文件 | 内容识别，不认扩展名；TVBox Python 蜘蛛，见下 |
 | 本地 `.html` 文件 | 内容识别，不认扩展名；宿主生成一个包装插件，HTML 文件存进插件目录（见下） |
 | 本地 `manifest.json` | 按其中的列表批量导入（§4） |
-| URL | 下载后按内容识别单个 JS 插件、JSON 插件列表、HTML 页面或裸站点 JSON，支持无扩展名的下载接口 |
-| 粘贴代码 | 以 UTF-8 源码导入单个插件；无来源 URL 时需 `updateUrl` 才能检查更新 |
+| URL | 下载后按内容识别单个 JS 插件、JSON 插件列表、HTML 页面、Python 蜘蛛或裸站点 JSON，支持无扩展名的下载接口 |
+| 粘贴代码 | 以 UTF-8 源码导入单个插件；无来源 URL 时需 `updateUrl` 才能检查更新；Python 蜘蛛源码同样可粘贴导入 |
 | 粘贴站点 JSON | `{"homePage": "...", "name": ...}` 认作一个 WebHome 源，包成远程页面插件 |
 
 URL 路径扩展名与 `Content-Type` 仅作提示，不作为拒绝依据。导入时宿主按内容识别：
 HTML 包成 WebHome 源；裸站点 JSON 认作一个 WebHome 源；JSON 插件列表按 §4 批量导入；
-否则按 JS 模块读取元信息。识别失败时报告具体错误。
+Python 蜘蛛按下面一段导入；否则按 JS 模块读取元信息。识别失败时报告具体错误。
 相对地址以重定向后的最终列表 URL 为基准；下载仍受宿主网络规则与对应文件大小限制约束。
 
 HTML 直接导入（v0.0.48）：内容去空白后以 `<!doctype html` 或 `<html` 开头（大小写不敏感）
@@ -152,6 +153,20 @@ HTML 直接导入（v0.0.48）：内容去空白后以 `<!doctype html` 或 `<ht
 没有时取 host 或文件名；重复导入同一文件覆盖同一个插件，不产生重复条目。
 限制：只支持单个自包含的 HTML 文件；本地页面引用的相对本地资源（如旁边的 `app.js`）
 不会一起打包，不做文件夹导入。
+
+Python 直接导入（v0.0.53）：内容识别，不认扩展名。一段文本是 Python 蜘蛛，当且仅当
+它不含 `export const meta`（含该标记的一律按 JS 插件走），并且满足其一：
+含 `class Spider(` 且至少带一个蜘蛛方法定义、`from base.spider import` 或 `BaseSpider`；
+或至少两个模块级 TVBox 函数定义（函数式蜘蛛）。导入时只做静态扫描，不执行代码：
+类式要求至少实现一个内容方法（`homeContent` / `homeVideoContent` / `categoryContent` /
+`detailContent` / `searchContent` / `playerContent`），否则报明错；执行期的真实方法面
+以边车 `/load` 返回的为准（见 [02 §11](02-runtime.md)）。导入的文件存为插件目录里的
+`plugin.py`；启动恢复时只做静态扫描，不重新派生名字与 id。`meta` 从源码派生：
+名字先取来源文件名，再取 `getName()` 的字面量返回值，都没有时用 `spider`；
+id 是 `py.<名字词干>`（只留小写字母数字与 `._-`，其余换 `-`）；版本恒为 `1.0.0`，
+`runtime` 为 `"python"`，`kind` 恒为 `source`。Python 源没有可信的版本字段，
+更新靠手动重导：重复导入同一文件覆盖同一个插件。Python 蜘蛛不声明 `meta.settings`、
+不声明 WebHome 首页。
 
 导入单个插件的流程：
 

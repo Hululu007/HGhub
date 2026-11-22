@@ -574,11 +574,46 @@ impl PluginManager {
             page,
         })
     }
-    pub(super) async fn inspect_document(code: &str) -> Result<Meta> {
+    /// 检查一份插件源码，派生 meta。JS 走 QuickJS 检查（export meta + default）；
+    /// Python 按内容识别，走静态扫描派生 meta（见 python::scan）。
+    /// `location` 是导入来源（URL/文件路径），只用于从文件名派生名字/id，
+    /// 没有时从 `getName()` 字面量或默认值派生。
+    pub(crate) async fn inspect_document(code: &str, location: Option<&str>) -> Result<Meta> {
+        if crate::python::is_python(code) {
+            return Self::inspect_python(code, location);
+        }
+        if crate::python::looks_like_python(code) {
+            // 看着像 Python 但不是蜘蛛：报蜘蛛面缺失，别报 JS 的通用错。
+            return Err(crate::python::scan_source(code).unwrap_err());
+        }
         let copy = code.to_string();
         tokio::task::spawn_blocking(move || runtime::inspect(&copy))
             .await
             .map_err(|_| PluginError::internal("插件检查失败"))?
+    }
+
+    /// 从 .py 源码派生 meta：名字先取来源文件名，再取 `getName()` 字面量，
+    /// 都没有用 "spider"；id 是 `py.<slug>`；版本恒为 1.0.0——
+    /// Python 源没有可信的版本字段，更新靠手动重导（见 02 §7）。
+    fn inspect_python(code: &str, location: Option<&str>) -> Result<Meta> {
+        let _face = crate::python::scan_source(code)?;
+        let name = location
+            .and_then(crate::python::scan::location_stem)
+            .filter(|s| !s.is_empty())
+            .or_else(|| crate::python::scan::static_get_name(code))
+            .unwrap_or_else(|| "spider".to_string());
+        let name: String = name.chars().take(60).collect();
+        let id = format!("py.{}", crate::python::scan::slugify(&name));
+        let identity = json!({
+            "id": id,
+            "name": name,
+            "version": "1.0.0",
+            "protocol": 1,
+            "kind": "source",
+            "runtime": "python",
+            "description": "TVBox Python 蜘蛛",
+        });
+        Meta::parse(identity)
     }
     async fn candidates(
         &self,
@@ -661,7 +696,7 @@ impl PluginManager {
                 items,
             ))
         } else {
-            let meta = Self::inspect_document(&document.text).await?;
+            let meta = Self::inspect_document(&document.text, Some(&document.final_location)).await?;
             let installed_version = if let Some(p) = installed.get(&meta.id) {
                 Some(p.lock().await.entry.meta.version.clone())
             } else {
@@ -853,7 +888,7 @@ impl PluginManager {
                         (document.text, document.page.map(|p| p.content))
                     }
                 };
-                let meta = Self::inspect_document(&code).await?;
+                let meta = Self::inspect_document(&code, Some(&candidate.origin.location)).await?;
                 if candidate
                     .expected
                     .as_ref()
@@ -970,7 +1005,7 @@ impl PluginManager {
             }
             next_origin = candidate.origin;
             let document = self.load_document(&next_origin.location, cancel).await?;
-            let meta = Self::inspect_document(&document.text).await?;
+            let meta = Self::inspect_document(&document.text, Some(&next_origin.location)).await?;
             if meta.id != id || meta.version != candidate.info.version {
                 return Err(PluginError::invalid(
                     "更新文件的 id 或 version 与来源列表不一致",
@@ -981,7 +1016,7 @@ impl PluginManager {
             let document = self.load_document(&origin.location, cancel).await?;
             (document.text, document.page)
         };
-        let meta = Self::inspect_document(&code).await?;
+        let meta = Self::inspect_document(&code, Some(&origin.location)).await?;
         if meta.id != id {
             return Err(PluginError::invalid("更新文件的插件 ID 不一致"));
         }
@@ -1118,7 +1153,7 @@ impl PluginManager {
             self.root.join(id).join("plugin.previous.json"),
         )?)
         .map_err(|_| PluginError::invalid("恢复文件损坏"))?;
-        let meta = Self::inspect_document(&snapshot.code).await?;
+        let meta = Self::inspect_document(&snapshot.code, snapshot.entry.source.as_deref()).await?;
         if meta.id != id {
             return Err(PluginError::invalid("恢复文件身份不一致"));
         }

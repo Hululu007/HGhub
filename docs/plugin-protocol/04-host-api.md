@@ -442,3 +442,88 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 本地页面（`meta.webhome.localPage`，见 [01 §2](01-plugin-file.md)）存在插件目录里，
 打开时宿主用回环地址提供（端口每次启动都变，不写进 meta）；页面在该地址下加载，
 相对地址按该地址解析，但只有那一个文件被提供，相对本地资源不会一起打包（见 [01 §3](01-plugin-file.md)）。
+
+## 15. `base.spider`（Python 蜘蛛基类）
+
+TVBox Python 蜘蛛不拿 `hg` 对象，拿一个 Python 基类。宿主在解释器启动时
+注入 `base` 与 `base.spider` 两个模块名（`Spider` 与 `BaseSpider` 两个名都暴露），
+蜘蛛写 `from base.spider import Spider`（或 `BaseSpider`）即可导入；在宿主之外
+没有 `base` 包时，蜘蛛应当用 `try/except ImportError` 兜底一个空基类，
+让文件仍可被 import 与静态扫描（见 `examples/demo-spider.py`）。
+
+### 15.1 加载与类检测
+
+- `load(key, code)` 时宿主往模块 globals 注入 `Spider`（基类）与 `getProxyUrl`，
+  再 `exec` 代码。类检测优先 `BaseSpider` 子类，其次名叫 `Spider` 的类
+  （即使不继承基类）；类自身 `__dict__` 里至少实现一个
+  `homeContent` / `categoryContent` / `detailContent` / `searchContent` /
+  `playerContent` / `action`，否则按函数式存模块；两种写法都没有时加载失败。
+- 未继承基类的类，宿主为其补上缺失的 `setCache` / `getCache` / `delCache`
+  （从 `BaseSpider` 借），并绑定代理上下文（有 `_set_proxy_context` 就调它，
+  没有就手写属性并补 `getProxyUrl`）。
+- 方法面探测只认蜘蛛自身实现的方法，不认基类的空方法：`init` 等基类默认
+  实现不计入方法面；宿主只在蜘蛛自己实现了 `init` 时才调它（见 [02 §11.4](02-runtime.md)）。
+- 另有兼容层：`Cryptodome` 别名指到 `Crypto`（`pycryptodome` 在 v1 不带时
+  只打 WARNING）；`pyquery.fromstring` 被打补丁，强制用 `lxml.html` +
+  `recover` + `huge_tree`，修大文档截断（同样只在有包时生效）。
+
+### 15.2 基类方法表
+
+`Spider` 是单例（`__new__` 只建一个实例）。方法签名全给默认值，
+与 TVBox / FongMi 的蜘蛛面一致；宿主侧的参数适配见 [06 §19](06-capabilities.md)。
+
+| 方法 | 说明 |
+| --- | --- |
+| `init(extend="")` | 初始化；v1 宿主恒传 `""`（无 `meta.settings`） |
+| `homeContent(filter)` | 首页分类与筛选；宿主传 `filter=1`（`if filter:` 才返回 filters，空字典是 falsy，会让筛选静默丢失） |
+| `homeVideoContent()` | 首页推荐视频 |
+| `categoryContent(tid, pg, filter, extend)` | 分类列表；`pg` 恒为字符串（很多蜘蛛调 `pg.isdigit()`）；宿主传 `filter={}`，`extend` 为筛选/排序字典 |
+| `detailContent(ids)` | 详情；`ids` 恒为列表（宿主把单个 id 包成 `[id]`） |
+| `searchContent(key, quick, pg="1")` | 搜索；宿主传 `quick=True`，`pg` 为字符串 |
+| `playerContent(flag, id, vipFlags)` | 播放解析；`flag` 是播放线路名（`vod_play_from` 的一项），`vipFlags` 恒为空列表 |
+| `liveContent(url)` | 直播内容；v1 不映射到 HPP 能力（见 [06 §19](06-capabilities.md)） |
+| `localProxy(param)` | 本地代理：返回 `[status, contentType, body, headers]`（见 §15.3）；`param` 为字典 |
+| `isVideoFormat(url)` | 该地址是不是可直接播放的视频格式 |
+| `manualVideoCheck()` | 手动视频检查 |
+| `action(action)` | 蜘蛛扩展动作 |
+| `destroy()` | 销毁 |
+| `getName()` | 蜘蛛名（导入时静态命名取它的字面量返回值，见 [01 §3](01-plugin-file.md)） |
+| `getDependence()` | 依赖列表 |
+| `getProxyUrl(local=True)` | 返回边车代理入口地址（`…/proxy?do=py&siteType=3&siteKey=<urlencoded>`），供 `playerContent` 返回的播放地址与图片地址使用 |
+| `setCache(key, value)` / `getCache(key)` / `delCache(key)` | 进程级缓存，按站点命名空间隔离；`getCache` 处理 JSON 与 `expiresAt` |
+| `fetch(url, params=None, cookies=None, headers=None, timeout=10, verify=True, stream=False, …)` | 取数：优先走宿主取数桥（见 §15.4），桥不可用时回落 `urllib` |
+| `post(url, params=None, data=None, json_data=None, cookies=None, headers=None, timeout=10, verify=True, …)` | 同上，POST |
+| `html(content)` | `lxml` etree 解析 HTML；v1 不带 `lxml` 时报明错 |
+| `page(items, pg, limit, total=None)` | 分页切片辅助 |
+| `regStr(reg, src, group=1)` / `removeHtmlTags(src)` / `cleanText(src)` | 正则与文本辅助 |
+| `str2json(s)` / `json2str(obj)` | JSON 互转 |
+| `log(msg)` | 写插件日志面板（走宿主日志桥，见 §15.4） |
+
+### 15.3 `localProxy` 与边车代理入口
+
+- 蜘蛛的播放地址或图片地址可以是 `getProxyUrl()` 拼出的代理地址；
+  播放器与图片请求打到边车代理入口（默认 `127.0.0.1:9978`，被占时换
+  临时端口，实际地址以 `/health` 返回的 `proxyBase` 为准），边车按
+  `siteKey` 定归属（优先媒体缓存，其次 active key，单蜘蛛时直接取），
+  再调该蜘蛛的 `localProxy(param)`。
+- `/proxy` 会把查询串里的空格还原成 `+`（Base64 里的 `+` 被 Flask 解成
+  空格的兼容处理）。`localProxy` 返回 `[status, contentType, body, headers]`
+  四元组，边车用 `normalize_proxy_result` 归一化后返回；脚本级 500
+  （`type` 为 `media` / `single` 时）只重试一次。
+- 媒体 Range：`localProxy` 的 `param` 没给结束位置时，宿主把开放区间
+  截成前 512 KiB（`bytes=<start>-<start+524287>`），避免第三方代理
+  无界读取整个媒体文件。
+
+### 15.4 宿主取数桥与日志桥
+
+- `fetch` / `post` 优先走宿主回环服务 `/pyfetch`：宿主用该插件自己的
+  `Network`（Cookie 罐、网络规则、限速，见 [03](03-host-rules.md)）执行，
+  返回状态、头与正文；宿主桥不可用时回落到蜘蛛进程内 `requests` 直连
+  （不走宿主规则、不带插件 Cookie 罐）。`_host_fetch` 是内部实现，
+  蜘蛛不要直接调它。
+- `log` 优先走回环服务 `/pylog`，写入该插件的日志面板（限额见 [02 §10](02-runtime.md)）；
+  桥不可用时退回解释器标准输出。
+- `fetch` 返回的响应对象有 `.text` / `.content` / `.json()` / `.status_code` /
+  `.headers` / `.ok` / `.url`，与 `requests` 的 `Response` 常用面一致；
+  桥返回完整响应体（上限 8 MiB），不做流式读取，`stream` 语义不保留——
+  `stream=True` 只在直连兜底时生效。

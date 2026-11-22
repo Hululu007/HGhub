@@ -264,3 +264,85 @@ throw new hg.PluginError("RATE_LIMITED", "请求过于频繁", { retryAfterSec: 
 
 - `hg.log.*`、`console.*`、宿主校验告警与运行时错误共用该插件的日志限额和环形缓冲，用户可在插件详情页查看与导出。超出速率的行被丢弃并计数，读取日志时可见累计数量；快照仍不超过 2000 行。单行的 UTF-8 JSON 记录（含 details）不超过 2 KiB，过长文本按字符边界截断，过长 details 可变为截断的 JSON 文本。
 - 日志只保存在本机，宿主**不得**自动上传。
+
+## 11. Python 运行时（TVBox 蜘蛛）
+
+TVBox Python 蜘蛛（`.py` 源）不跑在 QuickJS 里，跑在第二个运行时上。
+本节只规定 Python 运行时的环境契约与宿主行为；蜘蛛写法与方法映射见
+[04 §15](04-host-api.md)（`base.spider`）与 [06 §19](06-capabilities.md)。
+
+### 11.1 边车架构
+
+- 宿主在应用进程内起一个独立线程跑 **CPython 解释器**，解释器里跑一个
+  HTTP 服务（边车），监听回环地址；Rust 侧只是 HTTP 客户端，不直接调
+  Python C API，不写 FFI 绑定。边车端点：`POST /load`（加载蜘蛛并返回
+  方法面）、`POST /call`（调蜘蛛方法并返回 JSON）、`GET/POST /proxy`
+  （转 `localProxy`，见 [06 §19](06-capabilities.md)）、`GET /health`、
+  `GET /list`、`POST /unload`。
+- **解释器线程一旦启动永不退出**：CPython 同进程不支持二次初始化。
+  边车服务用自愈式循环跑，单个蜘蛛异常只影响当次请求，不重启解释器。
+  边车连不上说明解释器已死：记一次故障，下次调用重新初始化（初始化会
+  失败并报明错，因为解释器无法重建；应用重启后恢复）。
+- CPython 版本：**BeeWare Python-Apple-support 3.12-b13（CPython 3.12.16），
+  最低 iOS 13.0**，iOS 16.6.1 可用；与 ant-video 2.0.6 实证过的
+  CPython 3.12.13 同一 3.12 线。包体积因此变大很多，是已知代价。
+- **仅 iOS 提供 Python 运行时**。非 iOS 目标用桩后端：编译通过，
+  但任何 Python 插件初始化都报 `UNSUPPORTED`（"Python 运行时仅支持 iOS"），
+  插件保留文件、状态为失败、可重试。不要把"非 iOS 编译通过"写成"该平台可用"。
+
+### 11.2 宿主取数桥与日志桥
+
+蜘蛛没有原生网络：取数优先走宿主网络，日志进插件日志面板。
+
+- `base.spider.fetch/post` 优先把请求发给宿主回环服务 `/pyfetch`，
+  由宿主用该插件自己的 `Network`（Cookie 罐、网络规则、限速）执行，
+  返回状态、头与正文；宿主桥不可用时回落到蜘蛛进程内 `requests` 直连
+  （不走宿主规则、不带插件 Cookie 罐）。`fetch` 的 `verify` 等参数见 [04 §15](04-host-api.md)。
+- `base.spider.log` 发给回环服务 `/pylog`，写入该插件的日志面板，
+  共用 §10 的限额。宿主桥不可用时退回解释器标准输出。
+- 内嵌运行时没有系统 CA 根证书：边车启动时全局关掉默认 HTTPS 证书校验
+  （`ssl._create_default_https_context = ssl._create_unverified_context`），
+  `requests` 因自带 certifi 不受影响。
+
+### 11.3 打包的 site-packages
+
+v1 只打**纯 Python**包（wheel 里不含 `.so`）：
+
+| 包 | 版本 | 用途 |
+| --- | --- | --- |
+| `requests` + `urllib3` / `certifi` / `idna` / `charset-normalizer` | 2.34.2 / 2.8.0 / 2026.11.20 / 3.20 / 3.5.2 | 蜘蛛最常用的 HTTP 库 |
+| `flask` + `werkzeug` / `jinja2` / `markupsafe` / `blinker` / `click` / `itsdangerous` | 3.1.0 / 3.1.3 / 3.1.6 / 3.0.2 / 1.9.0 / 8.1.8 / 2.2.0 | 边车 HTTP 服务 |
+| `httpx` + `httpcore` / `h11` / `sniffio` | 0.28.1 / 1.0.9 / 0.16.0 / 1.3.1 | 异步 HTTP（蜘蛛可用） |
+| `beautifulsoup4` + `soupsieve` | 4.15.0 / 2.8 | HTML 解析（纯 Python 部分） |
+
+`charset-normalizer` 与 `markupsafe` 的 wheel 里有可选 `.so`，打包时只拷
+`.py`，走纯 Python 回退。**`lxml` / `pyquery` / `pycryptodome` v1 不带**：
+它们含 C 扩展，不能直接把桌面 wheel 的 `.so` 拷进 iOS 包，要在 macOS 上用
+BeeWare 交叉编译环境编出 arm64-apple-ios wheel，再走 `.so`→Framework 流程。
+`base.spider.html()` 在缺 `lxml` 时报明错；`Crypto` 兼容层与 `pyquery.fromstring`
+补丁在缺包时只打 WARNING。`pyexecjs` 不在包内（它需要本机装 Node，
+iOS 包里没有），不要当作已带。
+
+### 11.4 调用、预算与错误
+
+- 调用预算与取消同 §5：列表、详情、搜索等读取默认 15 秒，播放解析 20 秒，
+  超时返回 `TIMEOUT`；取消信号到达时边车侧的在途调用被放弃，迟到结果丢弃。
+  单次调用的参数或返回值同样 ≤ 8 MiB（§4 的可传递值限制按 JSON 计）。
+- 宿主在初始化时调一次 `init("")`（只有蜘蛛自己实现了 `init` 才调；
+  没实现的用基类空实现或直接跳过，不因此失败），再按 [06 §19](06-capabilities.md)
+  的必需方法面校验：缺 `detailContent` / `playerContent` 或缺内容入口时
+  初始化失败，报明错。`init` 抛异常即初始化失败。
+- 蜘蛛方法抛异常、返回形状错误（缺 `list` / `class`、详情无播放列表、
+  播放无地址）时，宿主按 [06 §19](06-capabilities.md) 与 02 §9 映射为
+  `INTERNAL`（形状错误）或 `NOT_FOUND` / `CONTENT_LOCKED` / `UNSUPPORTED`
+  （见该节的表），消息只进日志、不直接展示蜘蛛原始异常文本以外的信息。
+  蜘蛛返回的 dict 带非 0 的 `code` 且没有 `list` 时，按 `UPSTREAM_ERROR` 处理。
+- Python 插件没有 `meta.settings`：`init` 恒传空串；没有 `endpoints`、
+  `auth`、`ui`、`transformResource` 等能力；不支持 `liveContent`、
+  `suggest`、`trending`、`transformResource`、`endpoints`（见 [06 §19](06-capabilities.md)）。
+  `homeContent` 在同一次初始化里可能被调用多次（分类与首页各取一次），
+  蜘蛛**必须**幂等。
+- 隔离性：蜘蛛异常只影响当次请求；但与 §1 相同，本协议不承诺在同进程内
+  隔离原生引擎崩溃、进程被系统终止等故障。Python 插件的堆预算不适用 §7
+  的 64 MiB QuickJS 上限；解释器与边车共享应用进程内存，暂无独立上限，
+  蜘蛛的大分配只受系统限制。

@@ -79,7 +79,7 @@ export default function PluginDistribution({ plugins, reload }: { plugins: Insta
         })}>检查插件更新</button>
       </div>
       {directoryFiles.length > 0 && <div className="hpp-distribution-buttons" aria-label="目录中的插件列表">{directoryFiles.map(file => <button key={file.location} disabled={busy} onClick={() => void run(async () => { await readLocations([file.location]); setDirectoryFiles([]); })}>{file.name}</button>)}<button disabled={busy} onClick={() => setDirectoryFiles([])}>关闭目录</button></div>}
-      <details><summary>粘贴代码导入</summary><textarea aria-label="插件代码" placeholder="export const meta = …" spellCheck={false} value={code} onChange={e => setCode(e.target.value)} />
+      <details><summary>粘贴代码导入</summary><textarea aria-label="插件代码" placeholder="export const meta = … 或 Python 蜘蛛源码" spellCheck={false} value={code} onChange={e => setCode(e.target.value)} />
         <button disabled={busy || !code.trim()} onClick={() => void run(async () => {
           const plugin = await request<InstalledPlugin>("import", { code, allowDowngrade: downgrade, installOnly });
           replacePreview(null); setReport([{ key: plugin.meta.id, id: plugin.meta.id, plugin }]); await reload();

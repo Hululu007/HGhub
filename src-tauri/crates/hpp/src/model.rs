@@ -12,6 +12,10 @@ pub struct Meta {
     pub protocol: u32,
     #[serde(default = "source_kind")]
     pub kind: String,
+    /// 运行时：`"js"`（默认，QuickJS 插件）或 `"python"`（TVBox Python 蜘蛛，
+    /// 走 CPython 边车）。旧索引无此字段的一律按 `"js"` 读。
+    #[serde(default = "js_runtime")]
+    pub runtime: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -45,6 +49,9 @@ pub struct Meta {
 }
 fn source_kind() -> String {
     "source".into()
+}
+fn js_runtime() -> String {
+    "js".into()
 }
 /// WebHome 宿主声明：首页地址与本地页面二选一。
 /// - `homePage`：远端页面地址，页面留在远端，相对资源照常工作。
@@ -154,6 +161,18 @@ impl Meta {
             || m.kind == "resolver" && m.matches.is_empty()
         {
             return Err(PluginError::invalid("插件类型或解析器 matches 无效"));
+        }
+        // Python 运行时 v1：蜘蛛恒为内容源，不声明 WebHome（WebHome 包装是 JS 形态）。
+        if !matches!(m.runtime.as_str(), "js" | "python") {
+            return Err(PluginError::invalid("插件运行时无效"));
+        }
+        if m.runtime == "python" {
+            if m.kind != "source" {
+                return Err(PluginError::invalid("Python 蜘蛛只能是内容源"));
+            }
+            if m.webhome.is_some() {
+                return Err(PluginError::invalid("Python 蜘蛛不能声明 WebHome 首页"));
+            }
         }
         let mut keys = std::collections::HashSet::new();
         for s in &m.settings {

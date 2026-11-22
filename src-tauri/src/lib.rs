@@ -7,6 +7,7 @@ mod native_player;
 mod macos_titlebar;
 mod network_policy;
 mod plugins;
+mod python;
 mod webhome;
 #[cfg(target_os = "windows")]
 mod windows_login;

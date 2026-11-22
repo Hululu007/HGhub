@@ -45,6 +45,9 @@ export default function (hg) {
 - **数据源**（`meta.kind` 为 `source`，默认）至少实现 `media` 或 `live` 之一，可同时实现。
   实现 `media` 时**应当**至少有 `home`、`feed`、`catalog`、`search` 或 `media.matchUrl` 作为内容入口。
   纯直播源的入口为频道列表，不必伪造点播详情。返回点播 `MediaItem` 的能力要求同时实现 `media`。
+- **Python 蜘蛛**（`meta.runtime` 为 `"python"`）不直接声明 JS 能力命名空间，
+  能力面按 [§19](#19-python-蜘蛛tvbox) 从蜘蛛方法映射；v1 必需 `detailContent` +
+  `playerContent`，纯直播源暂不支持。
 - **解析器**（`meta.kind` 为 `resolver`）只需要 `resolver` 和 `meta.matches`。
 - 宿主在初始化时校验每个命名空间的必需方法，并记录可选方法是否存在，界面按具体方法显示按钮；
   不能仅因存在空 `interact` 对象就显示全部交互。工厂应保持能力集合稳定，不随登录态改变；登录限制用错误码表达。
@@ -586,3 +589,59 @@ dispose?(): void
 - v1 的限制：同一时间至多一个 WebHome 窗口；`player.playVod` 不支持跨站；
   图片不走代理；`pan.*` 与 `ui.setChrome` / `ui.restoreChrome` 不支持。
   直链播放走真实媒体会话，刷新是空操作。
+
+## 19. Python 蜘蛛（TVBox）
+
+`runtime: "python"` 的插件不是 JS 插件对象，而是一份 TVBox Python 蜘蛛源码
+（`.py` 文件，见 [01 §3](01-plugin-file.md)）。宿主把它跑在 CPython 边车里
+（见 [02 §11](02-runtime.md)），按本节的表把 HPP 能力方法翻译成蜘蛛方法调用，
+再把蜘蛛返回的 TVBox 形状转成 HPP 形状。蜘蛛写法与基类见 [04 §15](04-host-api.md)。
+
+### 19.1 方法映射
+
+| HPP 方法 | 蜘蛛方法（宿主传参） | 返回值转换 |
+| --- | --- | --- |
+| `catalog.getCategories` | `homeContent(1)`，取 `class[]` | `type_id` / `type_name` → `Category{id, label}`；缺 `class` 报 `INTERNAL` |
+| `home.getSections` | 有 `homeVideoContent` 时调它（取 `list[]`，包成一个 `id: "hot"`、`layout: "row"` 的分区）；否则调 `homeContent(1)`（取 `list[]`，包成 `id: "home"`、`layout: "grid"` 的分区）。两者不同时调，避免两份推荐打架 | `list[]` 的 `vod_*` 条目 → `MediaItem`（见 §19.2） |
+| `feed.list` | `homeVideoContent()`，取 `list[]` | 同上，分页游标就是页码字符串 |
+| `catalog.list` | `categoryContent(tid, pg, {}, extend)`，`tid` 取 `categoryId`，`pg` 取游标（缺省 `"1"`），`extend` 为 `{sort}` 或 `null` | 同上；`next = page < pagecount ? str(page+1) : null` |
+| `search.search` | `searchContent(key, True, pg)`，`pg` 取游标（缺省 `"1"`） | 同上 |
+| `media.getDetail` | `detailContent([id])` | `list[0]` 的 `vod_*` → `MediaDetail`；`vod_play_from` 以 `$$$` 切多线路，`vod_play_url` 以 `#` 切集、以 `$` 切 `标题$地址`；播放列表 id 取线路名（即 `playerContent` 的 `flag`）；空 `list` 报 `NOT_FOUND`，无分集报 `INTERNAL` |
+| `media.resolvePlayback` | `playerContent(flag, id, [])`，`flag` 取 `playlistId`（即详情里的线路名），`id` 取 `episodeId` | `{parse, url, header}` → `PlaybackInfo`：`parse: 0` 直链；`parse: 1` 且 url 本身是媒体地址时按直链处理，否则报 `UNSUPPORTED`（TVBox 的 `parse: 1` 是开 WebView 嗅探，HPP 无对应物）；空 url 报 `CONTENT_LOCKED`；`.m3u8` 为 `hls`，其余为 `progressive`；`header` 只保留字符串值 |
+
+参数适配（类式与函数式同一套）：`homeContent` 的 `filter` 恒为 `1`；
+`categoryContent` 的 `pg` 恒为字符串；`detailContent` 的 `ids` 恒为列表；
+`searchContent` 的 `quick` 恒为 `True`；`playerContent` 的 `vipFlags` 恒为空列表。
+`resolvePlayback` 不接收 `reason` / `codecs` / `maxHeight`：刷新（`reason: "refresh"`）
+会重新跑一次 `playerContent`，蜘蛛不得返回缓存的旧地址。
+
+### 19.2 `vod_*` 条目转换
+
+`vod_id` / `vod_name` 缺一不可（缺失的条目丢弃并告警，不使整页失败）；
+`vod_pic` → `cover`；`vod_remarks` ≤ 8 字作 `badge`，长了进 `description`；
+`vod_content` → `description`；`vod_year` 能解析成数字时 → `year`；
+`vod_area` / `vod_lang` / `vod_class` → `tags`；`vod_episode_count` → `episodeCount`。
+详情独有：`vod_actor` / `vod_director` 按 `,`、`，`、`/` 切 → `people[{name, role}]`。
+蜘蛛返回的 dict 带非 0 的 `code` 且没有 `list` 时，按 `UPSTREAM_ERROR` 处理
+（消息取 `message` / `msg`，截断到 200 字）；蜘蛛自己把失败吞成空列表时
+宿主无法区分，按正常空页处理。
+
+### 19.3 必需与默认
+
+- **REQUIRED（缺一不可，缺了初始化失败）**：`detailContent` 与 `playerContent`
+  必须同时实现，且至少一个内容入口（`homeContent` / `homeVideoContent` /
+  `categoryContent` / `searchContent`）。
+- **DEFAULTED（蜘蛛不实现时宿主兜底，不进能力面）**：`init`——只有蜘蛛自己
+  实现了才调（传 `""`）；没实现的用基类空实现（类式）或直接跳过（函数式）。
+  `localProxy`——不进能力面，边车代理入口收到请求时才调（见 [04 §15.3](04-host-api.md)）。
+  `home.getSections` 的来源选择——有 `homeVideoContent` 用它，否则退回 `homeContent`。
+- **v1 不映射**：蜘蛛的 `liveContent`，以及 HPP 的 `search.suggest`、
+  `search.trending`、`transformResource`、`endpoints`、`auth`、`ui`、
+  `comments`、`interact`、`library`、`progress`、`updates`、`articles`、
+  `media.listEpisodes`、`media.matchUrl`（除上面已映射的 `media` / `search` /
+  `home` / `feed` / `catalog` 方法外）。蜘蛛实现了这些方法也不会出现在
+  能力面里；`liveContent` 存在时不报错、不启用。
+- `homeContent` 在同一次初始化里可能被调用多次（`catalog.getCategories`
+  与 `home.getSections` 各取一次），蜘蛛**必须**幂等。`setCache` / `getCache` /
+  `delCache` 只在边车进程内有效，应用重启即失；需要跨重启保留的数据，
+  v1 尚无 Python 侧的持久存储接口（下版接 `meta.settings` 与存储桥时补）。

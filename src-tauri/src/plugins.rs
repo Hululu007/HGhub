@@ -65,7 +65,7 @@ pub async fn pick_plugin_files(app: tauri::AppHandle) -> Result<Vec<String>> {
         let picked = app
             .dialog()
             .file()
-            .add_filter("HPP 插件、列表或 HTML 页面", &["js", "mjs", "json", "html"])
+            .add_filter("HPP 插件、列表、HTML 页面或 Python 蜘蛛", &["js", "mjs", "json", "html", "py"])
             .blocking_pick_files()
             .unwrap_or_default();
         if picked.is_empty() {
@@ -186,8 +186,17 @@ impl PluginHost {
     ) -> Result<Arc<PluginManager>> {
         self.ready
             .get_or_try_init(|| async {
+                // 边车地址文件：引导启动 CPython 后由 main.py 写出实际地址。
+                let info_path = {
+                    use tauri::Manager;
+                    app.path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| self.dir.clone())
+                        .join("python-sidecar.json")
+                };
                 let manager = PluginManager::open(self.dir.clone())?
-                    .with_document_reader(Arc::new(PickedDocuments(app.clone())));
+                    .with_document_reader(Arc::new(PickedDocuments(app.clone())))
+                    .with_python_bootstrap(crate::python::python_bootstrap(info_path));
                 #[cfg(target_os = "windows")]
                 let manager = match crate::windows_login::WindowsLogin::detect() {
                     Some(provider) => manager.with_web_login(Arc::new(provider)),
@@ -203,7 +212,13 @@ impl PluginHost {
                         manager
                     }
                 };
-                Ok::<_, hghub_hpp::PluginError>(Arc::new(manager))
+                let manager = Arc::new(manager);
+                // 回环媒体服务预热：Python 蜘蛛初始化要把 base 传给边车（取数桥 /
+                // 日志桥的目标），而初始化发生在媒体请求的处理路径上，不能在那里
+                // 现启动（路由构造会引用 serve_resource，形成 Send 循环依赖），
+                // 所以在管理器第一次建好时就启动一次。失败即整个管理器不可用。
+                hghub_hpp::media::MediaSessions::start(&manager).await?;
+                Ok::<_, hghub_hpp::PluginError>(manager)
             })
             .await
             .map(|m| m.clone())

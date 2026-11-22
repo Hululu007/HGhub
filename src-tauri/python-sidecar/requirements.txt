@@ -1,0 +1,38 @@
+# HGhub Python 边车：打进 iOS 包的 site-packages 清单。
+#
+# v1 只打纯 Python 包：wheel 里不含 .so，解包后只拷 .py/.pem 等文本
+# 文件进 src-tauri/python-sidecar/site-packages/（见该目录 README）。
+# pyexecjs 明确不在内：它需要本机装 Node，iOS 包里没有，不要当作已带。
+#
+# Web framework（边车 HTTP 服务）
+flask==3.1.0
+werkzeug==3.1.3
+jinja2==3.1.6
+markupsafe==3.0.2
+blinker==1.9.0
+click==8.1.8
+itsdangerous==2.2.0
+# HTTP requests（requests 的依赖 urllib3/certifi/idna/charset-normalizer
+# 一起打；charset-normalizer 与 markupsafe 的 wheel 里有可选 .so，
+# 打包时只拷 .py，走纯 Python 回退）
+requests==2.34.2
+urllib3==2.8.0
+certifi==2026.11.20
+idna==3.20
+charset-normalizer==3.5.2
+httpx==0.28.1
+httpcore==1.0.9
+h11==0.16.0
+sniffio==1.3.1
+# HTML 解析（纯 Python 部分）
+beautifulsoup4==4.15.0
+soupsieve==2.8
+#
+# v2 才考虑的二进制包：lxml / pyquery / pycryptodome 含 C 扩展，
+# 不能直接把桌面 wheel 的 .so 拷进 iOS 包；要在 macOS 上用 BeeWare
+# 交叉编译环境编出 arm64-apple-ios wheel，再走 .so→Framework 流程。
+# v1 不打这些包——base.spider.html() 在缺 lxml 时报明错，
+# spider_runner 的 Crypto 兼容层与 pyquery 补丁在缺包时只打 WARNING。
+# lxml==6.1.1
+# pyquery==2.1.0
+# pycryptodome==3.23.0
