@@ -227,7 +227,8 @@ Android 的相对文件列表通过“选择列表所在目录”授予目录访
 
 声明了 `meta.webhome` 的插件，其详情页多一个“打开 WebHome 首页”按钮
 （插件启用且已就绪时可见）。点击调用 `open_webhome(pluginId)`，宿主在独立
-WebView 窗口里打开该插件的 `homePage`，并注入 `window.fm` 桥
+WebView 窗口里打开该插件的首页（远程是 `homePage`，本地页面是宿主打开时现算的
+回环地址），并注入 `window.fm` 桥
 （方法表与限制见 [04 §14](04-host-api.md)）；窗口右上角有一个宿主注入的关闭按钮。
 
 主窗口负责接页面动作：直链播放（`player.playUrl`）在主窗口用同一套播放器

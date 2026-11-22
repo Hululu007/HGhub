@@ -386,6 +386,7 @@ impl PluginManager {
                     return Err(PluginError::invalid("暂存更新身份不一致"));
                 }
                 let origin = candidate.origin;
+                let page = candidate.page.map(|p| p.content);
                 self.install_code(
                     code,
                     Some(origin.manifest.as_ref().unwrap_or(&origin.location).clone()),
@@ -394,6 +395,7 @@ impl PluginManager {
                     None,
                     candidate.revision.as_deref(),
                     false,
+                    page,
                     Some(&op.cancel),
                 )
                 .await

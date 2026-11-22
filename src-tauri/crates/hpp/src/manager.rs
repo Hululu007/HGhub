@@ -472,6 +472,7 @@ impl PluginManager {
             None,
             false,
             None,
+            None,
         )
         .await
     }
@@ -484,6 +485,9 @@ impl PluginManager {
         enabled: Option<bool>,
         expected_revision: Option<&str>,
         restoring: bool,
+        // 直接导入的本地 HTML 页面内容；None 时保留磁盘上已有的页面文件
+        // （恢复旧版本走这条路），全新安装且 meta 有 localPage 却没内容时报错。
+        page: Option<String>,
         cancel: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<PluginInfo> {
         let cancel = cancel.cloned().unwrap_or_default();
@@ -557,6 +561,13 @@ impl PluginManager {
         // Keep stale references from reinitializing against a replaced file. Wait for the old
         // thread to finish before reopening storage/cookies, so final writes are visible.
         let old_code = std::fs::read(&file).ok();
+        let local_page = meta
+            .webhome
+            .as_ref()
+            .and_then(|w| w.local_page.clone());
+        let old_page = local_page
+            .as_deref()
+            .and_then(|name| std::fs::read(dir.join(name)).ok());
         let entry = IndexEntry {
             meta: meta.clone(),
             enabled: enabled.unwrap_or(was_enabled),
@@ -581,6 +592,15 @@ impl PluginManager {
         }
         if cancel.is_cancelled() {
             return Err(PluginError::cancelled());
+        }
+        // 直接导入的本地 HTML 页面与插件文件一起落盘，文件名取自
+        // meta.webhome.localPage；先写页面，失败时插件文件还没动。
+        if let Some(name) = &local_page {
+            if let Some(content) = page.as_deref() {
+                atomic_write(&dir.join(name), content.as_bytes())?;
+            } else if !dir.join(name).exists() {
+                return Err(PluginError::internal("本地 WebHome 页面内容缺失"));
+            }
         }
         atomic_write(&file, code.as_bytes())?;
         if let Some(old) = old_guard.as_mut() {
@@ -609,6 +629,13 @@ impl PluginManager {
                 atomic_write(&file, &bytes)?;
             } else {
                 let _ = std::fs::remove_file(&file);
+            }
+            if let Some(name) = &local_page {
+                if let Some(bytes) = old_page {
+                    atomic_write(&dir.join(name), &bytes)?;
+                } else {
+                    let _ = std::fs::remove_file(dir.join(name));
+                }
             }
             if let Some(old) = existing {
                 old.lock().await.retired = false;
@@ -873,6 +900,10 @@ impl PluginManager {
     }
     pub async fn meta(&self, id: &str) -> Result<Meta> {
         Ok(self.get(id).await?.lock().await.entry.meta.clone())
+    }
+    /// 插件根目录（回环服务解析本地 WebHome 页面时用）。
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
     }
     pub(crate) async fn revision(&self, id: &str) -> Result<String> {
         let p = self.get(id).await?;

@@ -420,7 +420,7 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 | `app.openVod` / `app.openLive` / `app.openKeep` / `app.openSetting` | 在主窗口打开详情 / 直播 / 收藏（我的） / 设置；`openVod` 的参数与 `player.playVod` 相同 |
 | `app.history`（别名 `history_list`） | 返回绑定插件的本地观看记录（按 `lastProgress`，最新在前，最多 50 条） |
 | `cache.set` / `cache.get` / `cache.del` / `cache.clear` | 读写绑定插件的存储，键统一加 `webhome:` 前缀；`clear` 只清该前缀下的键 |
-| `config.info`（别名 `config_info`） | `{ id, url, desc, version }`：绑定插件的 id、首页地址、简介与版本 |
+| `config.info`（别名 `config_info`） | `{ id, url, desc, version }`：绑定插件的 id、首页的实际打开地址、简介与版本；本地页面（`meta.webhome.localPage`）的 url 是宿主打开时现算的回环地址 |
 | `site.info`（别名 `site`） | `{ key, name, type: "webhome" }` |
 | `device.info`（别名 `device`） | `{ platform, app: "HGhub", webhome: 1 }` |
 | `ext.info` | `{ app: "HGhub", webhome: 1, protocol: "1.0.0-dev" }` |
@@ -438,3 +438,6 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 页面是用户打开的浏览面，与 [§12](#12-hgwebview可选) 的登录视图不同：登录视图
 不能访问应用桥接接口，WebHome 页面则通过本节的桥与宿主交互。
 直链播放的会话刷新是空操作（返回原会话）；页面关闭不影响已打开的详情页。
+本地页面（`meta.webhome.localPage`，见 [01 §2](01-plugin-file.md)）存在插件目录里，
+打开时宿主用回环地址提供（端口每次启动都变，不写进 meta）；页面在该地址下加载，
+相对地址按该地址解析，但只有那一个文件被提供，相对本地资源不会一起打包（见 [01 §3](01-plugin-file.md)）。

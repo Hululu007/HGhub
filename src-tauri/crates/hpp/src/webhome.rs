@@ -174,12 +174,18 @@ pub async fn dispatch(
         "cache.set" | "cache.get" | "cache.del" | "cache.clear" => {
             cache(manager, plugin_id, method, p).await.map(Outcome::Value)?
         }
-        "config.info" => Outcome::Value(json!({
-            "id": meta.id,
-            "url": meta.webhome.as_ref().map(|w| w.home_page.clone()),
-            "desc": meta.description,
-            "version": meta.version,
-        })),
+        "config.info" => {
+            // url 是页面的实际打开地址：本地页面是宿主现算的回环地址。
+            let url = super::media::MediaSessions::webhome_page_url(manager, plugin_id)
+                .await
+                .ok();
+            Outcome::Value(json!({
+                "id": meta.id,
+                "url": url,
+                "desc": meta.description,
+                "version": meta.version,
+            }))
+        }
         "site.info" => Outcome::Value(json!({
             "key": meta.id,
             "name": meta.name,

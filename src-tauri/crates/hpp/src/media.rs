@@ -170,6 +170,10 @@ impl MediaSessions {
                         get(serve_resource).head(serve_resource).options(preflight),
                     )
                     .route("/local/:id", get(serve_local_file).head(serve_local_file))
+                    .route(
+                        "/webhome/:id",
+                        get(serve_webhome_page).head(serve_webhome_page),
+                    )
                     .with_state(weak);
                 tokio::spawn(async move {
                     let _ = axum::serve(listener, router)
@@ -190,6 +194,19 @@ impl MediaSessions {
         let id = uuid::Uuid::new_v4().to_string();
         manager.sessions.local.lock().unwrap().insert(id.clone(), path);
         Ok(format!("{base}/local/{id}"))
+    }
+    /// WebHome 首页的实际打开地址：远程用 homePage；本地页面用当前回环地址
+    /// （端口每次启动都变，不写进 meta，打开时现算）。
+    pub async fn webhome_page_url(manager: &Arc<PluginManager>, plugin_id: &str) -> Result<String> {
+        let meta = manager.meta(plugin_id).await?;
+        match meta.webhome.as_ref() {
+            Some(w) if w.home_page.is_some() => Ok(w.home_page.clone().unwrap()),
+            Some(w) if w.local_page.is_some() => {
+                let base = MediaSessions::start(manager).await?;
+                Ok(format!("{base}/webhome/{plugin_id}"))
+            }
+            _ => Err(PluginError::new("NOT_FOUND", "该源没有 WebHome 首页")),
+        }
     }
 }
 impl Drop for MediaSessions {
@@ -1306,6 +1323,58 @@ async fn serve_local_file(
             _ => "application/octet-stream",
         };
         stream_file_response(file, size, content_type, method, &headers).await
+    }
+    .await;
+    cors(result.unwrap_or_else(error_response))
+}
+
+/// 直接导入的本地 WebHome 页面：按插件 id 取 meta.webhome.localPage，
+/// 只提供该插件目录下的那一个文件（相对本地资源不打包，见 v0.0.48 限制），
+/// Content-Type 固定为 text/html。请求时现查 meta，删插件后自动 404。
+async fn serve_webhome_page(
+    State(weak): State<Weak<PluginManager>>,
+    Path(id): Path<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let result = async {
+        let manager = weak.upgrade().ok_or_else(PluginError::cancelled)?;
+        let name = manager
+            .meta(&id)
+            .await?
+            .webhome
+            .and_then(|w| w.local_page)
+            .ok_or_else(|| PluginError::new("NOT_FOUND", "该源没有本地 WebHome 页面"))?;
+        // localPage 已在 Meta::parse 校验为裸文件名；这里再规范化并确认
+        // 落在该插件目录内，防止 id 或文件名被构造出越界路径。
+        let root = manager
+            .root()
+            .canonicalize()
+            .map_err(|_| PluginError::internal("插件目录无法解析"))?;
+        let dir = manager
+            .root()
+            .join(&id)
+            .canonicalize()
+            .map_err(|_| PluginError::new("NOT_FOUND", "插件目录不存在"))?;
+        if dir.parent() != Some(root.as_path()) {
+            return Err(PluginError::new("NOT_FOUND", "插件目录越界"));
+        }
+        let path = dir
+            .join(&name)
+            .canonicalize()
+            .map_err(|_| PluginError::new("NOT_FOUND", "本地 WebHome 页面不存在"))?;
+        if path.parent() != Some(dir.as_path()) {
+            return Err(PluginError::new("NOT_FOUND", "本地 WebHome 页面越界"));
+        }
+        let file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|_| PluginError::new("NOT_FOUND", "本地 WebHome 页面不存在"))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|e| PluginError::internal(&format!("本地页面读取失败：{e}")))?
+            .len() as usize;
+        stream_file_response(file, size, "text/html; charset=utf-8", method, &headers).await
     }
     .await;
     cors(result.unwrap_or_else(error_response))

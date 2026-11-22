@@ -14,8 +14,8 @@ async fn host() -> (tempfile::TempDir, Arc<PluginManager>) {
         .unwrap();
     assert_eq!(info.status, "ready", "{:?}", info.error);
     assert_eq!(
-        info.meta.webhome.as_ref().unwrap().home_page,
-        "https://webhome.example/"
+        info.meta.webhome.as_ref().unwrap().home_page.as_deref(),
+        Some("https://webhome.example/")
     );
     (dir, manager)
 }
@@ -121,4 +121,62 @@ async fn webhome_direct_play_and_unknown() {
     assert!(unknown.is_err(), "pan is unsupported in v1");
     let missing = webhome::dispatch(&manager, "no.such", "device.info", json!({}), state()).await;
     assert!(missing.is_err(), "unknown plugin must fail");
+}
+
+#[tokio::test]
+async fn local_page_served_over_loopback() {
+    let (_dir, manager) = host().await;
+    let files = tempfile::tempdir().unwrap();
+    let html = "<!doctype html><html><head><title>本地</title></head><body>loopback</body></html>";
+    let path = files.path().join("demo.html");
+    std::fs::write(&path, html).unwrap();
+    let preview = manager
+        .preview_import(
+            vec![path.to_string_lossy().into_owned()],
+            "serve-local",
+        )
+        .await
+        .unwrap();
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    let keys: Vec<String> = preview
+        .items
+        .iter()
+        .filter(|i| i.error.is_none())
+        .map(|i| i.key.clone())
+        .collect();
+    let report = manager
+        .apply_import(&preview.token, keys, false, false, "install")
+        .await
+        .unwrap();
+    assert!(report.items[0].plugin.is_some());
+    // 本地页面的打开地址是当前回环地址，config.info 返回的也是它。
+    let url = hghub_hpp::media::MediaSessions::webhome_page_url(&manager, "webhome.demo")
+        .await
+        .unwrap();
+    assert!(url.starts_with("http://127.0.0.1:"));
+    assert!(url.ends_with("/webhome/webhome.demo"));
+    let config = value(
+        webhome::dispatch(&manager, "webhome.demo", "config.info", json!({}), state())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(config["url"], url);
+    let response = reqwest::get(&url).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(response.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .contains("text/html"));
+    assert_eq!(response.text().await.unwrap(), html);
+    // 远程首页的插件没有本地页面，回环地址上查不到。
+    assert_eq!(
+        hghub_hpp::media::MediaSessions::webhome_page_url(&manager, ID)
+            .await
+            .unwrap(),
+        "https://webhome.example/"
+    );
+    let missing = reqwest::get(url.replace("webhome.demo", "webhome.nope"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
 }

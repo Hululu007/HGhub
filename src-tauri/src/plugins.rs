@@ -65,7 +65,7 @@ pub async fn pick_plugin_files(app: tauri::AppHandle) -> Result<Vec<String>> {
         let picked = app
             .dialog()
             .file()
-            .add_filter("HPP 插件或列表", &["js", "mjs", "json"])
+            .add_filter("HPP 插件、列表或 HTML 页面", &["js", "mjs", "json", "html"])
             .blocking_pick_files()
             .unwrap_or_default();
         if picked.is_empty() {

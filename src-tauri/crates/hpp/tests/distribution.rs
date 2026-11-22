@@ -581,11 +581,14 @@ async fn update_url_precedes_manifest_identity_mismatch_and_download_cancellatio
         .unwrap()
         .files
         .insert("/html".into(), "<!doctype html><title>Error</title>".into());
-    let bad = manager
+    // v0.0.48：HTML 不再是坏文件，直接导入会包成 WebHome 源。
+    let wrapped = manager
         .preview_import(vec![format!("{base}/html")], "html")
         .await
         .unwrap();
-    assert!(bad.items[0].error.is_some());
+    assert!(wrapped.items[0].error.is_none(), "{:?}", wrapped.items[0].error);
+    assert_eq!(wrapped.items[0].id, "webhome.127.0.0.1-html");
+    assert_eq!(wrapped.items[0].name, "Error");
     assert_eq!(manager.list().await.len(), 1);
     server.abort();
 }
@@ -609,4 +612,142 @@ async fn file_url_preview_reads_local_plugin() {
     assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
     assert_eq!(preview.items[0].id, "fixture.source");
     assert_eq!(preview.items[0].name, "虚构影视源");
+}
+
+#[tokio::test]
+async fn remote_html_preview_wraps_home_page() {
+    let (base, state, server) = server().await;
+    let html = "<!doctype html><html><head><title>示例页面</title></head><body>hi</body></html>";
+    state
+        .lock()
+        .unwrap()
+        .files
+        .insert("/page.html".into(), html.into());
+    let dir = tempfile::tempdir().unwrap();
+    let manager = PluginManager::with_mode(dir.path().into(), Some(false)).unwrap();
+    let url = format!("{base}/page.html");
+    let preview = manager
+        .preview_import(vec![url.clone()], "remote-html")
+        .await
+        .unwrap();
+    assert_eq!(preview.items.len(), 1);
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    assert_eq!(preview.items[0].id, "webhome.127.0.0.1-page");
+    assert_eq!(preview.items[0].name, "示例页面");
+    let report = manager
+        .apply_import(&preview.token, keys(&preview), false, false, "install")
+        .await
+        .unwrap();
+    let plugin = report.items[0].plugin.as_ref().unwrap();
+    let webhome = plugin.meta.webhome.as_ref().unwrap();
+    assert_eq!(webhome.home_page.as_deref(), Some(url.as_str()));
+    assert!(webhome.local_page.is_none());
+    // 存根诚实地返回空结果，不编假条目。
+    let search = manager
+        .call(
+            "webhome.127.0.0.1-page",
+            "search.search",
+            json!({"query":"x"}),
+            "search".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(search["items"], json!([]));
+    let detail = manager
+        .call(
+            "webhome.127.0.0.1-page",
+            "media.getDetail",
+            json!({"id":"one"}),
+            "detail".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detail["title"], "one");
+    server.abort();
+}
+
+#[tokio::test]
+async fn local_html_preview_stores_page() {
+    let files = tempfile::tempdir().unwrap();
+    let html = "<html><head><title>本地页</title></head><body>本地</body></html>";
+    let path = files.path().join("my-page.html");
+    std::fs::write(&path, html).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let manager = PluginManager::with_mode(dir.path().into(), Some(false)).unwrap();
+    let location = path.to_string_lossy().into_owned();
+    let preview = manager
+        .preview_import(vec![location.clone()], "local-html")
+        .await
+        .unwrap();
+    assert_eq!(preview.items.len(), 1);
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    assert_eq!(preview.items[0].id, "webhome.my-page");
+    let report = manager
+        .apply_import(&preview.token, keys(&preview), false, false, "install")
+        .await
+        .unwrap();
+    let plugin = report.items[0].plugin.as_ref().unwrap();
+    let webhome = plugin.meta.webhome.as_ref().unwrap();
+    assert!(webhome.home_page.is_none());
+    assert_eq!(webhome.local_page.as_deref(), Some("my-page.html"));
+    let stored = dir
+        .path()
+        .join("webhome.my-page")
+        .join("my-page.html");
+    assert_eq!(std::fs::read_to_string(stored).unwrap(), html);
+    // 重复导入同一文件覆盖同一个插件，不产生重复条目。
+    let preview = manager
+        .preview_import(vec![location], "local-html-again")
+        .await
+        .unwrap();
+    manager
+        .apply_import(&preview.token, keys(&preview), false, false, "reinstall")
+        .await
+        .unwrap();
+    assert_eq!(manager.list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn site_json_preview_recognizes_webhome() {
+    let files = tempfile::tempdir().unwrap();
+    let site = r#"{"homePage": "https://wo.vivas.cc.cd", "name": "玩偶聚合"}"#;
+    let path = files.path().join("site.json");
+    std::fs::write(&path, site).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let manager = PluginManager::with_mode(dir.path().into(), Some(false)).unwrap();
+    let preview = manager
+        .preview_import(vec![path.to_string_lossy().into_owned()], "site-json")
+        .await
+        .unwrap();
+    assert_eq!(preview.items.len(), 1);
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    let report = manager
+        .apply_import(&preview.token, keys(&preview), false, false, "install")
+        .await
+        .unwrap();
+    let plugin = report.items[0].plugin.as_ref().unwrap();
+    assert_eq!(plugin.meta.id, "webhome.wo.vivas.cc.cd");
+    assert_eq!(plugin.meta.name, "玩偶聚合");
+    assert_eq!(
+        plugin.meta.webhome.as_ref().unwrap().home_page.as_deref(),
+        Some("https://wo.vivas.cc.cd")
+    );
+}
+
+#[tokio::test]
+async fn webhome_meta_requires_exactly_one_page() {
+    use hghub_hpp::model::Meta;
+    let base = |webhome: serde_json::Value| {
+        json!({"id":"webhome.test","name":"测试","version":"1.0.0","protocol":1,"webhome":webhome})
+    };
+    assert!(Meta::parse(base(json!({"homePage":"https://example.com/"}))).is_ok());
+    assert!(Meta::parse(base(json!({"localPage":"page.html"}))).is_ok());
+    assert!(Meta::parse(base(json!({"homePage":"https://example.com/","localPage":"page.html"})))
+        .is_err());
+    assert!(Meta::parse(base(json!({}))).is_err());
+    assert!(Meta::parse(base(json!({"localPage":"../page.html"}))).is_err());
+    assert!(Meta::parse(base(json!({"localPage":"plugin.js"}))).is_err());
+    // homePage 允许 http：直接导入要接受用户粘贴的局域网地址。
+    assert!(Meta::parse(base(json!({"homePage":"http://192.168.1.2:8080/"}))).is_ok());
+    assert!(Meta::parse(base(json!({"homePage":"ftp://example.com/"}))).is_err());
 }

@@ -90,8 +90,17 @@ pub(super) struct Candidate {
     pub(super) info: ImportItem,
     pub(super) origin: PluginOrigin,
     pub(super) code: Option<String>,
+    /// 直接导入的本地 HTML 页面，随包装插件一起安装。
+    pub(super) page: Option<PageFile>,
     pub(super) expected: Option<(String, String)>,
     pub(super) revision: Option<String>,
+}
+impl Candidate {
+    /// 暂存占用字节：插件代码 + 本地 HTML 页面。
+    fn bytes(&self) -> usize {
+        self.code.as_ref().map_or(0, String::len)
+            + self.page.as_ref().map_or(0, |p| p.content.len())
+    }
 }
 #[derive(Clone)]
 struct Pending {
@@ -158,15 +167,12 @@ impl Distribution {
         let mut pending = self.pending.lock().unwrap();
         pending.retain(|_, p| p.created.elapsed() < Duration::from_secs(900));
         // Keep staged code bounded; lists contain references and download only selected entries.
-        let new_bytes = items
-            .iter()
-            .map(|c| c.code.as_ref().map_or(0, String::len))
-            .sum::<usize>();
+        let new_bytes = items.iter().map(Candidate::bytes).sum::<usize>();
         while pending.len() >= 16
             || pending
                 .values()
                 .flat_map(|p| &p.items)
-                .map(|c| c.code.as_ref().map_or(0, String::len))
+                .map(Candidate::bytes)
                 .sum::<usize>()
                 + new_bytes
                 > 32 * JS_LIMIT
@@ -197,6 +203,240 @@ impl Distribution {
 struct Document {
     text: String,
     final_location: String,
+    /// 直接导入的本地 HTML 页面，随包装插件一起安装。
+    page: Option<PageFile>,
+}
+
+/// 直接导入的本地 HTML 页面：文件名 + 原始 HTML 文本。
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct PageFile {
+    pub(super) name: String,
+    pub(super) content: String,
+}
+
+/// 内容识别，不认扩展名：去空白后以 `<!doctype html` 或 `<html` 开头
+/// （大小写不敏感）即为 HTML。
+fn is_html(text: &str) -> bool {
+    let head: String = text.trim_start().chars().take(15).collect();
+    let head = head.to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html")
+}
+
+/// HTML 的 `<title>` 文本（去空白、压成单行，最多 60 字），用作包装插件的名字。
+fn html_title(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("<title>")? + "<title>".len();
+    let end = lower[start..].find("</title>")? + start;
+    let title = text[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = title.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.chars().take(60).collect())
+    }
+}
+
+/// 选择器暂存会在文件名后加 `-<纳秒>-<序号>`；导入包装时去掉它，
+/// 这样重复导入同一文件得到同一个插件 ID（覆盖而不是重复安装）。
+/// 纳秒段至少 10 位数字，避免把 `my-page-2024` 这类正常名字误截。
+fn strip_stage_suffix(stem: &str) -> &str {
+    let Some(idx) = stem.rfind('-') else {
+        return stem;
+    };
+    let index = &stem[idx + 1..];
+    if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+        return stem;
+    }
+    let rest = &stem[..idx];
+    let Some(idx2) = rest.rfind('-') else {
+        return stem;
+    };
+    let nanos = &rest[idx2 + 1..];
+    if nanos.len() >= 10 && nanos.bytes().all(|b| b.is_ascii_digit()) {
+        &rest[..idx2]
+    } else {
+        stem
+    }
+}
+
+/// 插件 ID 词干：只留小写字母数字与 `._-`，截到 64 字，不以 `-` / `.` 结尾。
+fn slugify(raw: &str) -> String {
+    let mut slug = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            slug.push(c.to_ascii_lowercase());
+        } else {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches(|c| c == '-' || c == '.');
+    let slug: String = slug.chars().take(64).collect();
+    slug.trim_end_matches(|c| c == '-' || c == '.').to_string()
+}
+
+/// 百分号解码（content:// 地址的最后一段常是编码过的），解不出的原样保留。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 本地 HTML 的存档文件名：原文件名的最后一段，去暂存后缀，只留安全字符；
+/// 扩展名只保留 html/htm，其余一律补 `.html`。空名字退回 `page.html`。
+fn local_page_name(final_location: &str) -> String {
+    let last = percent_decode(final_location.rsplit(['/', '\\']).next().unwrap_or(""));
+    let (stem, ext) = match last.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()) => (s, e),
+        _ => (last.as_str(), ""),
+    };
+    let stem = strip_stage_suffix(stem);
+    let mut name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    name = name.trim_matches(|c| c == '-' || c == '_').to_string();
+    if name.is_empty() {
+        name = "page".to_string();
+    }
+    let ext = if ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm") {
+        ext.to_ascii_lowercase()
+    } else {
+        "html".to_string()
+    };
+    format!("{name}.{ext}")
+}
+
+/// 包装插件代码：只导出 meta 与 default（引擎不接受别的顶层导出），
+/// 与 examples/webhome-demo.js 同形——search/media/webhome 是 default 工厂
+/// 返回的命名空间。搜索存根诚实地返回空结果，不编假条目；getDetail 把页面
+/// 本身当作唯一一集（协议要求详情至少带一个播放列表），点播时
+/// resolvePlayback 再明确报错，因为页面本身没有可解析的播放地址。
+fn webhome_wrapper(id: &str, name: &str, description: &str, webhome_json: &str) -> String {
+    format!(
+        "export const meta = {{\n  id: {},\n  name: {},\n  version: \"1.0.0\",\n  protocol: 1,\n  description: {},\n  webhome: {},\n}};\n\nexport default function (hg) {{\n  return {{\n    webhome: {{}},\n    media: {{\n      getDetail({{ id }}) {{\n        return {{ id, title: id, playlists: [{{ id: \"main\", episodes: [{{ id, index: 1, title: id }}] }}] }};\n      }},\n      resolvePlayback() {{\n        throw new Error(\"该 WebHome 页面没有可解析的播放地址\");\n      }},\n    }},\n    search: {{\n      search() {{\n        return {{ items: [], next: null }};\n      }},\n    }},\n  }};\n}}\n",
+        serde_json::to_string(id).unwrap_or_else(|_| "\"webhome.page\"".into()),
+        serde_json::to_string(name).unwrap_or_else(|_| "\"WebHome 页面\"".into()),
+        serde_json::to_string(description)
+            .unwrap_or_else(|_| "\"WebHome 页面\"".into()),
+        webhome_json,
+    )
+}
+
+/// HTML → 包装插件。远程 HTML 的 homePage 是原地址，页面留在远端；
+/// 本地 HTML 存进插件目录，用 localPage 记文件名。
+fn wrap_html(text: &str, final_location: &str) -> Result<(String, Option<PageFile>)> {
+    let title = html_title(text);
+    if remote(final_location) {
+        let (id, host) = match Url::parse(final_location) {
+            Ok(u) => {
+                let segment = u.path().rsplit('/').next().unwrap_or("");
+                let stem = segment
+                    .rsplit_once('.')
+                    .map(|(s, _)| s)
+                    .unwrap_or(segment);
+                let slug = slugify(&format!("{}-{stem}", u.host_str().unwrap_or("page")));
+                (format!("webhome.{}", if slug.is_empty() { "page".into() } else { slug }), u.host_str().unwrap_or("page").to_string())
+            }
+            Err(_) => ("webhome.page".to_string(), "page".to_string()),
+        };
+        let name = title.unwrap_or(host);
+        let description: String = format!("WebHome 页面：{final_location}")
+            .chars()
+            .take(500)
+            .collect();
+        let webhome_json = format!(
+            "{{ homePage: {} }}",
+            serde_json::to_string(final_location)
+                .unwrap_or_else(|_| "\"\"".into())
+        );
+        Ok((webhome_wrapper(&id, &name, &description, &webhome_json), None))
+    } else {
+        let file_name = local_page_name(final_location);
+        let stem = file_name
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(&file_name);
+        let slug = slugify(stem);
+        let id = format!("webhome.{}", if slug.is_empty() { "page".into() } else { slug });
+        let name = title.unwrap_or_else(|| stem.to_string());
+        let description = "WebHome 页面（由本地 HTML 文件导入）".to_string();
+        let webhome_json = format!(
+            "{{ localPage: {} }}",
+            serde_json::to_string(&file_name).unwrap_or_else(|_| "\"page.html\"".into())
+        );
+        Ok((
+            webhome_wrapper(&id, &name, &description, &webhome_json),
+            Some(PageFile {
+                name: file_name,
+                content: text.to_string(),
+            }),
+        ))
+    }
+}
+
+/// 裸站点 JSON `{"homePage": "...", "name": ...}` → 远程 WebHome 包装。
+/// 对齐 webhtv 的“识别”：粘贴一段站点 JSON 就认出一个源。
+fn site_json(text: &str) -> Option<(String, Option<String>)> {
+    let v: Value = serde_json::from_str(text.trim()).ok()?;
+    if v.get("plugins").is_some() {
+        return None;
+    }
+    let home = v.get("homePage")?.as_str()?.to_string();
+    if home.is_empty() {
+        return None;
+    }
+    let name = v.get("name").and_then(Value::as_str).map(str::to_string);
+    Some((home, name))
+}
+
+fn wrap_site(home_page: &str, name: Option<&str>) -> Result<String> {
+    let (id, host) = match Url::parse(home_page) {
+        Ok(u) => {
+            let segment = u.path().rsplit('/').next().unwrap_or("");
+            let stem = segment
+                .rsplit_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(segment);
+            let slug = slugify(&format!("{}-{stem}", u.host_str().unwrap_or("page")));
+            (format!("webhome.{}", if slug.is_empty() { "page".into() } else { slug }), u.host_str().unwrap_or("page").to_string())
+        }
+        Err(_) => ("webhome.page".to_string(), "page".to_string()),
+    };
+    let name = name
+        .map(str::to_string)
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| n.chars().take(60).collect::<String>())
+        .unwrap_or(host);
+    let description: String = format!("WebHome 页面：{home_page}").chars().take(500).collect();
+    let webhome_json = format!(
+        "{{ homePage: {} }}",
+        serde_json::to_string(home_page).unwrap_or_else(|_| "\"\"".into())
+    );
+    Ok(webhome_wrapper(&id, &name, &description, &webhome_json))
 }
 fn remote(location: &str) -> bool {
     location.split_once(':').is_some_and(|(scheme, _)| {
@@ -270,7 +510,7 @@ impl PluginManager {
         if cancel.is_cancelled() {
             return Err(PluginError::cancelled());
         }
-        if remote(location) {
+        let (text, final_location) = if remote(location) {
             let network = Arc::new(self.distribution_network()?);
             let response = network.fetch(Transfer::from_json(json!({"url":location,"responseType":"bytes","credentials":"omit","maxBytes":JS_LIMIT,"retry":0})), cancel.clone()).await?;
             let meta = response.json();
@@ -284,10 +524,10 @@ impl PluginManager {
                 .field("data")
                 .ok_or_else(|| PluginError::internal("下载缺少内容"))?
                 .bytes()?;
-            Ok(Document {
-                text: utf8(bytes)?,
-                final_location: meta["url"].as_str().unwrap_or(location).into(),
-            })
+            (
+                utf8(bytes)?,
+                meta["url"].as_str().unwrap_or(location).to_string(),
+            )
         } else if location.starts_with("content://") {
             let reader = self
                 .document_reader
@@ -302,10 +542,7 @@ impl PluginManager {
             if bytes.len() > JS_LIMIT {
                 return Err(PluginError::invalid("插件文件超过 2 MiB"));
             }
-            Ok(Document {
-                text: utf8(bytes)?,
-                final_location: location.into(),
-            })
+            (utf8(bytes)?, location.to_string())
         } else {
             use std::io::Read;
             // 选择器返回的是 file:// 地址（iOS 上常见），先转成本地路径再读；
@@ -322,11 +559,20 @@ impl PluginManager {
             if bytes.len() > JS_LIMIT {
                 return Err(PluginError::invalid("插件文件超过 2 MiB"));
             }
-            Ok(Document {
-                text: utf8(bytes)?,
-                final_location: path.to_string_lossy().into_owned(),
-            })
-        }
+            (utf8(bytes)?, path.to_string_lossy().into_owned())
+        };
+        // HTML 直接导入：内容识别，不认扩展名；生成包装插件。
+        let (text, page) = if is_html(&text) {
+            let (code, page) = wrap_html(&text, &final_location)?;
+            (code, page)
+        } else {
+            (text, None)
+        };
+        Ok(Document {
+            text,
+            final_location,
+            page,
+        })
     }
     pub(super) async fn inspect_document(code: &str) -> Result<Meta> {
         let copy = code.to_string();
@@ -341,6 +587,17 @@ impl PluginManager {
         cancel: &CancellationToken,
     ) -> Result<(String, String, Vec<Candidate>)> {
         let installed = self.plugins.read().await.clone();
+        // 裸站点 JSON {"homePage": ...}：先认成 WebHome 源，再当插件列表解析，
+        // 否则 manifest() 的错误会把它挡在外面。
+        let document = if let Some((home_page, name)) = site_json(&document.text) {
+            Document {
+                text: wrap_site(&home_page, name.as_deref())?,
+                final_location: document.final_location,
+                page: None,
+            }
+        } else {
+            document
+        };
         if let Some(list) = manifest(&document.text)? {
             let mut items = vec![];
             for entry in list["plugins"].as_array().unwrap() {
@@ -393,6 +650,7 @@ impl PluginManager {
                         manifest_name: list["name"].as_str().map(String::from),
                     },
                     code: None,
+                    page: None,
                     expected: Some((id, version)),
                     revision: None,
                 });
@@ -427,6 +685,7 @@ impl PluginManager {
                     manifest_name: None,
                 },
                 code: Some(document.text),
+                page: document.page,
                 expected: Some((meta.id, meta.version)),
                 revision: None,
             };
@@ -455,7 +714,10 @@ impl PluginManager {
                 } else {
                     document.final_location.clone()
                 };
-                let subscribe = remote(&location) && manifest(&document.text)?.is_some();
+                // manifest() 解析失败时不直接报错：裸站点 JSON 在 candidates()
+                // 里先被认成 WebHome 源，真正损坏的列表由 candidates() 报错。
+                let subscribe =
+                    remote(&location) && manifest(&document.text).map(|m| m.is_some()).unwrap_or(false);
                 let (name, description, items) =
                     self.candidates(&location, document, &op.cancel).await?;
                 Ok((name, description, items, subscribe))
@@ -474,14 +736,12 @@ impl PluginManager {
                         name = n;
                         description = d;
                     }
-                    let mut bytes = items
-                        .iter()
-                        .map(|c: &Candidate| c.code.as_ref().map_or(0, String::len))
-                        .sum::<usize>();
+                    let mut bytes = items.iter().map(Candidate::bytes).sum::<usize>();
                     for candidate in &mut candidates {
-                        let size = candidate.code.as_ref().map_or(0, String::len);
+                        let size = candidate.bytes();
                         if bytes + size > 32 * JS_LIMIT {
                             candidate.code = None;
+                            candidate.page = None;
                         } else {
                             bytes += size;
                         }
@@ -507,6 +767,7 @@ impl PluginManager {
                         manifest_name: None,
                     },
                     code: None,
+                    page: None,
                     expected: None,
                     revision: None,
                 }),
@@ -580,12 +841,16 @@ impl PluginManager {
                 if let Some(e) = &candidate.info.error {
                     return Err(e.clone());
                 }
-                let code = match &candidate.code {
-                    Some(c) => c.clone(),
+                let (code, page) = match &candidate.code {
+                    Some(c) => (
+                        c.clone(),
+                        candidate.page.as_ref().map(|p| p.content.clone()),
+                    ),
                     None => {
-                        self.load_document(&candidate.origin.location, &op.cancel)
-                            .await?
-                            .text
+                        let document = self
+                            .load_document(&candidate.origin.location, &op.cancel)
+                            .await?;
+                        (document.text, document.page.map(|p| p.content))
                     }
                 };
                 let meta = Self::inspect_document(&code).await?;
@@ -618,6 +883,7 @@ impl PluginManager {
                     },
                     candidate.revision.as_deref(),
                     false,
+                    page,
                     Some(&op.cancel),
                 )
                 .await
@@ -679,7 +945,7 @@ impl PluginManager {
             return Err(PluginError::new("UNSUPPORTED", "没有更新地址"));
         };
         let mut next_origin = origin.clone();
-        let code = if origin.kind == "manifest" {
+        let (code, page) = if origin.kind == "manifest" {
             let location = origin
                 .manifest
                 .as_ref()
@@ -703,19 +969,17 @@ impl PluginManager {
                 return Ok(None);
             }
             next_origin = candidate.origin;
-            let code = self
-                .load_document(&next_origin.location, cancel)
-                .await?
-                .text;
-            let meta = Self::inspect_document(&code).await?;
+            let document = self.load_document(&next_origin.location, cancel).await?;
+            let meta = Self::inspect_document(&document.text).await?;
             if meta.id != id || meta.version != candidate.info.version {
                 return Err(PluginError::invalid(
                     "更新文件的 id 或 version 与来源列表不一致",
                 ));
             }
-            code
+            (document.text, document.page)
         } else {
-            self.load_document(&origin.location, cancel).await?.text
+            let document = self.load_document(&origin.location, cancel).await?;
+            (document.text, document.page)
         };
         let meta = Self::inspect_document(&code).await?;
         if meta.id != id {
@@ -743,6 +1007,7 @@ impl PluginManager {
             },
             expected: Some((id.into(), meta.version)),
             code: Some(code),
+            page,
             revision: Some(revision),
         }))
     }
@@ -807,7 +1072,7 @@ impl PluginManager {
             }
             let (status, error) = match result {
                 Ok(Some(Some(candidate))) => {
-                    let size = candidate.code.as_ref().map_or(0, String::len);
+                    let size = candidate.bytes();
                     if staged_bytes + size > 32 * JS_LIMIT {
                         (
                             "failed",
@@ -866,6 +1131,7 @@ impl PluginManager {
             Some(&revision),
             true,
             None,
+            None,
         )
         .await
     }
@@ -890,6 +1156,7 @@ mod tests {
             Some(true),
             None,
             false,
+            None,
             Some(&cancel),
         );
         tokio::pin!(task);

@@ -72,7 +72,7 @@ export default function (hg) {
 | `requires` | 否 | 必需的宿主能力数组：`{ type: "feature" \| "api", name: string }`；如 `{ type: "feature", name: "webview" }` 或 `{ type: "api", name: "html.parse" }`，缺失时保留文件但不可启用 |
 | `allowInsecureHttp` | 否 | `true` 时允许插件使用 `http:` 地址（接口与媒体）；默认只允许 HTTPS |
 | `linkDomains` | 否 | 主机名数组。用户粘贴这些域名下的链接时，宿主交给本插件的 `media.matchUrl` 处理（见 [06 §2](06-capabilities.md)） |
-| `webhome` | 否 | `{ homePage: string }`。声明该源提供一个 WebHome 页面：宿主在插件详情页显示“打开 WebHome 首页”，首页用 `window.fm` 桥与宿主交互（见 [04 §14](04-host-api.md) 与 [06 §18](06-capabilities.md)）。`homePage` 必须是 https 绝对地址；宿主在不调用工厂的情况下读取它 |
+| `webhome` | 否 | `{ homePage?: string, localPage?: string }`，有且仅有一个。声明该源提供一个 WebHome 页面：宿主在插件详情页显示“打开 WebHome 首页”，首页用 `window.fm` 桥与宿主交互（见 [04 §14](04-host-api.md) 与 [06 §18](06-capabilities.md)）。`homePage` 是远端页面的 http(s) 绝对地址；`localPage` 是直接导入的本地 HTML 文件名（裸文件名，不含路径，文件存在插件目录里，打开时宿主用回环地址提供，见 §3）。宿主在不调用工厂的情况下读取它 |
 | `mature` | 否 | `true` 表示含成人内容；宿主默认隐藏这类插件，用户需在设置中开启 |
 | `settings` | 否 | 用户可调的设置项（§2.1） |
 
@@ -132,13 +132,26 @@ settings: [
 | 方式 | 说明 |
 | --- | --- |
 | 本地 `.js` 文件 | 可一次选择多个 |
+| 本地 `.html` 文件 | 内容识别，不认扩展名；宿主生成一个包装插件，HTML 文件存进插件目录（见下） |
 | 本地 `manifest.json` | 按其中的列表批量导入（§4） |
-| URL | 下载后按内容识别单个 JS 插件或 JSON 插件列表，支持无扩展名的下载接口 |
+| URL | 下载后按内容识别单个 JS 插件、JSON 插件列表、HTML 页面或裸站点 JSON，支持无扩展名的下载接口 |
 | 粘贴代码 | 以 UTF-8 源码导入单个插件；无来源 URL 时需 `updateUrl` 才能检查更新 |
+| 粘贴站点 JSON | `{"homePage": "...", "name": ...}` 认作一个 WebHome 源，包成远程页面插件 |
 
-URL 路径扩展名与 `Content-Type` 仅作提示，不作为拒绝依据。宿主先尝试解析为 JSON 插件列表，
-否则按 JS 模块读取元信息；识别失败时报告具体错误，不把 HTML 错误页保存为插件。
+URL 路径扩展名与 `Content-Type` 仅作提示，不作为拒绝依据。导入时宿主按内容识别：
+HTML 包成 WebHome 源；裸站点 JSON 认作一个 WebHome 源；JSON 插件列表按 §4 批量导入；
+否则按 JS 模块读取元信息。识别失败时报告具体错误。
 相对地址以重定向后的最终列表 URL 为基准；下载仍受宿主网络规则与对应文件大小限制约束。
+
+HTML 直接导入（v0.0.48）：内容去空白后以 `<!doctype html` 或 `<html` 开头（大小写不敏感）
+即当作 HTML，不认扩展名。宿主生成一个包装插件：`meta.webhome` 为 `{ homePage }`（远程，
+就是原地址，页面留在远端，相对资源照常工作）或 `{ localPage }`（本地，见 §2），另有
+`webhome: {}` 空命名空间与最小的 search/media 存根（搜索返回空结果；详情把页面本身当作
+唯一一集；`resolvePlayback` 明确报错，因为页面本身没有可解析的播放地址）。包装的 id 取
+`webhome.<host>-<词干>`（远程）或 `webhome.<文件名词干>`（本地），名字取页面的 `<title>`，
+没有时取 host 或文件名；重复导入同一文件覆盖同一个插件，不产生重复条目。
+限制：只支持单个自包含的 HTML 文件；本地页面引用的相对本地资源（如旁边的 `app.js`）
+不会一起打包，不做文件夹导入。
 
 导入单个插件的流程：
 

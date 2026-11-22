@@ -46,11 +46,10 @@ pub async fn open_webhome(
 ) -> Result<Value, String> {
     let manager = host.manager(&app).await.map_err(err)?;
     let meta = manager.meta(&plugin_id).await.map_err(err)?;
-    let home_page = meta
-        .webhome
-        .as_ref()
-        .map(|w| w.home_page.clone())
-        .ok_or_else(|| "该源没有 WebHome 首页".to_string())?;
+    // 远程用 homePage；本地页面用当前回环地址（端口每次启动都变，现算）。
+    let home_page = hghub_hpp::media::MediaSessions::webhome_page_url(&manager, &plugin_id)
+        .await
+        .map_err(err)?;
     if let Some(window) = app.get_webview_window(LABEL) {
         let same = state
             .session

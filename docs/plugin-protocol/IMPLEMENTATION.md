@@ -101,8 +101,19 @@ Windows 客户端使用独立的 WebView2 InPrivate 窗口，每次登录创建�
 WebHome（HTML 源）v1 已落地：`meta.webhome` 声明与 `webhome: {}` 能力命名空间、
 独立 WebView 窗口与 `window.fm` 桥（方法表见 [04 §14](04-host-api.md)）、
 直链播放走真实媒体会话、页面动作（详情/直播/收藏/设置/提示）由主窗口承接。
-hpp 有 4 个 WebHome 集成测试通过；`hg.env.features` 含 `"webhome"`。
+hpp 有 5 个 WebHome 集成测试通过；`hg.env.features` 含 `"webhome"`。
 iOS 上第二个 WebView 窗口尚未真机验证，是 v1 的主要待验收项。
+
+v0.0.48 支持直接导入 HTML 文件为 WebHome 源：导入时按内容识别（不认扩展名），
+远程 HTML 的 `meta.webhome.homePage` 就是原地址，页面留在远端；本地 HTML 文件存进
+插件目录，`meta.webhome.localPage` 记文件名，打开时宿主用回环地址（`/webhome/:id`，
+请求时现查 meta，只提供那一个文件，`text/html`）提供，端口不写进 meta。
+裸站点 JSON `{"homePage": "..."}` 也认作一个 WebHome 源。`homePage` 允许 http(s)
+（直接导入要接受用户粘贴的局域网地址）；包装的 search/media 是最小存根
+（搜索空结果；详情把页面本身当作唯一一集；`resolvePlayback` 明确报错）。
+只支持单个自包含的 HTML 文件，相对本地资源不打包。恢复旧版本时页面文件不回滚，
+只保留磁盘上当前的文件；删除插件时整个目录（含页面文件）一起删。
+hpp 集成测试：远程/本地 HTML 导入、站点 JSON 识别、Meta 二选一校验、回环取页。
 
 ## 仍需完成
 

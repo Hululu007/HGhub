@@ -46,10 +46,30 @@ pub struct Meta {
 fn source_kind() -> String {
     "source".into()
 }
+/// WebHome 宿主声明：首页地址与本地页面二选一。
+/// - `homePage`：远端页面地址，页面留在远端，相对资源照常工作。
+/// - `localPage`：直接导入的本地 HTML 文件名（裸文件名，不含路径），
+///   文件存在插件目录里，打开时宿主用回环地址提供。
+/// 旧版本只有 homePage（必填字符串），反序列化时仍按 Some 处理。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebHomeMeta {
-    pub home_page: String,
+    #[serde(default)]
+    pub home_page: Option<String>,
+    #[serde(default)]
+    pub local_page: Option<String>,
+}
+
+/// 裸文件名：不含路径分隔符，不为 `.` / `..`，不与插件自身文件重名。
+fn is_bare_file_name(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= 255
+        && !raw.contains(['/', '\\', '\0'])
+        && raw.chars().all(|c| !c.is_control())
+        && raw != "."
+        && raw != ".."
+        && raw != "plugin.js"
+        && raw != "plugin.previous.json"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,8 +131,21 @@ impl Meta {
         }
         version(&m.version)?;
         if let Some(webhome) = &m.webhome {
-            url(&webhome.home_page, false, false)
-                .map_err(|_| PluginError::invalid("WebHome 首页地址必须为 https 绝对地址"))?;
+            match (&webhome.home_page, &webhome.local_page) {
+                (Some(home), None) => url(home, true, false).map_err(|_| {
+                    PluginError::invalid("WebHome 首页地址必须为 http(s) 绝对地址")
+                })?,
+                (None, Some(local)) => {
+                    if !is_bare_file_name(local) {
+                        return Err(PluginError::invalid("WebHome 本地页面文件名无效"));
+                    }
+                }
+                _ => {
+                    return Err(PluginError::invalid(
+                        "WebHome 首页须在 homePage 与 localPage 中二选一",
+                    ));
+                }
+            }
         }
         if m.protocol != 1 {
             return Err(PluginError::new("UNSUPPORTED", "不支持该协议主版本"));
