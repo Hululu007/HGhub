@@ -96,7 +96,7 @@ export default function Feed({media, position, active=true, preparing=false, err
   const setClean = store.setClean;
 
   /* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒/关闭；15 秒无操作
-     自动消失（复制地址或点旋转会续 15 秒，3 秒不够点到复制）；切集、
+     自动消失（点按浮层里的按钮会续 15 秒，3 秒不够点到复制）；切集、
      退出清屏时关闭。 */
   const [infoOverlay, setInfoOverlay] = useState(false);
   const infoOverlayTimer = useRef(0);
@@ -934,8 +934,10 @@ export default function Feed({media, position, active=true, preparing=false, err
                     </div>
                   )}
                   {/* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒。左为分辨率
-                      （与 3 秒角标同一位置），右对称显示当前播放内核；下方只有
-                      “复制播放地址”按钮（点按复制真实播放地址，不显示 URL 本身）
+                      （与 3 秒角标同一位置），右对称显示当前播放内核；下方有
+                      “复制播放地址”按钮（点按复制真实播放地址，不显示 URL 本身）、
+                      下载按钮（点按下载当前视频，下载中禁用；下载完点按分享）、
+                      画面设置按钮（点按打开更多播放选项，可改画面设置）
                       与横竖屏切换按钮。竖屏时两行左右按横向安全区（--sal/--sar）
                       留白；横屏时左边两行改取固定 230px：实测本机 WKWebView 里
                       横屏的 env(safe-area-inset-left) 是 0，--sal 只剩 12px，
@@ -966,6 +968,16 @@ export default function Feed({media, position, active=true, preparing=false, err
                           className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable"
                           style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
                           <IRotate size={19} className="hg-ink" />
+                        </button>
+                        {isTauri() && <button onClick={() => { void startDownload(); pokeInfoOverlay(); }} disabled={dlActive} aria-label={dlDone ? "已下载 · 分享" : "下载"}
+                          className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable disabled:opacity-40"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          <IDownload size={19} className="hg-ink" />
+                        </button>}
+                        <button onClick={() => { setPanel("more"); pokeInfoOverlay(); }} aria-label="画面设置"
+                          className="pointer-events-auto shrink-0 w-10 h-10 rounded-full backdrop-blur-md flex items-center justify-center pressable"
+                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                          <ISettings size={19} className="hg-ink" />
                         </button>
                       </div>
                     </div>
