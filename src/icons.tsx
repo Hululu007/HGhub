@@ -57,6 +57,7 @@ export const IFlag = S(<><path d="M5.5 21V4" /><path d="M5.5 4.5c4-2.4 8 2.4 13 
 export const IBan = S(<><circle cx="12" cy="12" r="8.5" /><path d="M6 6l12 12" /></>);
 export const IClock = S(<><circle cx="12" cy="12" r="8.5" /><path d="M12 7v5.2l3.4 2" /></>);
 export const IKeyboard = S(<><rect x="2.5" y="6" width="19" height="12" rx="2.5" /><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6" strokeWidth={2.2} /></>);
+export const IShare = S(<><path d="M12 13.5V3.5" /><path d="m8.5 7 3.5-3.5L15.5 7" /><path d="M5 11.5v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8" /></>);
 export const ISendF = S(<path d="M3.6 11 19.4 3.6c.8-.4 1.6.4 1.3 1.2L14.4 20.7c-.3.8-1.5.8-1.8 0l-2-5.4a1 1 0 0 0-.6-.6l-6.3-1.9c-.9-.2-.9-1.4-.1-1.8Z" />, true);
 export const IRefresh = S(<><path d="M20 12a8 8 0 1 1-2.5-5.8" /><path d="M20 3.5V7h-3.5" /></>);
 export const ISparkF = S(<path d="M12 2.5c.6 3.9 1.7 6.1 3.3 7.7 1.6 1.6 3.8 2.6 6.2 3.3-3.9.6-6.1 1.7-7.7 3.3-1.6 1.6-2.6 3.8-3.3 6.2-.6-3.9-1.7-6.1-3.3-7.7-1.6-1.6-3.8-2.6-6.2-3.3 3.9-.6 6.1-1.7 7.7-3.3 1.6-1.6 2.6-3.8 3.3-6.2Z" />, true);

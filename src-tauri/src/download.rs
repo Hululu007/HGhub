@@ -3,6 +3,10 @@
 //! 只消费已有的回环地址（media.url），不改媒体服务器、不改插件协议。
 //! 直链文件（MP4 等）直接流式写盘，不读入内存；HLS 先取清单、再按顺序
 //! 取分片拼成一个文件（TS 直接拼，fMP4 先写 MAP 初始化段再拼媒体分片）。
+//! fMP4 源若把音频放在独立的 EXT-X-MEDIA 清单里（主清单的
+//! #EXT-X-STREAM-INF 带 AUDIO="..."），只下视频分片拼出的文件没有音轨，
+//! 本机播就没声音——这时把音频清单的分片也取下来合轨（见 fmp4.rs），
+//! 音频没有初始化段（如 TS 音频）时仍只存视频，不拼坏文件。
 //! 协议 09 §5/§6：下载与播放分别排队，一次只下一个，让位于前台播放；
 //! 只在容器与范围连续性允许时写盘，不续传——中途失败删掉未完成文件，
 //! 由用户重新点按下载（即重启当前文件）。加密 HLS（EXT-X-KEY）与
@@ -16,8 +20,10 @@ use reqwest::StatusCode;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use url::Url;
+
+use crate::fmp4;
 
 /// 同时只允许一个下载（协议 09 §6：下载队列让位于前台播放；顺序取流
 /// 也避免多个下载抢媒体传输许可）。
@@ -201,6 +207,16 @@ async fn read_playlist_text(
 struct Variant {
     uri: String,
     bandwidth: u64,
+    /// #EXT-X-STREAM-INF 上的 AUDIO="..."，指向音频组（GROUP-ID）。
+    audio: Option<String>,
+}
+
+/// 主清单里的一个音频组（#EXT-X-MEDIA:TYPE=AUDIO）。
+#[derive(Clone)]
+struct AudioGroup {
+    group_id: String,
+    uri: String,
+    default: bool,
 }
 
 struct MediaPlaylist {
@@ -211,6 +227,8 @@ struct MediaPlaylist {
     init: Option<String>,
     /// 没有 #EXT-X-ENDLIST 即直播：只下当前窗口的分片，存成一段片段。
     live: bool,
+    /// 只在主清单里有：独立音频组的清单地址。
+    audio_groups: Vec<AudioGroup>,
 }
 
 fn parse_media_playlist(text: &str) -> Result<MediaPlaylist, String> {
@@ -229,18 +247,40 @@ fn parse_media_playlist(text: &str) -> Result<MediaPlaylist, String> {
     let mut variants: Vec<Variant> = Vec::new();
     let mut segments: Vec<(String, f64)> = Vec::new();
     let mut init: Option<String> = None;
+    let mut audio_groups: Vec<AudioGroup> = Vec::new();
     let mut pending_bandwidth: Option<u64> = None;
+    let mut pending_audio: Option<String> = None;
     let mut pending_duration: Option<f64> = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA:") {
+            // 独立音频组：只收 TYPE=AUDIO 的；URI 是相对主清单的地址。
+            let attrs = parse_attrs(rest);
+            let get = |k: &str| attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            if get("TYPE").as_deref() == Some("AUDIO") {
+                if let (Some(group_id), Some(uri)) = (get("GROUP-ID"), get("URI")) {
+                    audio_groups.push(AudioGroup {
+                        group_id,
+                        uri,
+                        default: get("DEFAULT").as_deref() == Some("YES"),
+                    });
+                }
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("#EXT-X-STREAM-INF:") {
-            pending_bandwidth = rest
-                .split(',')
-                .find_map(|kv| kv.trim().strip_prefix("BANDWIDTH="))
-                .and_then(|v| v.parse().ok());
+            let attrs = parse_attrs(rest);
+            pending_bandwidth = attrs
+                .iter()
+                .find(|(k, _)| k == "BANDWIDTH")
+                .and_then(|(_, v)| v.parse().ok());
+            pending_audio = attrs
+                .iter()
+                .find(|(k, _)| k == "AUDIO")
+                .map(|(_, v)| v.clone());
             continue;
         }
         if let Some(rest) = line.strip_prefix("#EXT-X-MAP:") {
@@ -258,6 +298,7 @@ fn parse_media_playlist(text: &str) -> Result<MediaPlaylist, String> {
             variants.push(Variant {
                 uri: line.to_string(),
                 bandwidth: pending_bandwidth.take().unwrap_or(0),
+                audio: pending_audio.take(),
             });
         } else {
             segments.push((line.to_string(), pending_duration.take().unwrap_or(0.0)));
@@ -269,7 +310,43 @@ fn parse_media_playlist(text: &str) -> Result<MediaPlaylist, String> {
         segments,
         init,
         live,
+        audio_groups,
     })
+}
+
+/// 逗号分隔的属性表（`BANDWIDTH=123,AUDIO="a"`）：值可带引号，引号里的
+/// 逗号不切分；返回的键名与值都不带引号与空白。
+fn parse_attrs(rest: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for ch in rest.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                cur.push(ch);
+            }
+            ',' if !quoted => {
+                push_attr(&mut out, std::mem::take(&mut cur));
+            }
+            _ => cur.push(ch),
+        }
+    }
+    push_attr(&mut out, cur);
+    out
+}
+
+fn push_attr(out: &mut Vec<(String, String)>, part: String) {
+    let part = part.trim();
+    if part.is_empty() {
+        return;
+    }
+    if let Some((k, v)) = part.split_once('=') {
+        out.push((
+            k.trim().to_string(),
+            v.trim().trim_matches('"').to_string(),
+        ));
+    }
 }
 
 /// 从 `URI="..."` 这类属性里取值。
@@ -307,14 +384,19 @@ async fn download_hls(
     text: &str,
 ) -> Result<DownloadResult, String> {
     // 主清单只取一档（带宽最高的一档，没有带宽信息时取第一档），
-    // 再按它的媒体清单下分片。
+    // 再按它的媒体清单下分片。分片地址按所在清单的地址解析（子清单在
+    // 子目录里时，相对地址要以子清单为准，不是以主清单）。
     let mut playlist = parse_media_playlist(text)?;
+    let mut video_base = base.clone();
+    let mut audio_url: Option<Url> = None;
     if playlist.master {
         let variant = playlist
             .variants
             .iter()
             .max_by_key(|v| v.bandwidth)
             .ok_or_else(|| "主清单里没有可选清晰度".to_string())?;
+        let variant_audio = variant.audio.clone();
+        let master_groups = std::mem::take(&mut playlist.audio_groups);
         let variant_url = base
             .join(&variant.uri)
             .map_err(|_| "播放清单地址无效".to_string())?;
@@ -323,10 +405,55 @@ async fn download_hls(
         if playlist.master {
             return Err("多级主清单暂不支持下载".to_string());
         }
+        video_base = variant_url;
+        audio_url = resolve_audio_url(base, &variant_audio, &master_groups);
     }
     let ext = if playlist.init.is_some() { "mp4" } else { "ts" };
     let (path, part) = output_paths(dir, name, ext);
-    match download_hls_segments(app, client, base, &playlist, &part, download_id).await {
+    // 音频清单：取不到、本身又是主清单、或没有分片时不合轨；
+    // 只有视频与音频都是 fMP4（都有 MAP 初始化段）才合轨，TS 音频
+    // 暂不支持合轨，仍只存视频，不拼坏文件。
+    let audio_playlist: Option<(Url, MediaPlaylist)> = match audio_url {
+        Some(url) => {
+            let atext = fetch_text(client, url.as_str()).await?;
+            let ap = parse_media_playlist(&atext)?;
+            if ap.master {
+                return Err("音频清单暂不支持多级主清单".to_string());
+            }
+            Some((url, ap))
+        }
+        None => None,
+    };
+    let mux = match &audio_playlist {
+        Some((_, ap)) => {
+            playlist.init.is_some()
+                && ap.init.is_some()
+                && !playlist.segments.is_empty()
+                && !ap.segments.is_empty()
+        }
+        None => false,
+    };
+    let result = if mux {
+        // mux 为真时 audio_playlist 一定是 Some。
+        let (aurl, ap) = match audio_playlist {
+            Some((u, p)) => (u, p),
+            None => return Err("音频清单丢失".to_string()),
+        };
+        download_hls_muxed(
+            app,
+            client,
+            &video_base,
+            &playlist,
+            &aurl,
+            &ap,
+            &part,
+            download_id,
+        )
+        .await
+    } else {
+        download_hls_segments(app, client, &video_base, &playlist, &part, download_id).await
+    };
+    match result {
         Ok((bytes, duration)) => {
             finish_part(&part, &path).await?;
             Ok(DownloadResult {
@@ -341,6 +468,203 @@ async fn download_hls(
             Err(e)
         }
     }
+}
+
+/// 音频组解析：优先用选中清晰度点的 AUDIO 组，其次 DEFAULT=YES 的组，
+/// 再其次第一个音频组；地址按主清单解析。
+fn resolve_audio_url(
+    base: &Url,
+    variant_audio: &Option<String>,
+    groups: &[AudioGroup],
+) -> Option<Url> {
+    let group = variant_audio
+        .as_deref()
+        .and_then(|g| groups.iter().find(|a| a.group_id == g))
+        .or_else(|| groups.iter().find(|a| a.default))
+        .or_else(|| groups.first())?;
+    base.join(&group.uri).ok()
+}
+
+/// fMP4 合轨下载：两路初始化段合并（fmp4::merge_inits），两路分片
+/// 各自顺序取下、记下每片的时间（moof 里 tfdt），最后按时间交错写盘。
+/// 分片先落在与 .part 同目录的临时文件里（内存只留一片），成败都删。
+async fn download_hls_muxed(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    video_base: &Url,
+    video: &MediaPlaylist,
+    audio_url: &Url,
+    audio: &MediaPlaylist,
+    part: &PathBuf,
+    download_id: &str,
+) -> Result<(u64, f64), String> {
+    let vtmp = PathBuf::from(format!("{}.vtmp", part.display()));
+    let atmp = PathBuf::from(format!("{}.atmp", part.display()));
+    let r = download_hls_muxed_inner(
+        app, client, video_base, video, audio_url, audio, part, download_id, &vtmp, &atmp,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&vtmp).await;
+    let _ = tokio::fs::remove_file(&atmp).await;
+    r
+}
+
+async fn download_hls_muxed_inner(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    video_base: &Url,
+    video: &MediaPlaylist,
+    audio_url: &Url,
+    audio: &MediaPlaylist,
+    part: &PathBuf,
+    download_id: &str,
+    vtmp: &PathBuf,
+    atmp: &PathBuf,
+) -> Result<(u64, f64), String> {
+    let video_init_uri = video
+        .init
+        .as_deref()
+        .ok_or("视频清单缺少初始化段")?;
+    let audio_init_uri = audio
+        .init
+        .as_deref()
+        .ok_or("音频清单缺少初始化段")?;
+    let video_init = fetch_bytes(
+        client,
+        video_base
+            .join(video_init_uri)
+            .map_err(|_| "播放清单地址无效".to_string())?
+            .as_str(),
+    )
+    .await?;
+    let audio_init = fetch_bytes(
+        client,
+        audio_url
+            .join(audio_init_uri)
+            .map_err(|_| "播放清单地址无效".to_string())?
+            .as_str(),
+    )
+    .await?;
+    let (merged_init, audio_id_map) = fmp4::merge_inits(&video_init, &audio_init)?;
+    let timescales = fmp4::track_timescales(&merged_init)?;
+    let total_segments = video.segments.len() + audio.segments.len();
+    let mut downloaded: u64 = (video_init.len() + audio_init.len()) as u64;
+
+    // 视频分片：顺序取，记（临时文件里的偏移，长度，解码时间）。
+    let mut vfile = File::create(vtmp)
+        .await
+        .map_err(|e| format!("无法创建下载文件：{e}"))?;
+    let mut vtimes: Vec<(u64, u64, f64)> = Vec::with_capacity(video.segments.len());
+    let mut voff: u64 = 0;
+    for (i, (uri, _)) in video.segments.iter().enumerate() {
+        let seg_url = video_base
+            .join(uri)
+            .map_err(|_| "播放清单地址无效".to_string())?;
+        let bytes = fetch_bytes(client, seg_url.as_str()).await?;
+        let t = fmp4::fragment_time(&bytes, &timescales)?;
+        vfile
+            .write_all(&bytes)
+            .await
+            .map_err(|e| format!("写入失败：{e}"))?;
+        vtimes.push((voff, bytes.len() as u64, t));
+        voff += bytes.len() as u64;
+        downloaded += bytes.len() as u64;
+        emit_progress(app, download_id, downloaded, None, Some(i + 1), Some(total_segments));
+    }
+    vfile.flush().await.map_err(|e| format!("写入失败：{e}"))?;
+
+    // 音频分片：同理，进度接着数。
+    let mut afile = File::create(atmp)
+        .await
+        .map_err(|e| format!("无法创建下载文件：{e}"))?;
+    let mut atimes: Vec<(u64, u64, f64)> = Vec::with_capacity(audio.segments.len());
+    let mut aoff: u64 = 0;
+    for (j, (uri, _)) in audio.segments.iter().enumerate() {
+        let seg_url = audio_url
+            .join(uri)
+            .map_err(|_| "播放清单地址无效".to_string())?;
+        let mut bytes = fetch_bytes(client, seg_url.as_str()).await?;
+        // 音频 init 的 track_ID 常与视频撞号（都从 1 开始），分片里的
+        // tfhd / sidx 须按同一张表换成合轨后的新 ID，否则按旧 ID 查
+        // timescale 会算错时间、交错顺序全乱。
+        for (old, new) in &audio_id_map {
+            fmp4::remap_fragment_track_ids(&mut bytes, *old, *new)?;
+        }
+        let t = fmp4::fragment_time(&bytes, &timescales)?;
+        afile
+            .write_all(&bytes)
+            .await
+            .map_err(|e| format!("写入失败：{e}"))?;
+        atimes.push((aoff, bytes.len() as u64, t));
+        aoff += bytes.len() as u64;
+        downloaded += bytes.len() as u64;
+        emit_progress(
+            app,
+            download_id,
+            downloaded,
+            None,
+            Some(video.segments.len() + j + 1),
+            Some(total_segments),
+        );
+    }
+    afile.flush().await.map_err(|e| format!("写入失败：{e}"))?;
+
+    // 写盘：先写合并后的初始化段，再按时间交错拷分片（同时间视频在前）。
+    let mut out = File::create(part)
+        .await
+        .map_err(|e| format!("无法创建下载文件：{e}"))?;
+    out.write_all(&merged_init)
+        .await
+        .map_err(|e| format!("写入失败：{e}"))?;
+    let mut written: u64 = merged_init.len() as u64;
+    let vtimes_s: Vec<f64> = vtimes.iter().map(|(_, _, t)| *t).collect();
+    let atimes_s: Vec<f64> = atimes.iter().map(|(_, _, t)| *t).collect();
+    for (is_video, idx) in fmp4::interleave_order(&vtimes_s, &atimes_s) {
+        let (tmp, off, len) = if is_video {
+            (vtmp, vtimes[idx].0, vtimes[idx].1)
+        } else {
+            (atmp, atimes[idx].0, atimes[idx].1)
+        };
+        copy_range(tmp, off, len, &mut out).await?;
+        written += len;
+    }
+    out.flush().await.map_err(|e| format!("写入失败：{e}"))?;
+    let duration: f64 = video.segments.iter().map(|(_, d)| d).sum();
+    Ok((written, duration))
+}
+
+/// 从临时文件里把 [offset, offset+len) 拷进输出文件。
+async fn copy_range(src: &PathBuf, offset: u64, len: u64, out: &mut File) -> Result<(), String> {
+    let mut f = File::open(src)
+        .await
+        .map_err(|e| format!("读取临时文件失败：{e}"))?;
+    f.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|e| format!("读取临时文件失败：{e}"))?;
+    let mut limited = f.take(len);
+    tokio::io::copy(&mut limited, out)
+        .await
+        .map_err(|e| format!("写入失败：{e}"))?;
+    Ok(())
+}
+
+/// 取一个小文件（初始化段/分片）进内存；设 64 MiB 上限防异常。
+async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+    const MAX_FRAGMENT_BYTES: usize = 64 * 1024 * 1024;
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| download_error(&e))?;
+    check_status(resp.status())?;
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| download_error(&e))? {
+        if out.len() + chunk.len() > MAX_FRAGMENT_BYTES {
+            return Err("分片过大，暂不支持下载".to_string());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 /// HLS：fMP4 先写 MAP 初始化段，再按顺序取分片、逐个写盘。

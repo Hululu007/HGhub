@@ -1,5 +1,6 @@
 mod commands;
 mod download;
+pub mod fmp4;
 mod logging;
 mod native_player;
 #[cfg(target_os = "macos")]

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { deleteDownload, exportDownloadToPhotos, listDownloads, playDownloadedFile, shareDownloadedFile, type DownloadedFile } from "../download";
-import { IChevR, IChevronDown, IPlayF, IRefresh, ISendF, ITrash } from "../icons";
+import { IChevR, IChevronDown, IPlayF, IRefresh, ISendF, IShare, ITrash } from "../icons";
 import { Notice } from "./BrowsePages";
 
 /** 设置与更多播放选项里的下载管理：列出文稿/Downloads 里的已完成下载。
@@ -8,7 +8,16 @@ import { Notice } from "./BrowsePages";
  * 文件夹可折叠；单个资源文件不建文件夹，直接散放在列表里。
  * 点按文件名直接在本机播（AVPlayer 全屏；HLS 拼合的 .ts 本机播不了，
  * 点按会提示改用导出）；每行有导出（存到相册，或走系统分享面存到
- * “文件”）与删除（点两下确认）。 */
+ * “文件”）、分享（直接弹系统分享面）与删除（点两下确认）。 */
+/** Tauri invoke 失败时抛的是字符串本身，不是 Error 实例——直接读
+ * e.message 会读不到，只剩兜底的“播放失败”；先把字符串原样报出来，
+ * 下次真机报错才能看到到底是哪一步失败。 */
+function errText(e: unknown, fallback: string): string {
+  if (typeof e === "string" && e) return e;
+  if (e instanceof Error && e.message) return e.message;
+  return fallback;
+}
+
 export default function DownloadManager() {
   const [files, setFiles] = useState<DownloadedFile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -31,25 +40,33 @@ export default function DownloadManager() {
   const play = async (f: DownloadedFile) => {
     setError(""); setInfo("");
     try { await playDownloadedFile(f); }
-    catch (e) { setError(e instanceof Error ? e.message : "播放失败"); }
+    catch (e) { setError(errText(e, "播放失败")); }
   };
   const exportToPhotos = async (f: DownloadedFile) => {
     setBusy(f.path); setError(""); setInfo("");
     try { await exportDownloadToPhotos(f.path); setExportPath(null); setInfo("已保存到相册"); }
-    catch (e) { setError(e instanceof Error ? e.message : "保存到相册失败"); }
+    catch (e) { setError(errText(e, "保存到相册失败")); }
     finally { setBusy(null); }
   };
   const exportToFiles = async (f: DownloadedFile) => {
     setBusy(f.path); setError(""); setInfo("");
     try { await shareDownloadedFile(f.path); setExportPath(null); }
-    catch { setError("分享失败"); }
+    catch (e) { setError(errText(e, "分享失败")); }
+    finally { setBusy(null); }
+  };
+  // 分享：与导出里的“保存到文件”是同一个系统分享面，这里不经选择器、
+  // 点图标就直接弹出来（发微信、存到“文件”、用 SenPlayer 打开都从这走）。
+  const share = async (f: DownloadedFile) => {
+    setBusy(f.path); setError(""); setInfo("");
+    try { await shareDownloadedFile(f.path); }
+    catch (e) { setError(errText(e, "分享失败")); }
     finally { setBusy(null); }
   };
   const remove = async (f: DownloadedFile) => {
     if (confirmPath !== f.path) { setConfirmPath(f.path); return; }
     setConfirmPath(null); setBusy(f.path); setError(""); setInfo("");
     try { await deleteDownload(f.path); await refresh(); }
-    catch (e) { setError(e instanceof Error ? e.message : "删除失败"); }
+    catch (e) { setError(errText(e, "删除失败")); }
     finally { setBusy(null); }
   };
 
@@ -71,7 +88,7 @@ export default function DownloadManager() {
   }, [files]);
   const singles = files.filter(f => !f.folder);
   const total = files.reduce((n, f) => n + f.bytes, 0);
-  const rowProps = { busy, confirmPath, exportPath, onPlay: play, onExportPhotos: exportToPhotos, onExportFiles: exportToFiles, onRemove: remove, onToggleExport: (p: string) => setExportPath(exportPath === p ? null : p) };
+  const rowProps = { busy, confirmPath, exportPath, onPlay: play, onExportPhotos: exportToPhotos, onExportFiles: exportToFiles, onShare: share, onRemove: remove, onToggleExport: (p: string) => setExportPath(exportPath === p ? null : p) };
 
   return <div className="px-3.5 py-3">
     <div className="flex items-center justify-between gap-2">
@@ -102,7 +119,7 @@ export default function DownloadManager() {
     {singles.length > 0 && <ul className="mt-2 divide-y divide-s3">
       {singles.map(f => <FileRow key={f.path} f={f} {...rowProps} />)}
     </ul>}
-    {!files.length && !loading && <p className="text-[11px] text-mut mt-2">在播放页点“下载”保存的视频会列在这里：多集资源按资源名收进一个文件夹，单个资源直接列出；点按文件名可直接播放，导出可存到相册或文件。</p>}
+    {!files.length && !loading && <p className="text-[11px] text-mut mt-2">在播放页点“下载”保存的视频会列在这里：多集资源按资源名收进一个文件夹，单个资源直接列出；点按文件名可直接播放，导出可存到相册或文件，分享按钮直接弹系统分享面。</p>}
   </div>;
 }
 
@@ -114,11 +131,12 @@ type RowProps = {
   onPlay: (f: DownloadedFile) => void;
   onExportPhotos: (f: DownloadedFile) => void;
   onExportFiles: (f: DownloadedFile) => void;
+  onShare: (f: DownloadedFile) => void;
   onRemove: (f: DownloadedFile) => void;
   onToggleExport: (path: string) => void;
 };
 
-function FileRow({ f, busy, confirmPath, exportPath, onPlay, onExportPhotos, onExportFiles, onRemove, onToggleExport }: RowProps) {
+function FileRow({ f, busy, confirmPath, exportPath, onPlay, onExportPhotos, onExportFiles, onShare, onRemove, onToggleExport }: RowProps) {
   return <li className="py-2.5">
     <div className="flex items-center gap-3">
       <button className="shrink-0 w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary pressable" aria-label={`播放 ${f.name}`} onClick={() => onPlay(f)}><IPlayF size={14}/></button>
@@ -127,6 +145,7 @@ function FileRow({ f, busy, confirmPath, exportPath, onPlay, onExportPhotos, onE
         <div className="text-[10.5px] text-mut">{formatSize(f.bytes)}{f.modified ? ` · ${formatDate(f.modified)}` : ""} · 点按播放</div>
       </button>
       <button className="pressable disabled:opacity-50 shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-primary" aria-label={`导出 ${f.name}`} aria-expanded={exportPath === f.path} disabled={busy === f.path} onClick={() => onToggleExport(f.path)}><ISendF size={15}/></button>
+      <button className="pressable disabled:opacity-50 shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-primary" aria-label={`分享 ${f.name}`} disabled={busy === f.path} onClick={() => onShare(f)}><IShare size={15}/></button>
       <button className="pressable disabled:opacity-50 shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-mut" aria-label={`删除 ${f.name}`} disabled={busy === f.path} onClick={() => onRemove(f)}>{confirmPath === f.path ? <span className="text-[11px] text-primary">确认</span> : <ITrash size={15}/>}</button>
     </div>
     {exportPath === f.path && <div className="mt-2 ml-11 flex gap-2">

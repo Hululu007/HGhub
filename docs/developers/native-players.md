@@ -420,7 +420,7 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   锁定没做。另外 iOS 上 `set_orientation(false)` 是切回竖屏，与
   Android 的“恢复之前方向”语义不同。
 
-## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36；下载管理进更多菜单 + 导出 + 点播 + SenPlayer 跳转 v0.0.37）
+## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36；下载管理进更多菜单 + 导出 + 点播 + SenPlayer 跳转 v0.0.37；独立音频轨合轨 + 下载管理分享按钮 v0.0.38）
 
 - 入口：详情页“更多播放选项”菜单与“影片信息”面板里各有一个“下载”
   按钮，播放器上（全屏右上角与非全屏顶栏、更多按钮旁）还有一个下载
@@ -447,6 +447,26 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   一个文件（TS 直接拼，fMP4 先写 MAP 初始化段再拼媒体分片；主清单
   只取带宽最高的一档）。进度经 `download-progress` 事件回传
   （HLS 按分片数，直链按字节），按钮上显示“下载中 45%”。
+- 独立音频轨合轨（v0.0.38）：很多 fMP4 HLS 的音频不在视频 variant
+  里，而是一条独立的音频 rendition（主清单用 `#EXT-X-MEDIA:
+  TYPE=AUDIO` 声明，variant 的 `#EXT-X-STREAM-INF` 用 `AUDIO` 属性
+  指到它）。v0.0.33–v0.0.37 只取视频 variant 的分片，拼出的 fMP4 没
+  有音轨——本机播没声音，还会偶发“播放失败”（AVPlayer 读到 moov
+  声明有音轨却无采样时报错）。v0.0.38 起 `download.rs` 解析
+  `#EXT-X-MEDIA` 与 `AUDIO` 属性，取视频 variant 的音频组（优先
+  variant 指定的组，其次 `DEFAULT=YES` 的组），两路清单都取
+  （分片 URI 按各自清单的地址解析，之前按主清单解析是错的）；
+  两路都有 MAP 初始化段且分片非空时走合轨：`src-tauri/src/fmp4.rs`
+  的 `merge_inits` 把两路 init 合成一个（ftyp 取视频，moov 里同时
+  放视频 trak 与音频 trak，mvex 里两路 trex 都在），再按各分片的
+  tfdt 解码时间交错写盘（同时间视频在前），音频分片先下到临时文件、
+  内存里一次只留一个分片。TS 清单或音频没 MAP 时仍走老路、只存
+  视频（已知限制，不回归）。合轨前必须处理撞号：两路 init 的
+  track_ID 常常都从 1 开始，`merge_inits` 会把音频轨换成没被视频
+  占用的 ID 并返回换号表，下载时按同一张表把音频分片的 tfhd 与
+  sidx 也改掉——不改的话音频分片按视频的 timescale 算时间，交错
+  顺序全错、合出的文件播不起来（ffmpeg 夹具已验：合出的文件双轨、
+  时长与源一致、两轨完整解码无错）。
 - 存到哪：应用文稿目录下的 `Downloads`（iOS 是“文件”App 里
   “我的 iPhone”→ 红苹果影视 → Downloads；`UIFileSharingEnabled` 与
   `LSSupportsOpeningDocumentsInPlace` 由
@@ -474,7 +494,12 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   文稿/Downloads 里的已完成下载（`list_downloads` 命令，按修改时间
   倒序，跳过 `.part` 未完成文件），每行显示文件名、大小与日期，可分
   享（系统分享面，导出）或删除（点两下确认；`delete_download` 只允许
-  删 Downloads 目录里的文件，路径须落在该目录下）。
+  删 Downloads 目录里的文件，路径须落在该目录下）。v0.0.38 起每行
+  多了一个分享按钮图标（`IShare`，与导出图标并列），点按直接弹系统
+  分享面（复用已有的 `shareDownloadedFile`，不用先展开导出菜单）；
+  同时播放/导出/分享/删除失败时显示真实的报错原因，不再一律写
+  “播放失败”（Tauri invoke 失败时返回的是纯字符串，之前按
+  `Error.message` 取不到）。
 - 下载管理进更多菜单、导出、点播（v0.0.37）：详情页与首页的“更多播放
   选项”菜单里新增“下载管理”入口，打开同一份 `DownloadManager`（新
   面板 `downloads`，不走 `onPanelChange`）；设置里的下载管理不变。
