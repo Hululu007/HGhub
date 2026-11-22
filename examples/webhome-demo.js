@@ -7,7 +7,7 @@ export const meta = {
   version: "1.0.0",
   protocol: 1,
   description: "WebHome 最小演示：搜索、详情、直链播放都走固定条目。",
-  webhome: { homePage: "https://cdn.jsdelivr.net/gh/yizu2008/HGhub@main/examples/webhome-demo.html" },
+  webhome: { homePage: "https://raw.githack.com/yizu2008/HGhub/main/examples/webhome-demo.html" },
 };
 
 const STREAM = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";

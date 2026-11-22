@@ -80,7 +80,7 @@ async function init() {
 ## 最小演示
 
 仓库里有一份能直接导入的演示源：`examples/webhome-demo.js`（演示页
-`examples/webhome-demo.html`，通过 jsDelivr 加载）。导入后在插件详情页点
+`examples/webhome-demo.html`，通过 githack 以正确类型加载）。导入后在插件详情页点
 “打开 WebHome 首页”，页面上有搜索、打开详情、直链播放、查状态、弹提示五个按钮。
 
 [当前支持状态](status.md) · [协议 06 §18](../plugin-protocol/06-capabilities.md)
