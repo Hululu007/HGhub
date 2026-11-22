@@ -42,6 +42,12 @@ tokio = { version = "1", features = ["sync", "fs", "io-util"] }
 futures-util = "0.3"
 tokio-util = "0.7"
 
+# iOS 的 Python 引导（src/python.rs）用 BoxFuture；futures-util 只在
+# windows/android 目标下声明过，iOS 构建在 v0.0.53 挂掉（E0433）。
+# tokio-util 不需要：app 侧只在 android/windows 登录里用，hpp 自带一份。
+[target.'cfg(target_os = "ios")'.dependencies]
+futures-util = "0.3"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 wry = "0.57"
 webview2-com = "0.39"
