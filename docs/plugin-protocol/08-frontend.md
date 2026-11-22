@@ -236,3 +236,15 @@ WebView 窗口里打开该插件的首页（远程是 `homePage`，本地页面�
 页面提示（`ext.toast`）在主窗口顶部以提示条显示。播放状态由主窗口推回 Rust，
 供页面的 `player.status` 查询。同一时间至多一个 WebHome 窗口；
 打开另一插件的首页会先关掉当前窗口。iOS 上第二个 WebView 窗口需真机验收。
+
+权限：WebHome 窗口加载的是远端页面（本地页面也是回环地址），Tauri 2 把
+这类内容当作远程来源，`invoke_handler` 的命令默认一律拒绝，必须由能力文件
+显式放行。`src-tauri/capabilities/webhome.json` 给 `webhome` 窗口放行
+`webhome_call` 与 `webhome_close`（远端地址 `https://*:*` / `http://*:*`，
+`local: false`），缺了它页面每次调用都会被拒（`Command webhome_call
+not allowed by ACL`）。注意连带效应：应用命令的权限定义在
+`src-tauri/permissions/app.toml`（`allow-<命令名>`，下划线变连字符）里，
+一旦应用有了自己的权限清单，本地内容的调用也要逐条放行——所以
+`capabilities/default.json` 里必须同时列出主窗口用的全部命令
+（除 `webhome_call` / `webhome_close` 只在 WebHome 窗口里调），
+否则主窗口的功能会被一并拦掉。新增命令时两处要一起补。

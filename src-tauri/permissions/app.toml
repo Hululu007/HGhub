@@ -1,0 +1,154 @@
+[[permission]]
+identifier = "allow-hpp-manage"
+description = "Enables the hpp_manage command without any pre-configured scope."
+commands.allow = ["hpp_manage"]
+
+[[permission]]
+identifier = "allow-pick-plugin-files"
+description = "Enables the pick_plugin_files command without any pre-configured scope."
+commands.allow = ["pick_plugin_files"]
+
+[[permission]]
+identifier = "allow-pick-plugin-directory"
+description = "Enables the pick_plugin_directory command without any pre-configured scope."
+commands.allow = ["pick_plugin_directory"]
+
+[[permission]]
+identifier = "allow-app-boot"
+description = "Enables the app_boot command without any pre-configured scope."
+commands.allow = ["app_boot"]
+
+[[permission]]
+identifier = "allow-security-set"
+description = "Enables the security_set command without any pre-configured scope."
+commands.allow = ["security_set"]
+
+[[permission]]
+identifier = "allow-set-orientation"
+description = "Enables the set_orientation command without any pre-configured scope."
+commands.allow = ["set_orientation"]
+
+[[permission]]
+identifier = "allow-set-status-bar-hidden"
+description = "Enables the set_status_bar_hidden command without any pre-configured scope."
+commands.allow = ["set_status_bar_hidden"]
+
+[[permission]]
+identifier = "allow-adjust-brightness"
+description = "Enables the adjust_brightness command without any pre-configured scope."
+commands.allow = ["adjust_brightness"]
+
+[[permission]]
+identifier = "allow-adjust-volume"
+description = "Enables the adjust_volume command without any pre-configured scope."
+commands.allow = ["adjust_volume"]
+
+[[permission]]
+identifier = "allow-share-file"
+description = "Enables the share_file command without any pre-configured scope."
+commands.allow = ["share_file"]
+
+[[permission]]
+identifier = "allow-open-senplayer"
+description = "Enables the open_senplayer command without any pre-configured scope."
+commands.allow = ["open_senplayer"]
+
+[[permission]]
+identifier = "allow-export-to-photos"
+description = "Enables the export_to_photos command without any pre-configured scope."
+commands.allow = ["export_to_photos"]
+
+[[permission]]
+identifier = "allow-download-media"
+description = "Enables the download_media command without any pre-configured scope."
+commands.allow = ["download_media"]
+
+[[permission]]
+identifier = "allow-list-downloads"
+description = "Enables the list_downloads command without any pre-configured scope."
+commands.allow = ["list_downloads"]
+
+[[permission]]
+identifier = "allow-delete-download"
+description = "Enables the delete_download command without any pre-configured scope."
+commands.allow = ["delete_download"]
+
+[[permission]]
+identifier = "allow-serve-download"
+description = "Enables the serve_download command without any pre-configured scope."
+commands.allow = ["serve_download"]
+
+[[permission]]
+identifier = "allow-debug-log"
+description = "Enables the debug_log command without any pre-configured scope."
+commands.allow = ["debug_log"]
+
+[[permission]]
+identifier = "allow-open-url"
+description = "Enables the open_url command without any pre-configured scope."
+commands.allow = ["open_url"]
+
+[[permission]]
+identifier = "allow-open-external-media"
+description = "Enables the open_external_media command without any pre-configured scope."
+commands.allow = ["open_external_media"]
+
+[[permission]]
+identifier = "allow-open-webhome"
+description = "Enables the open_webhome command without any pre-configured scope."
+commands.allow = ["open_webhome"]
+
+[[permission]]
+identifier = "allow-webhome-close"
+description = "Enables the webhome_close command without any pre-configured scope."
+commands.allow = ["webhome_close"]
+
+[[permission]]
+identifier = "allow-webhome-call"
+description = "Enables the webhome_call command without any pre-configured scope."
+commands.allow = ["webhome_call"]
+
+[[permission]]
+identifier = "allow-webhome-player-state"
+description = "Enables the webhome_player_state command without any pre-configured scope."
+commands.allow = ["webhome_player_state"]
+
+[[permission]]
+identifier = "allow-native-player-open"
+description = "Enables the native_player_open command without any pre-configured scope."
+commands.allow = ["native_player_open"]
+
+[[permission]]
+identifier = "allow-native-player-close"
+description = "Enables the native_player_close command without any pre-configured scope."
+commands.allow = ["native_player_close"]
+
+[[permission]]
+identifier = "allow-native-player-play"
+description = "Enables the native_player_play command without any pre-configured scope."
+commands.allow = ["native_player_play"]
+
+[[permission]]
+identifier = "allow-native-player-pause"
+description = "Enables the native_player_pause command without any pre-configured scope."
+commands.allow = ["native_player_pause"]
+
+[[permission]]
+identifier = "allow-native-player-seek"
+description = "Enables the native_player_seek command without any pre-configured scope."
+commands.allow = ["native_player_seek"]
+
+[[permission]]
+identifier = "allow-native-player-set-rate"
+description = "Enables the native_player_set_rate command without any pre-configured scope."
+commands.allow = ["native_player_set_rate"]
+
+[[permission]]
+identifier = "allow-native-player-set-volume"
+description = "Enables the native_player_set_volume command without any pre-configured scope."
+commands.allow = ["native_player_set_volume"]
+
+[[permission]]
+identifier = "allow-native-player-state"
+description = "Enables the native_player_state command without any pre-configured scope."
+commands.allow = ["native_player_state"]
