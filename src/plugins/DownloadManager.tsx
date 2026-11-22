@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { deleteDownload, exportDownloadToPhotos, listDownloads, openDownloadInPlayer, playDownloadedFile, shareDownloadedFile, type DownloadedFile } from "../download";
+import { deleteDownload, exportDownloadToPhotos, listDownloads, playDownloadedFile, serveDownloadForSenPlayer, shareDownloadedFile, type DownloadedFile } from "../download";
+import { openInSenPlayer } from "../senplayer";
 import { platform } from "../environment";
 import { IChevR, IChevronDown, IPlayF, IRefresh, ISendF, IShare, ITrash, ITrendUp } from "../icons";
 import { Notice } from "./BrowsePages";
@@ -64,11 +65,13 @@ export default function DownloadManager() {
     catch (e) { setError(errText(e, "分享失败")); }
     finally { setBusy(null); }
   };
-  // SenPlayer：弹系统“用…打开”菜单，点 SenPlayer 就把文件交给它播。
-  // 文件是直接交过去的，播起来不用红苹果在后台留着，也不断流。
+  // SenPlayer：直接跳过去播。文件先挂到回环服务上（serve_download），
+  // 再按在线播放同一条 Scheme 跳 SenPlayer，不弹“用…打开”菜单。
+  // 回环取流快，短剧一集几 MB，SenPlayer 几秒内就能取完；文件特别大、
+  // 取到一半进程被挂起时仍会断，那时用分享按钮的系统分享面兜底。
   const openSenPlayer = async (f: DownloadedFile) => {
     setBusy(f.path); setError(""); setInfo("");
-    try { await openDownloadInPlayer(f.path); }
+    try { await openInSenPlayer(await serveDownloadForSenPlayer(f.path), f.name); }
     catch (e) { setError(errText(e, "SenPlayer 打开失败")); }
     finally { setBusy(null); }
   };

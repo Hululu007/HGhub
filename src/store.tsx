@@ -17,6 +17,7 @@ export type Page = PageInput & { key: string };
 function read<T>(key: string, fallback: T): T { try { return JSON.parse(localStorage.getItem(key) || "null") ?? fallback; } catch { return fallback; } }
 function useApplication() {
   const [theme, setTheme] = useState<Theme>(() => read<string>("hpp.theme", "dark") === "light" ? "light" : "dark");
+  const [glass, setGlass] = useState(() => read<boolean>("hpp.glass", false) === true);
   const [tab, setTabRaw] = useState<Tab>("home"), [stack, setStack] = useState<Page[]>([]);
   const [muteOnStartup, setMuteOnStartup] = useState(() => read<boolean>("hpp.startMuted", true) !== false);
   const [volume, setVolume] = useState(() => { const v = read("hpp.volume", 0.7); return typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.7; });
@@ -29,15 +30,16 @@ function useApplication() {
   const [error, setError] = useState("");
   useEffect(() => {
     document.documentElement.classList.toggle("theme-light", theme === "light"); document.documentElement.style.colorScheme = theme;
-    try { localStorage.setItem("hpp.theme", JSON.stringify(theme)); localStorage.setItem("hpp.startMuted", JSON.stringify(muteOnStartup)); localStorage.setItem("hpp.volume", JSON.stringify(volume)); localStorage.setItem("hpp.playbackEngine", JSON.stringify(playbackEngine)); localStorage.setItem("hpp.pictureMode", JSON.stringify(pictureMode)); } catch { setError("无法保存应用偏好"); }
-  }, [theme, muteOnStartup, volume, playbackEngine, pictureMode]);
+    document.documentElement.classList.toggle("hg-glass", glass);
+    try { localStorage.setItem("hpp.theme", JSON.stringify(theme)); localStorage.setItem("hpp.glass", JSON.stringify(glass)); localStorage.setItem("hpp.startMuted", JSON.stringify(muteOnStartup)); localStorage.setItem("hpp.volume", JSON.stringify(volume)); localStorage.setItem("hpp.playbackEngine", JSON.stringify(playbackEngine)); localStorage.setItem("hpp.pictureMode", JSON.stringify(pictureMode)); } catch { setError("无法保存应用偏好"); }
+  }, [theme, glass, muteOnStartup, volume, playbackEngine, pictureMode]);
   useEffect(() => { void invoke<{strict_security:boolean}>("app_boot").then(v => { setStrict(v.strict_security); setSecurityReady(true); }).catch(() => setError("无法读取网络设置")); }, []);
   const setStrictSecurity = useCallback(async (strict: boolean) => { setPending(true); try { setStrict(await invoke<boolean>("security_set", { strict })); } finally { setPending(false); } }, []);
   const setTab = useCallback((tab: Tab) => { setTabRaw(tab); setStack([]); }, []);
   const push = useCallback((p: PageInput) => setStack(old => [...old, { ...p, key: crypto.randomUUID() }]), []);
   const replace = useCallback((p: PageInput) => setStack(old => [...old.slice(0, -1), { ...p, key: crypto.randomUUID() }]), []);
   const pop = useCallback(() => setStack(old => old.slice(0, -1)), []);
-  return { watching, setWatching, platform, theme, setTheme, tab, setTab, stack, push, replace, pop, muteOnStartup, setMuteOnStartup, volume, setVolume, muted, setMuted, theater, setTheater, fs, setFs, clean, setClean, playbackEngine, setPlaybackEngine, pictureMode, setPictureMode, strictSecurity, strictSecurityReady, securityPending, setStrictSecurity, error };
+  return { watching, setWatching, platform, theme, setTheme, glass, setGlass, tab, setTab, stack, push, replace, pop, muteOnStartup, setMuteOnStartup, volume, setVolume, muted, setMuted, theater, setTheater, fs, setFs, clean, setClean, playbackEngine, setPlaybackEngine, pictureMode, setPictureMode, strictSecurity, strictSecurityReady, securityPending, setStrictSecurity, error };
 }
 const Context = createContext<ReturnType<typeof useApplication>>(null!);
 export const useStore = () => useContext(Context);

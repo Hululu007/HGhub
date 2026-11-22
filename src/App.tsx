@@ -75,7 +75,7 @@ function MediaPage({pluginId,mediaId,onBack,manage,active,start,onSwitch}: {plug
 }
 
 function TabBar() {
-  const { tab, setTab, theme } = useStore();
+  const { tab, setTab, theme, glass } = useStore();
   const items: { k: Tab; label: string }[] = [
     { k: "home", label: "首页" },
     { k: "search", label: "搜索" },
@@ -91,7 +91,9 @@ function TabBar() {
     <nav className="hg-tabbar absolute bottom-0 inset-x-0 z-30"
       style={{
         paddingBottom: "var(--sab, 0px)",
-        background: lightBar ? "rgba(250, 250, 250, .97)" : overVideo ? "#000000" : "#141414",
+        background: glass
+          ? (lightBar ? "rgba(250, 250, 250, .55)" : overVideo ? "rgba(0, 0, 0, .55)" : "rgba(20, 20, 20, .55)")
+          : (lightBar ? "rgba(250, 250, 250, .97)" : overVideo ? "#000000" : "#141414"),
         borderTop: lightBar ? "1px solid rgba(0,0,0,.08)" : overVideo ? "none" : "1px solid rgba(255,255,255,.07)",
         boxShadow: lightBar ? "0 -2px 14px rgba(0,0,0,.05)" : "none",
       }}>

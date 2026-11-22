@@ -7,7 +7,9 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
  * 未装时 Swift 侧 canOpenURL 判出并报错（Info.plist 里须有
  * LSApplicationQueriesSchemes: senplayer，见 scripts/sync-ios-senplayer.mjs）。
  * 回环地址与浏览器跳转同理：只在应用进程活着时才响应，播着（有声音）
- * 切出时音频后台模式保活，暂停时保活不了。仅 App 内可用。 */
+ * 切出时音频后台模式保活，暂停时保活不了。已下载文件也走这条路：
+ * 先由 serve_download 把文件挂到回环服务上（/local/<随机 id>），再
+ * 拿那个地址直跳；回环取流快，短剧一集几 MB，几秒内就能取完。仅 App 内可用。 */
 export function senPlayerUrl(url: string, title: string): string {
   const name = title ? `&name=${encodeURIComponent(title)}` : "";
   return `senplayer://x-callback-url/play?url=${encodeURIComponent(url)}${name}`;

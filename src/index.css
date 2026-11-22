@@ -63,6 +63,49 @@ html.theme-light {
   --p-shadow: 0 18px 48px rgba(0, 0, 0, .14), 0 2px 8px rgba(0, 0, 0, .06);
 }
 
+/* 玻璃羽化主题（v0.0.41）：html.hg-glass（设置页外观开关，默认关）。
+   面材半透明 + 底色渐变 + 大面毛玻璃：面板、设置分组、底部栏、播放
+   条与底部弹层透出底下内容并模糊。只动表现层，不动取流与播放逻辑。 */
+html.hg-glass {
+  --p-canvas: transparent;
+  --p-bg: rgba(32, 32, 32, .55);
+  --p-s1: rgba(39, 39, 39, .55);
+  --p-s2: rgba(44, 44, 44, .5);
+  --p-s3: rgba(52, 52, 52, .45);
+  --p-s4: rgba(62, 62, 62, .4);
+}
+html.hg-glass body {
+  background:
+    radial-gradient(120% 90% at 85% 0%, rgba(96, 205, 255, .28), transparent 55%),
+    radial-gradient(100% 80% at 0% 100%, rgba(139, 92, 246, .22), transparent 55%),
+    #1a1a1a;
+}
+html.hg-glass.theme-light {
+  --p-bg: rgba(249, 249, 249, .6);
+  --p-s1: rgba(255, 255, 255, .6);
+  --p-s2: rgba(243, 243, 243, .55);
+  --p-s3: rgba(232, 232, 232, .5);
+  --p-s4: rgba(220, 220, 220, .45);
+}
+html.hg-glass.theme-light body {
+  background:
+    radial-gradient(120% 90% at 85% 0%, rgba(0, 103, 192, .16), transparent 55%),
+    radial-gradient(100% 80% at 0% 100%, rgba(124, 92, 246, .14), transparent 55%),
+    #f3f3f3;
+}
+html.hg-glass .refined-settings-group section,
+html.hg-glass .hg-tabbar,
+html.hg-glass .hg-sheet,
+html.hg-glass .hg-modal,
+html.hg-glass .desktop-dock-inner,
+html.hg-glass .hg-preview-footer,
+html.hg-glass .desktop-controls,
+html.hg-glass .hg-mobile-controls {
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+}
+html.hg-glass .hg-preview-footer { background: rgba(36, 36, 36, .55); }
+
 @theme inline {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "Roboto", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   --color-canvas: var(--p-canvas);

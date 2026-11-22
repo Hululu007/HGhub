@@ -480,7 +480,7 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   锁定没做。另外 iOS 上 `set_orientation(false)` 是切回竖屏，与
   Android 的“恢复之前方向”语义不同。
 
-## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36；下载管理进更多菜单 + 导出 + 点播 + SenPlayer 跳转 v0.0.37；独立音频轨合轨 + 下载管理分享按钮 v0.0.38；video_width 回包修复 + 下载管理 SenPlayer 按钮 v0.0.39）
+## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36；下载管理进更多菜单 + 导出 + 点播 + SenPlayer 跳转 v0.0.37；独立音频轨合轨 + 下载管理分享按钮 v0.0.38；video_width 回包修复 + 下载管理 SenPlayer 按钮 v0.0.39；下载管理 SenPlayer 直跳 v0.0.41）
 
 - 入口：详情页“更多播放选项”菜单与“影片信息”面板里各有一个“下载”
   按钮，播放器上（全屏右上角与非全屏顶栏、更多按钮旁）还有一个下载
@@ -560,14 +560,18 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   同时播放/导出/分享/删除失败时显示真实的报错原因，不再一律写
   “播放失败”（Tauri invoke 失败时返回的是纯字符串，之前按
   `Error.message` 取不到）。v0.0.39 起每行再多一个 SenPlayer 图标
-  按钮（`ITrendUp` ↗，仅 iOS）：点按弹系统“用…打开”菜单（新命令
-  `open_in_file` → SharePlugin 的 `openIn`，
-  `UIDocumentInteractionController`），菜单里点 SenPlayer 就把文件
-  交给它播——文件是直接交过去的，播起来不用红苹果在后台留着，也
-  不断流。不走 SenPlayer 的 URL Scheme：下载的文件在红苹果沙盒里，
-  别的 App 读不到 `file://` 地址；回环地址那条路要红苹果在后台播
-  着才不断流，下载本来就是为了摆脱这个依赖。菜单里没有能打开的
-  应用时明确报错。
+  按钮（`ITrendUp` ↗，仅 iOS）。v0.0.39–v0.0.40 是弹系统“用…打开”
+  菜单（新命令 `open_in_file` → SharePlugin 的 `openIn`），菜单里
+  点 SenPlayer 才把文件交给它播；v0.0.41 改成直接跳：点图标先由新
+  命令 `serve_download` 把文件挂到回环服务上（`MediaSessions::
+  serve_local`，`/local/<随机 id>`，流式回文件、支持 Range，见协议
+  09 §3；只接受 Downloads 目录里的文件，与 `delete_download` 同一
+  套路径校验），再按在线播放同一条 Scheme（`senplayer://
+  x-callback-url/play?url=…&name=…`）跳 SenPlayer，不弹菜单。回环
+  取流快，短剧一集几 MB，SenPlayer 几秒内就能取完；文件特别大、取
+  到一半进程被挂起时仍会断，那时用分享按钮的系统分享面“用 SenPlayer
+  打开”兜底。`open_in_file` / SharePlugin 的 `openIn` 已随之删掉
+  （分享按钮的系统分享面仍有“用 SenPlayer 打开”）。
 - 下载管理进更多菜单、导出、点播（v0.0.37）：详情页与首页的“更多播放
   选项”菜单里新增“下载管理”入口，打开同一份 `DownloadManager`（新
   面板 `downloads`，不走 `onPanelChange`）；设置里的下载管理不变。

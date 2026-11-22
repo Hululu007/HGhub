@@ -143,18 +143,6 @@ pub fn open_senplayer(url: String) -> Result<(), String> {
     Err("SenPlayer 跳转仅在 iOS App 内可用".into())
 }
 
-/// 用外部播放器打开已下载的文件：iOS 弹系统“用…打开”菜单（SenPlayer
-/// 在列），用户点 SenPlayer 就把文件交给它播；其他平台用默认应用打开
-/// 该文件。直接跳 SenPlayer Scheme 行不通——下载的文件在红苹果沙盒
-/// 里，别的 App 读不到 file:// 地址；回环地址那条路要红苹果在后台
-/// 播着才不断流，下载本来就是为了摆脱这个依赖。
-#[cfg(target_os = "ios")]
-#[tauri::command]
-pub async fn open_in_file(path: String, plugin: tauri::State<'_, SharePlugin>) -> Result<(), String> {
-    plugin.0.run_mobile_plugin_async::<()>("openIn", serde_json::json!({"path": path})).await
-        .map_err(|error| error.to_string())
-}
-
 /// 导出已下载的文件到相册：iOS 经 SharePlugin.saveToPhotos 用
 /// PHPhotoLibrary 直接存视频；其他平台不支持。
 #[cfg(target_os = "ios")]
@@ -174,11 +162,5 @@ pub fn export_to_photos(path: String) -> Result<(), String> {
 #[cfg(not(target_os = "ios"))]
 #[tauri::command]
 pub fn share_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
-}
-
-#[cfg(not(target_os = "ios"))]
-#[tauri::command]
-pub fn open_in_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
     app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
 }

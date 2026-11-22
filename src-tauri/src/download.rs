@@ -978,3 +978,37 @@ pub async fn delete_download(app: AppHandle, path: String) -> Result<(), String>
         .await
         .map_err(|e| format!("删除失败：{e}"))
 }
+
+/// 把一个已下载文件挂到回环服务上，返回 SenPlayer 可直接取流的地址
+/// （http://127.0.0.1:端口/local/<随机 id>）。只接受 Downloads 目录里
+/// 的文件（与 delete_download 同一套校验），地址是随机 id，不带真实
+/// 路径；文件本身不走插件会话、不过期。直跳 SenPlayer 用这个地址，
+/// 不用再弹“用…打开”菜单。
+#[tauri::command]
+pub async fn serve_download(
+    app: AppHandle,
+    host: tauri::State<'_, crate::plugins::PluginHost>,
+    path: String,
+) -> Result<String, String> {
+    let dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| e.to_string())?
+        .join("Downloads");
+    let dir = tokio::fs::canonicalize(&dir)
+        .await
+        .map_err(|_| "下载目录不存在".to_string())?;
+    let target = tokio::fs::canonicalize(PathBuf::from(&path))
+        .await
+        .map_err(|_| "文件不存在".to_string())?;
+    if !target.starts_with(&dir) {
+        return Err("只能分享下载目录里的文件".to_string());
+    }
+    if !target.is_file() {
+        return Err("只能分享文件".to_string());
+    }
+    let manager = host.manager(&app).await.map_err(|e| e.to_string())?;
+    hghub_hpp::media::MediaSessions::serve_local(&manager, target)
+        .await
+        .map_err(|e| e.to_string())
+}

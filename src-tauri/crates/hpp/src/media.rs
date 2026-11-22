@@ -18,6 +18,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
@@ -43,6 +44,9 @@ pub struct MediaSessions {
     foreground: Arc<AtomicUsize>,
     refreshing: Mutex<HashMap<String, tokio::sync::watch::Sender<Option<Result<PreparedMedia>>>>>,
     refresh_waiters: Mutex<HashMap<String, CancellationToken>>,
+    /// 已登记的本地文件：id（随机 UUID）→ 文件路径。下载管理把已下载
+    /// 文件挂到回环服务上，供 SenPlayer 直接取流（/local/:id）。
+    local: Mutex<HashMap<String, PathBuf>>,
 }
 struct Foreground(Arc<AtomicUsize>);
 impl Drop for Foreground {
@@ -163,6 +167,7 @@ impl MediaSessions {
                         "/hpp/:session/:resource",
                         get(serve_resource).head(serve_resource).options(preflight),
                     )
+                    .route("/local/:id", get(serve_local_file).head(serve_local_file))
                     .with_state(weak);
                 tokio::spawn(async move {
                     let _ = axum::serve(listener, router)
@@ -173,6 +178,16 @@ impl MediaSessions {
             })
             .await
             .cloned()
+    }
+    /// 把一个已下载文件挂到回环服务上，返回 SenPlayer 可直接取流的地址。
+    /// 调用方须先确认路径落在 Downloads 目录下（见 download.rs 的
+    /// serve_download）；id 是随机 UUID，地址里不带真实路径。文件本身
+    /// 不走插件会话、不过期；删了文件后地址返回 404。
+    pub async fn serve_local(manager: &Arc<PluginManager>, path: PathBuf) -> Result<String> {
+        let base = MediaSessions::start(manager).await?;
+        let id = uuid::Uuid::new_v4().to_string();
+        manager.sessions.local.lock().unwrap().insert(id.clone(), path);
+        Ok(format!("{base}/local/{id}"))
     }
 }
 impl Drop for MediaSessions {
@@ -222,6 +237,31 @@ mod tests {
         ));
         assert!(super::matches("*.example", "https://page.example./watch"));
         assert!(super::matches("[::1]", "http://[::1]/watch"));
+    }
+
+    fn range_headers(value: Option<&str>) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        if let Some(v) = value {
+            h.insert("range", v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn parse_range_matches_bounded_response() {
+        use super::RangeOutcome::*;
+        let full = range_headers(None);
+        assert!(matches!(super::parse_range(&full, 100), Full));
+        let h = range_headers(Some("bytes=0-99"));
+        assert!(matches!(super::parse_range(&h, 100), Partial(0, 100)));
+        let h = range_headers(Some("bytes=90-"));
+        assert!(matches!(super::parse_range(&h, 100), Partial(90, 100)));
+        let h = range_headers(Some("bytes=-10"));
+        assert!(matches!(super::parse_range(&h, 100), Partial(90, 100)));
+        let h = range_headers(Some("bytes=200-300"));
+        assert!(matches!(super::parse_range(&h, 100), Unsatisfiable));
+        let h = range_headers(Some("bytes=0-"));
+        assert!(matches!(super::parse_range(&h, 0), Unsatisfiable));
     }
 }
 
@@ -819,19 +859,20 @@ async fn serve_resource(
         Ok(Response::from_parts(parts, Body::from_stream(stream)))
     }
     .await;
-    cors(result.unwrap_or_else(|e| {
-        Response::builder()
-            .status(match e.code.as_str() {
-                "NOT_FOUND" => 404,
-                "CANCELLED" => 410,
-                "AUTH_EXPIRED" => 401,
-                "UNSUPPORTED" => 422,
-                _ => 502,
-            })
-            .header("content-type", "text/plain; charset=utf-8")
-            .body(Body::from(e.message))
-            .unwrap()
-    }))
+    cors(result.unwrap_or_else(error_response))
+}
+fn error_response(e: PluginError) -> Response<Body> {
+    Response::builder()
+        .status(match e.code.as_str() {
+            "NOT_FOUND" => 404,
+            "CANCELLED" => 410,
+            "AUTH_EXPIRED" => 401,
+            "UNSUPPORTED" => 422,
+            _ => 502,
+        })
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::from(e.message))
+        .unwrap()
 }
 async fn proxy(
     manager: &Arc<PluginManager>,
@@ -1019,6 +1060,47 @@ async fn proxy_upstream(
     }
     bounded_response(data, &content_type, method, &incoming)
 }
+/// Range 解析：Full = 整段；Partial(start, end) 的 end 是开区间（与
+/// bounded_response 原来的 (start, end+1) 一致）；Unsatisfiable =
+/// 无法满足，返回 416（空文件带 Range、起始超出末尾、后缀为 0 等）。
+enum RangeOutcome {
+    Full,
+    Partial(usize, usize),
+    Unsatisfiable,
+}
+fn parse_range(headers: &HeaderMap, size: usize) -> RangeOutcome {
+    let Some(range) = headers.get("range").and_then(|v| v.to_str().ok()) else {
+        return RangeOutcome::Full;
+    };
+    if size == 0 {
+        return RangeOutcome::Unsatisfiable;
+    }
+    let parsed = (|| {
+        let (start, end) = range.strip_prefix("bytes=")?.split_once('-')?;
+        if start.is_empty() {
+            let suffix = end.parse::<usize>().ok()?;
+            if suffix == 0 {
+                return None;
+            }
+            Some((size.saturating_sub(suffix), size))
+        } else {
+            let start = start.parse::<usize>().ok()?;
+            let end = if end.is_empty() {
+                size
+            } else {
+                end.parse::<usize>().ok()?.min(size - 1) + 1
+            };
+            if start >= end {
+                return None;
+            }
+            Some((start, end))
+        }
+    })();
+    match parsed {
+        Some((start, end)) => RangeOutcome::Partial(start, end),
+        None => RangeOutcome::Unsatisfiable,
+    }
+}
 fn bounded_response(
     data: Vec<u8>,
     content_type: &str,
@@ -1029,40 +1111,19 @@ fn bounded_response(
     let mut response = Response::builder()
         .header("content-type", content_type)
         .header("accept-ranges", "bytes");
-    let range = headers.get("range").and_then(|v| v.to_str().ok());
-    let (start, end, status) = if let Some(range) = range {
-        let parsed = (|| {
-            let (start, end) = range.strip_prefix("bytes=")?.split_once('-')?;
-            if start.is_empty() {
-                let suffix = end.parse::<usize>().ok()?;
-                if suffix == 0 {
-                    return None;
-                }
-                Some((size.saturating_sub(suffix), size.checked_sub(1)?))
-            } else {
-                let start = start.parse::<usize>().ok()?;
-                let end = if end.is_empty() {
-                    size.checked_sub(1)?
-                } else {
-                    end.parse::<usize>().ok()?.min(size.checked_sub(1)?)
-                };
-                if start > end {
-                    return None;
-                }
-                Some((start, end))
-            }
-        })();
-        let Some((s, e)) = parsed else {
+    let (start, end, status) = match parse_range(headers, size) {
+        RangeOutcome::Unsatisfiable => {
             return Ok(response
                 .status(416)
                 .header("content-range", format!("bytes */{size}"))
                 .body(Body::empty())
                 .unwrap());
-        };
-        response = response.header("content-range", format!("bytes {s}-{e}/{size}"));
-        (s, e + 1, StatusCode::PARTIAL_CONTENT)
-    } else {
-        (0, size, StatusCode::OK)
+        }
+        RangeOutcome::Partial(start, end) => {
+            response = response.header("content-range", format!("bytes {}-{}/{}", start, end - 1, size));
+            (start, end, StatusCode::PARTIAL_CONTENT)
+        }
+        RangeOutcome::Full => (0, size, StatusCode::OK),
     };
     Ok(response
         .status(status)
@@ -1073,6 +1134,92 @@ fn bounded_response(
             Body::from(data[start..end].to_vec())
         })
         .unwrap())
+}
+/// 流式回本地文件：协议 09 §3，不把整个视频读入内存，按播放器需要
+/// 支持 GET/HEAD 与 Range，保留 200/206/416 语义。
+async fn stream_file_response(
+    mut file: tokio::fs::File,
+    size: usize,
+    content_type: &str,
+    method: Method,
+    headers: &HeaderMap,
+) -> Result<Response<Body>> {
+    let mut response = Response::builder()
+        .header("content-type", content_type)
+        .header("accept-ranges", "bytes");
+    let (start, end, status) = match parse_range(headers, size) {
+        RangeOutcome::Unsatisfiable => {
+            return Ok(response
+                .status(416)
+                .header("content-range", format!("bytes */{size}"))
+                .body(Body::empty())
+                .unwrap());
+        }
+        RangeOutcome::Partial(start, end) => {
+            response = response.header("content-range", format!("bytes {}-{}/{}", start, end - 1, size));
+            (start, end, StatusCode::PARTIAL_CONTENT)
+        }
+        RangeOutcome::Full => (0, size, StatusCode::OK),
+    };
+    let body = if method == Method::HEAD || end <= start {
+        Body::empty()
+    } else {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+        file.seek(SeekFrom::Start(start as u64))
+            .await
+            .map_err(|e| PluginError::internal(&format!("本地文件读取失败：{e}")))?;
+        Body::from_stream(tokio_util::io::ReaderStream::new(
+            file.take((end - start) as u64),
+        ))
+    };
+    Ok(response
+        .status(status)
+        .header("content-length", end - start)
+        .body(body)
+        .unwrap())
+}
+async fn serve_local_file(
+    State(weak): State<Weak<PluginManager>>,
+    Path(id): Path<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let result = async {
+        let manager = weak.upgrade().ok_or_else(PluginError::cancelled)?;
+        let path = manager
+            .sessions
+            .local
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| PluginError::new("NOT_FOUND", "本地文件未登记"))?;
+        let file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|_| PluginError::new("NOT_FOUND", "本地文件不存在"))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|e| PluginError::internal(&format!("本地文件读取失败：{e}")))?
+            .len() as usize;
+        let content_type = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("mp4") => "video/mp4",
+            Some("m4v") => "video/x-m4v",
+            Some("mov") => "video/quicktime",
+            Some("ts") => "video/mp2t",
+            Some("mkv") => "video/x-matroska",
+            Some("webm") => "video/webm",
+            _ => "application/octet-stream",
+        };
+        stream_file_response(file, size, content_type, method, &headers).await
+    }
+    .await;
+    cors(result.unwrap_or_else(error_response))
 }
 fn rewrite_hls(
     text: &str,
