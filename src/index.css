@@ -72,18 +72,18 @@ html.theme-light {
    遮罩（.hg-preview-heading、.hg-watch-heading）保持原样，画面不能透。 */
 html.hg-glass {
   --p-canvas: transparent;
-  --p-bg: rgba(32, 32, 32, .5);
-  --p-s1: rgba(39, 39, 39, .48);
-  --p-s2: rgba(44, 44, 44, .42);
-  --p-s3: rgba(52, 52, 52, .38);
-  --p-s4: rgba(62, 62, 62, .32);
+  --p-bg: rgba(32, 32, 32, .55);
+  --p-s1: rgba(39, 39, 39, .55);
+  --p-s2: rgba(44, 44, 44, .5);
+  --p-s3: rgba(52, 52, 52, .45);
+  --p-s4: rgba(62, 62, 62, .4);
 }
 html.hg-glass body {
   background:
-    radial-gradient(120% 90% at 50% 0%, rgba(190, 90, 200, .22), transparent 55%),
-    radial-gradient(100% 80% at 0% 100%, rgba(139, 92, 246, .18), transparent 55%),
-    radial-gradient(90% 70% at 50% 50%, rgba(217, 70, 160, .08), transparent 60%),
-    #17121c;
+    radial-gradient(120% 90% at 85% 0%, rgba(96, 205, 255, .28), transparent 55%),
+    radial-gradient(100% 80% at 0% 100%, rgba(139, 92, 246, .22), transparent 55%),
+    radial-gradient(90% 70% at 50% 50%, rgba(96, 205, 255, .10), transparent 60%),
+    #1a1a1a;
 }
 html.hg-glass.theme-light {
   --p-bg: rgba(249, 249, 249, .6);
@@ -122,14 +122,14 @@ html.hg-glass .hg-hint {
   -webkit-backdrop-filter: blur(20px) saturate(1.6);
   backdrop-filter: blur(20px) saturate(1.6);
 }
-/* 羽化边缘：面板类面材只用大面积柔和阴影，不留描边与硬阴影。 */
+/* 羽化边缘：面板类面材用半透明描边 + 大面积柔和阴影，替代硬阴影。 */
 html.hg-glass .refined-settings-group section,
 html.hg-glass .hg-sheet,
 html.hg-glass .hg-modal,
 html.hg-glass .desktop-dock-inner,
 html.hg-glass .hg-detail-sheet,
 html.hg-glass .hg-proxy-dialog {
-  box-shadow: 0 8px 32px rgba(0, 0, 0, .28);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .08), 0 12px 48px rgba(0, 0, 0, .30);
 }
 html.hg-glass.theme-light .refined-settings-group section,
 html.hg-glass.theme-light .hg-sheet,
@@ -137,27 +137,7 @@ html.hg-glass.theme-light .hg-modal,
 html.hg-glass.theme-light .desktop-dock-inner,
 html.hg-glass.theme-light .hg-detail-sheet,
 html.hg-glass.theme-light .hg-proxy-dialog {
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .14);
-}
-/* 设置分组卡片：去掉 1px 硬边框，圆角 24px，与参考一致。 */
-html.hg-glass .refined-settings-group section {
-  border-color: transparent;
-  border-radius: 24px;
-}
-/* 底部栏：悬浮胶囊，脱离底边，圆角拉满；选中项后面一枚浅色 pill。 */
-html.hg-glass .hg-tabbar {
-  left: 16px;
-  right: 16px;
-  bottom: calc(12px + var(--sab, 0px));
-  border-radius: 999px;
-}
-html.hg-glass .hg-tabbar .hg-tab-active {
-  background: rgba(255, 255, 255, .14);
-  border-radius: 999px;
-  padding: 6px 12px;
-}
-html.hg-glass.theme-light .hg-tabbar .hg-tab-active {
-  background: rgba(0, 0, 0, .08);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .06), 0 12px 40px rgba(0, 0, 0, .16);
 }
 /* 弹层背景也羽化：遮罩更糊，过渡更软。 */
 html.hg-glass .hg-detail-sheet::backdrop,
