@@ -20,6 +20,10 @@ pub struct Meta {
     pub homepage: Option<String>,
     #[serde(default)]
     pub update_url: Option<String>,
+    /// WebHome 首页声明（06 §18）：有它表示该源提供一个 WebHome 页面，
+    /// 宿主在独立 WebView 里打开并注入 window.fm 桥。
+    #[serde(default)]
+    pub webhome: Option<WebHomeMeta>,
     #[serde(default)]
     pub matches: Vec<String>,
     #[serde(default)]
@@ -42,6 +46,12 @@ pub struct Meta {
 fn source_kind() -> String {
     "source".into()
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebHomeMeta {
+    pub home_page: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Requirement {
     pub r#type: String,
@@ -100,6 +110,10 @@ impl Meta {
             return Err(PluginError::invalid("插件名称或简介长度无效"));
         }
         version(&m.version)?;
+        if let Some(webhome) = &m.webhome {
+            url(&webhome.home_page, false, false)
+                .map_err(|_| PluginError::invalid("WebHome 首页地址必须为 https 绝对地址"))?;
+        }
         if m.protocol != 1 {
             return Err(PluginError::new("UNSUPPORTED", "不支持该协议主版本"));
         }

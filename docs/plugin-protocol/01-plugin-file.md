@@ -72,6 +72,7 @@ export default function (hg) {
 | `requires` | 否 | 必需的宿主能力数组：`{ type: "feature" \| "api", name: string }`；如 `{ type: "feature", name: "webview" }` 或 `{ type: "api", name: "html.parse" }`，缺失时保留文件但不可启用 |
 | `allowInsecureHttp` | 否 | `true` 时允许插件使用 `http:` 地址（接口与媒体）；默认只允许 HTTPS |
 | `linkDomains` | 否 | 主机名数组。用户粘贴这些域名下的链接时，宿主交给本插件的 `media.matchUrl` 处理（见 [06 §2](06-capabilities.md)） |
+| `webhome` | 否 | `{ homePage: string }`。声明该源提供一个 WebHome 页面：宿主在插件详情页显示“打开 WebHome 首页”，首页用 `window.fm` 桥与宿主交互（见 [04 §14](04-host-api.md) 与 [06 §18](06-capabilities.md)）。`homePage` 必须是 https 绝对地址；宿主在不调用工厂的情况下读取它 |
 | `mature` | 否 | `true` 表示含成人内容；宿主默认隐藏这类插件，用户需在设置中开启 |
 | `settings` | 否 | 用户可调的设置项（§2.1） |
 

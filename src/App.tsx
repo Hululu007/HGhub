@@ -11,6 +11,7 @@ import LibraryPage from "./plugins/LibraryPage";
 import ApplicationSettings from "./plugins/ApplicationSettings";
 import SectionPage from "./plugins/SectionPage";
 import LivePage from "./plugins/LivePage";
+import WebHomeHost from "./plugins/WebHomeHost";
 import ArticlePage, { ArticleList } from "./plugins/ArticlePage";
 import FeedPage from "./plugins/FeedPage";
 import type { SourceStart } from "./plugins/sourceMatching";
@@ -49,6 +50,7 @@ function Application() {
         {page.kind==="plugins"?<Plugins onBack={app.pop} focusId={page.focusId}/>:page.kind==="settings"?<ApplicationSettings onBack={app.pop}/>:page.kind==="section"?<SectionRoute {...page} open={open} onBack={app.pop}/>:page.kind==="media"?<MediaPage pluginId={page.pluginId} mediaId={page.mediaId} start={page.start} onBack={app.pop} manage={manage} active={i===app.stack.length-1} onSwitch={(pluginId,mediaId,start)=>app.replace({kind:"media",pluginId,mediaId,start})}/>:<ContentRoute page={page} active={i===app.stack.length-1}/>}
       </div>)}
       {host.authPrompt&&<div className="hpp-global-auth" role="status"><span>{host.authPrompt.message}</span><button onClick={()=>manage(host.authPrompt?.id)}>前往插件登录</button><button onClick={host.clearAuth}>关闭</button></div>}
+      <WebHomeHost/>
       {pendingUpdates(host.updates).length>0&&!top&&<div className="hpp-global-updates" role="status"><span>{pendingUpdates(host.updates).length} 个插件有更新{host.updates.policy.autoInstall?"，将在播放结束后安装":""}</span><button onClick={()=>manage()}>查看插件更新</button></div>}
     </main></div>
     {isMobile&&!top&&!app.fs&&!app.clean&&!app.watching&&<TabBar/>}

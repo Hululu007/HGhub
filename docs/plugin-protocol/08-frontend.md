@@ -216,8 +216,22 @@ Android 的相对文件列表通过“选择列表所在目录”授予目录访
 | `media_session_register(...)` | 内部：把 `ImageRef` / `Stream` 登记为本地媒体地址，供 `<img>` 与播放器使用 |
 | `plugin_call_cancel(requestId)` | 通用调用取消；搜索改词、离开页面等使用同一机制 |
 | `media_session_release(sessionId)` | 释放媒体会话，取消无人使用的资源请求 |
+| `open_webhome(pluginId)` | 打开该插件的 WebHome 首页（独立窗口，见 §10） |
 
 聚合搜索与首页播放队列由界面并行发起多个 `plugin_call` 实现，各来源的结果独立渲染；
 宿主侧的限速与去重对界面透明（见 [03 §3](03-host-rules.md)）。
 `plugin_call` 接受界面预生成的 requestId，并在同一调用的日志、取消与返回中使用它；
 只允许已发布的能力方法，不允许通过任意对象路径访问工厂、dispose 或宿主内部对象。
+
+## 10. WebHome 窗口
+
+声明了 `meta.webhome` 的插件，其详情页多一个“打开 WebHome 首页”按钮
+（插件启用且已就绪时可见）。点击调用 `open_webhome(pluginId)`，宿主在独立
+WebView 窗口里打开该插件的 `homePage`，并注入 `window.fm` 桥
+（方法表与限制见 [04 §14](04-host-api.md)）；窗口右上角有一个宿主注入的关闭按钮。
+
+主窗口负责接页面动作：直链播放（`player.playUrl`）在主窗口用同一套播放器
+全屏播出，返回/播完关闭并释放会话；详情、直播、收藏、设置走现有导航；
+页面提示（`ext.toast`）在主窗口顶部以提示条显示。播放状态由主窗口推回 Rust，
+供页面的 `player.status` 查询。同一时间至多一个 WebHome 窗口；
+打开另一插件的首页会先关掉当前窗口。iOS 上第二个 WebView 窗口需真机验收。

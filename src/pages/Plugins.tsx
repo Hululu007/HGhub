@@ -3,6 +3,7 @@ import { ICpu, IBack, IPlus } from "../icons";
 import { pluginError, type InstalledPlugin } from "../plugins/client";
 import type { Endpoint, Setting } from "../plugins/protocol";
 import { usePluginRequests } from "../plugins/usePluginRequests";
+import { openWebhome } from "../plugins/webhome";
 import PluginForms from "../plugins/PluginForms";
 import PluginDistribution from "../plugins/PluginDistribution";
 import { useHost } from "../plugins/HostContext";
@@ -67,6 +68,7 @@ function PluginOptions({ plugin: p, reload, children }: { plugin: InstalledPlugi
   };
   return <div className="hpp-options"><ErrorMessage error={error} />
     <div className="plugin-forms-column"><PluginForms plugin={p} /></div><div className="plugin-options-column">
+    {p.meta.webhome?.homePage && p.enabled && p.status === "ready" && <button disabled={busy} onClick={() => { setBusy(true); setError(""); void openWebhome(p.meta.id).catch(e => setError(pluginError(e))).finally(() => setBusy(false)); }}>打开 WebHome 首页</button>}
     {p.meta.settings?.map(s => <div className="hpp-setting" key={s.key}><label htmlFor={`setting-${s.key}`}>{s.label}<small>{s.description}</small></label><SettingInput setting={s} value={settings[s.key]} disabled={busy || !settingsLoaded} onChange={v => setSettings(old => ({ ...old, [s.key]: v }))} /><button disabled={busy || !settingsLoaded} onClick={() => void update("settings.set", { key: s.key, value: settings[s.key] })}>保存</button></div>)}
     {notice && <p role="status" className="hpp-muted">{notice}</p>}
     {!!endpoints.length && <label className="hpp-setting">站点线路<select value={p.endpoint?.id || ""} disabled={busy} onChange={e => void update("endpoint.set", { endpointId: e.target.value })}>{endpoints.map(e => <option value={e.id} key={e.id}>{e.label || e.id} · {e.url}</option>)}</select></label>}

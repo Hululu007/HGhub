@@ -15,6 +15,8 @@ export interface PluginMeta {
   defaultHeaders?: Record<string, string>; timeouts?: Partial<Record<"read" | "playback" | "login" | "transform", number>>;
   features?: string[]; requires?: { type: "feature" | "api"; name: string }[];
   allowInsecureHttp?: boolean; mature?: boolean; settings?: Setting[];
+  /** WebHome 首页声明（06 §18）：有它表示该源提供一个 WebHome 页面。 */
+  webhome?: { homePage: string };
 }
 export type MediaType = "movie" | "series" | "anime" | "variety" | "documentary" | "short" | "live" | "other";
 export type Codec = "h264" | "hevc" | "av1";

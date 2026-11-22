@@ -29,7 +29,8 @@ export function createMockHost(options: MockHostOptions = {}) {
       (u.pathname === path || u.pathname.startsWith(path) && (path.endsWith("/") || u.pathname[path.length] === "/")) &&
       (!cookie.secure || u.protocol === "https:") && (cookie.expiresAt === undefined || cookie.expiresAt > now());
   };
-  const features = (options.env?.features || []).filter(feature => feature !== "webview");
+  const features = (options.env?.features || []).filter(feature => feature !== "webview" && feature !== "webhome");
+  features.push("webhome");
   if (options.webview) features.push("webview");
   const hg: HostApi = {
     ...(options.webview ? { webview: options.webview } : {}),

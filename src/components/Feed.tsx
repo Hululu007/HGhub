@@ -25,7 +25,7 @@ import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChe
 export type PlayerPanel = "detail" | "episodes" | "comments" | "playback";
 type SurfacePanel = PlayerPanel | "more" | "info" | "downloads";
 export interface FeedPresentation {
-  playIntent?: number; mode?: "preview" | "full"; onOpenDetail?: () => void; onOpenDetailFromStart?: () => void;
+  playIntent?: number; seekTo?: number; mode?: "preview" | "full"; onOpenDetail?: () => void; onOpenDetailFromStart?: () => void;
   title?: string; author?: string; description?: string; score?: number; poster?: string;
   episodeLabel?: string; qualityLabel?: string; episodeCount?: number; favorite?: boolean; onFavorite?: () => void;
   panels?: Partial<Record<PlayerPanel, ReactNode>>; social?: ReactNode;
@@ -44,7 +44,7 @@ export interface FeedProps extends FeedPresentation {
  * Plugin adapters own metadata, sessions and persistence; this component owns presentation. */
 export default function Feed({media, position, active=true, preparing=false, error="", onRetry, onPosition, onFailure, onPlaying, onStopped, onEnded, onBuffer, onWaiting,
  title="", author="", description="", score, poster:posterUrl, episodeLabel="", qualityLabel, episodeCount=0, favorite=false, onFavorite,
- playIntent=0, mode="full", onOpenDetail, onOpenDetailFromStart, panels={}, social, onPanelChange, onBack, onNext, onPrevious, onNextEpisode, onPreviousEpisode, queueIndex=0, total=1, previousPreview, nextPreview}: FeedProps) {
+ playIntent=0, seekTo, mode="full", onOpenDetail, onOpenDetailFromStart, panels={}, social, onPanelChange, onBack, onNext, onPrevious, onNextEpisode, onPreviousEpisode, queueIndex=0, total=1, previousPreview, nextPreview}: FeedProps) {
   const store=useStore(), {muted,setMuted,volume,setVolume,playbackEngine,setPlaybackEngine,pictureMode,setPictureMode}=store;
   const activeRef = useRef(active); activeRef.current = active;
   const isDesktop=!isMobile, preview=mode==="preview";
@@ -88,6 +88,7 @@ export default function Feed({media, position, active=true, preparing=false, err
     else if (resumeAfterOverlay.current) { resumeAfterOverlay.current = false; videoRef.current?.play(); }
   }, [active]);
   useEffect(() => { if (playIntent && active) videoRef.current?.play(); }, [playIntent]);
+  useEffect(() => { if (seekTo !== undefined && Number.isFinite(seekTo)) videoRef.current?.seek(seekTo); }, [seekTo]);
   useEffect(() => { setPanel(null); if (active) store.setClean(false); wake(); }, [mode]);
   /* 续播：拿到时长后再 seek 一次（只对进入时那一条生效） */
   const theater = store.theater;

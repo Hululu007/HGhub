@@ -849,6 +849,28 @@ impl PluginManager {
         }
         Ok(p.network.clone())
     }
+    /// WebHome 缓存与插件共用同一份存储（store.rs），不是另一份副本。
+    pub(crate) async fn store(&self, id: &str) -> Result<Arc<Store>> {
+        let p = self.get(id).await?;
+        let p = p.lock().await;
+        if !p.entry.enabled {
+            return Err(PluginError::new("UNSUPPORTED", "插件已停用"));
+        }
+        Ok(p.store.clone())
+    }
+    /// WebHome 页面日志写入绑定插件的日志面板（与插件自身的 hg.log 同一处）。
+    pub(crate) async fn webhome_log(&self, id: &str, text: &str) -> Result<()> {
+        let p = self.get(id).await?;
+        let p = p.lock().await;
+        if !p.entry.enabled {
+            return Err(PluginError::new("UNSUPPORTED", "插件已停用"));
+        }
+        p.logs
+            .lock()
+            .map_err(|_| PluginError::internal("日志锁不可用"))?
+            .push("info", text, "webhome", None);
+        Ok(())
+    }
     pub async fn meta(&self, id: &str) -> Result<Meta> {
         Ok(self.get(id).await?.lock().await.entry.meta.clone())
     }

@@ -7,6 +7,7 @@ mod native_player;
 mod macos_titlebar;
 mod network_policy;
 mod plugins;
+mod webhome;
 #[cfg(target_os = "windows")]
 mod windows_login;
 #[cfg(target_os = "android")]
@@ -90,6 +91,7 @@ pub fn run() {
             network_policy::bind_security(&dir);
             hghub_hpp::proxy::bind(&dir);
             app.manage(plugins::PluginHost::new(dir.join("hpp")));
+            app.manage(webhome::WebHomeState::default());
             // The WebView registers its playback capabilities before the first
             // plugin command; eager initialization would expose an incorrect env.
             #[cfg(target_os = "macos")]
@@ -116,6 +118,10 @@ pub fn run() {
             commands::debug_log,
             commands::open_url,
             commands::open_external_media,
+            webhome::open_webhome,
+            webhome::webhome_close,
+            webhome::webhome_call,
+            webhome::webhome_player_state,
             native_player::native_player_open,
             native_player::native_player_close,
             native_player::native_player_play,

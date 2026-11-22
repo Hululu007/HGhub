@@ -393,3 +393,48 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 
 `hg.PluginError` 是 `Error` 的子类，实例带有 `code`、`retryable`、`retryAfterSec`、`details`。
 语义与错误码见 [02 §8](02-runtime.md)。
+
+## 14. `window.fm`（WebHome 页面桥）
+
+声明了 `meta.webhome` 的插件，其首页在宿主打开的独立 WebView 里运行。
+页面不接触 `hg`，而是通过宿主注入的 `window.fm`（别名 `window.fongmi`、`window.webhome`）
+调用宿主能力；`window.fongmiClient = { mode: "webhome", isLeanback: false }`。
+宿主注入桥后派发 `fmsdk` 自定义事件，窗口获得/失去焦点时派发 `fmresume` / `fmpause` 事件；
+宿主同时给页面根元素加上 `fm-native` 类。
+
+调用约定：`fm.req(method, payload)`（别名 `fm.invoke`）返回 Promise，成功为
+`{ code: 0, data }`，失败为 `{ code, message }`（`code` 为 [02 §8](02-runtime.md)
+的错误码字符串，`message` 为中文说明）。对象式与函数式别名都接受，例如
+`fm.req("net.request", …)` 与 `fm.req("req", …)` 等价。v1 的方法表：
+
+| 方法 | 行为 |
+| --- | --- |
+| `net.request`（别名 `req`） | 用绑定插件的网络发请求：共享该插件的 Cookie 罐、网络规则与限速；参数与返回值同 `hg.http`（见 §2），`responseType` 默认为文本 |
+| `net.resourceUrl`（别名 `res`） | v1 返回原地址，不代理图片 |
+| `player.playUrl`（别名 `play`） | 直链播放：宿主为该地址建一个媒体会话（走本地回环代理，请求头与 HLS 改写同普通播放），在主窗口用同一套播放器播出 |
+| `player.playVod` / `player.playVodInline`（别名 `vod` / `vodInline`） | 打开点播详情：宿主调绑定插件的 `media.getDetail`，在主窗口打开详情页；`siteKey` 与绑定插件不一致时抛 `UNSUPPORTED`；v1 两者行为相同 |
+| `player.preloadArtwork` | v1 空操作，返回 `{ code: 0 }` |
+| `player.control`（别名 `ctrl`） | `action` 为 `play` / `pause` / `toggle` / `seek` / `stop`；`seek` 需 `seconds`；只对当前直链播放有效 |
+| `player.status`（别名 `stat`） | 返回主窗口推送的播放状态 `{ playing, positionSec, durationSec }` |
+| `app.search`（别名 `search`） | 调绑定插件的 `search.search`，返回原样结果 |
+| `app.openVod` / `app.openLive` / `app.openKeep` / `app.openSetting` | 在主窗口打开详情 / 直播 / 收藏（我的） / 设置；`openVod` 的参数与 `player.playVod` 相同 |
+| `app.history`（别名 `history_list`） | 返回绑定插件的本地观看记录（按 `lastProgress`，最新在前，最多 50 条） |
+| `cache.set` / `cache.get` / `cache.del` / `cache.clear` | 读写绑定插件的存储，键统一加 `webhome:` 前缀；`clear` 只清该前缀下的键 |
+| `config.info`（别名 `config_info`） | `{ id, url, desc, version }`：绑定插件的 id、首页地址、简介与版本 |
+| `site.info`（别名 `site`） | `{ key, name, type: "webhome" }` |
+| `device.info`（别名 `device`） | `{ platform, app: "HGhub", webhome: 1 }` |
+| `ext.info` | `{ app: "HGhub", webhome: 1, protocol: "1.0.0-dev" }` |
+| `ext.log` | 写入绑定插件的日志面板 |
+| `ext.toast` | 在主窗口弹出提示 |
+| `ui.setToolbar` | 显示/隐藏页面右上角的宿主关闭按钮 |
+| `navigation.back` / `navigation.reload` | 页面内处理：有历史则后退，否则关闭窗口；重载当前页 |
+| `ui.getViewport` | 页面内处理，返回 `{ width, height, devicePixelRatio }` |
+
+以下方法 v1 **不支持**，调用抛 `UNSUPPORTED`：`pan.*`（投屏）、`ui.setChrome`、
+`ui.restoreChrome`。
+
+限制：同一时间至多一个 WebHome 窗口；打开另一插件的首页会先关掉当前窗口。
+窗口右上角有一个宿主注入的关闭按钮（页面自己的返回键关不掉窗口）。
+页面是用户打开的浏览面，与 [§12](#12-hgwebview可选) 的登录视图不同：登录视图
+不能访问应用桥接接口，WebHome 页面则通过本节的桥与宿主交互。
+直链播放的会话刷新是空操作（返回原会话）；页面关闭不影响已打开的详情页。

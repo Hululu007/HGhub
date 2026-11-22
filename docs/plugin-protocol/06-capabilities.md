@@ -39,6 +39,7 @@ export default function (hg) {
 | `updates` | `check` | 片库的"有更新"角标 |
 | `endpoints` | `list` | 插件页的站点线路选择 |
 | `ui` | `getActions` `submit` | 插件页的操作表单 |
+| `webhome` | （声明式，无方法） | 插件详情页的 WebHome 入口（§18） |
 | — | `transformResource?` `dispose?` | 顶层钩子（§16） |
 
 - **数据源**（`meta.kind` 为 `source`，默认）至少实现 `media` 或 `live` 之一，可同时实现。
@@ -566,3 +567,20 @@ dispose?(): void
 - 返回上游的原始标题，不要在 `title` 里附加"更新至 x 集""HD"之类的修饰（放进 `badge` 或 `description`）。
 - 尽量提供 `year` 与 `type`。
 - 用 `Episode.index` 表达列表顺序，尽量提供真实 `season`、`episodeNumber`，不要从显示文本猜造季集身份。
+
+## 18. `webhome`（HTML 源）
+
+插件在 `meta` 里声明 `webhome: { homePage }`（见 [01 §2](01-plugin-file.md)），
+即表示它提供一个 WebHome 页面；工厂里再放一个空对象 `webhome: {}`，
+宿主校验时只要求它是对象，不要求任何方法。宿主在插件详情页显示
+“打开 WebHome 首页”，点击后在独立 WebView 里打开 `homePage`，
+页面通过 `window.fm` 桥与宿主交互（方法表见 [04 §14](04-host-api.md)）。
+
+- 首页地址必须是 https 绝对地址；宿主在不调用工厂的情况下读取并校验它。
+- 页面里的数据请求、缓存、日志、搜索与详情解析都按**绑定插件**的身份执行：
+  网络共享该插件的 Cookie 罐与规则，缓存与日志进该插件的存储与日志面板，
+  搜索与详情调该插件的 `search` / `media` 能力。
+- 插件可以在 `hg.env.features` 里看到 `"webhome"`，据此判断宿主支持 WebHome。
+- v1 的限制：同一时间至多一个 WebHome 窗口；`player.playVod` 不支持跨站；
+  图片不走代理；`pan.*` 与 `ui.setChrome` / `ui.restoreChrome` 不支持。
+  直链播放走真实媒体会话，刷新是空操作。

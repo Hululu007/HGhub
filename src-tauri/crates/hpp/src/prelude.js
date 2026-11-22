@@ -138,7 +138,7 @@
     scopes.delete(owner);
   }
   function errorValue(e){return e instanceof PluginError?{code:e.code,message:e.message,retryable:e.retryable,retryAfterSec:e.retryAfterSec,details:e.details}:{code:"INTERNAL",message:"插件执行失败",details:{message:String(e?.stack||e)}};}
-  const methods={media:["getDetail","resolvePlayback","listEpisodes","matchUrl"],live:["getGroups","listChannels","resolve","getProgrammes"],articles:["list","getDetail"],resolver:["resolve"],search:["search","getFilters","suggest","trending"],home:["getSections","listSection"],catalog:["getCategories","list","getFilters"],feed:["list"],endpoints:["list"],auth:["getMethods","submit","getProfile","logout"],ui:["getActions","submit"],library:["listMedia","listFolders","listFollowing"],progress:["report"],updates:["check"],comments:["list","send","like"],interact:["like","favorite","follow"]};
+  const methods={media:["getDetail","resolvePlayback","listEpisodes","matchUrl"],live:["getGroups","listChannels","resolve","getProgrammes"],articles:["list","getDetail"],resolver:["resolve"],search:["search","getFilters","suggest","trending"],home:["getSections","listSection"],catalog:["getCategories","list","getFilters"],feed:["list"],endpoints:["list"],auth:["getMethods","submit","getProfile","logout"],ui:["getActions","submit"],library:["listMedia","listFolders","listFollowing"],progress:["report"],updates:["check"],comments:["list","send","like"],interact:["like","favorite","follow"],webhome:[]};
   const api={
     promiseHook(kind,p,parent){
       if(kind===0){const owner=current||promiseScopes.get(parent);if(owner)promiseScopes.set(p,owner);}
@@ -166,7 +166,7 @@
       factoryMode=true;try{plugin=await factory(hg);}finally{factoryMode=false;}
       if(!plugin||typeof plugin!=="object")throw new PluginError("INTERNAL","工厂必须返回插件对象");
       const available=[];
-      for(const [space,names] of Object.entries({media:["getDetail","resolvePlayback"],live:["getGroups","listChannels","resolve"],articles:methods.articles,resolver:["resolve"],search:["search"],home:["getSections"],catalog:["getCategories","list"],feed:["list"],endpoints:["list"],auth:methods.auth,ui:methods.ui,library:["listMedia"],progress:["report"],updates:["check"],comments:["list"],interact:[]})) {
+      for(const [space,names] of Object.entries({media:["getDetail","resolvePlayback"],live:["getGroups","listChannels","resolve"],articles:methods.articles,resolver:["resolve"],search:["search"],home:["getSections"],catalog:["getCategories","list"],feed:["list"],endpoints:["list"],auth:methods.auth,ui:methods.ui,library:["listMedia"],progress:["report"],updates:["check"],comments:["list"],interact:[],webhome:[]})) {
         if(plugin[space]!==undefined && (!plugin[space] || typeof plugin[space]!=="object" || names.some(name=>typeof plugin[space][name]!=="function")))
           throw new PluginError("INTERNAL",`${space} 缺少必需方法`);
       }
@@ -201,7 +201,7 @@
     dispose(){for(const id of [...scopes.keys()])clean(id);current=null;if(typeof plugin?.dispose==="function")plugin.dispose();},
     pack,unpack
   };
-  function configEnv(meta,media,webLogin){return {protocol:"1.0.0-dev",app:{name:"HGhub",version:"0.0.1"},plugin:{id:meta.id,version:meta.version},platform:sync("env",{}).platform,locale:"zh-CN",features:webLogin?["charset.legacy","webview"]:["charset.legacy"],media};}
+  function configEnv(meta,media,webLogin){return {protocol:"1.0.0-dev",app:{name:"HGhub",version:"0.0.1"},plugin:{id:meta.id,version:meta.version},platform:sync("env",{}).platform,locale:"zh-CN",features:["charset.legacy","webhome",...(webLogin?["webview"]:[])],media};}
   function structuredClone(v){return unpack(pack(v));}
   Object.assign(globalThis,{AbortSignal,AbortController,TextEncoder,TextDecoder,URL,URLSearchParams,setTimeout,clearTimeout,structuredClone,
     queueMicrotask:fn=>Promise.resolve().then(fn),

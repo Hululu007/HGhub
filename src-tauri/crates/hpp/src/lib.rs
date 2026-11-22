@@ -16,6 +16,7 @@ mod resolver_preferences;
 mod runtime;
 mod store;
 pub mod web_login;
+pub mod webhome;
 pub mod wire;
 
 pub use error::{PluginError, Result};

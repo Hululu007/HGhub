@@ -57,6 +57,8 @@ impl Drop for Foreground {
 struct Session {
     version: u64,
     refresh_input: Option<refresh::Input>,
+    /// WebHome 直链会话：无插件可重新解析，刷新直接返回已保存的播放信息。
+    direct: bool,
     prepared: Mutex<Option<PreparedMedia>>,
     playback: AtomicBool,
     providers: BTreeMap<String, (Arc<Network>, String)>,
@@ -345,6 +347,7 @@ impl PluginManager {
         let session = Arc::new(Session {
             version: 0,
             refresh_input: None,
+            direct: false,
             prepared: Mutex::new(None),
             playback: AtomicBool::new(false),
             providers,
@@ -377,6 +380,91 @@ impl PluginManager {
         }
         all.insert(id.clone(), session);
         Ok(json!({"sessionId":id,"urls":urls}))
+    }
+
+    /// WebHome 直链播放（04 §13）：为页面给出的原始 URL 建一个媒体会话，
+    /// 不经插件解析。地址仍走回环代理（/hpp/{id}/0），由代理代取上游并附加
+    /// 页面给出的请求头、改写 HLS 清单，播放器看到的与普通会话一致。
+    /// 直链没有过期时间，刷新直接返回同一份 PreparedMedia。
+    pub async fn prepare_direct(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        url: &str,
+        headers: Value,
+    ) -> Result<PreparedMedia> {
+        let meta = self.meta(plugin_id).await?;
+        crate::model::url(url, meta.allow_insecure_http, false)?;
+        let format = if url::Url::parse(url)
+            .map(|u| u.path().to_ascii_lowercase().ends_with(".m3u8"))
+            .unwrap_or(false)
+        {
+            "hls"
+        } else {
+            "progressive"
+        };
+        let mut playback = crate::model::playback(
+            json!({
+                "streams": [{"url": url, "format": format, "kind": "media", "label": "直链"}],
+                "servers": [{"id": "direct", "label": "直链"}],
+            }),
+            meta.allow_insecure_http,
+            false,
+        )?;
+        let base = MediaSessions::start(self).await?;
+        let providers = BTreeMap::from([(
+            plugin_id.to_string(),
+            (
+                self.network(plugin_id).await?,
+                self.revision(plugin_id).await?,
+            ),
+        )]);
+        let session = Arc::new(Session {
+            version: 0,
+            refresh_input: None,
+            direct: true,
+            prepared: Mutex::new(None),
+            playback: AtomicBool::new(true),
+            providers,
+            cancel: CancellationToken::new(),
+            resources: Mutex::new(vec![]),
+            expires_at: None,
+            cache: Default::default(),
+        });
+        let root = session.register(resource(
+            plugin_id,
+            &playback["streams"][0],
+            effective_headers(&meta, &headers)?,
+            if format == "hls" { "playlist" } else { "media" },
+        )?)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let choices = json!({"source": {
+            "pluginId": plugin_id,
+            "servers": playback["servers"].clone(),
+            "streams": stream_choices(&playback),
+            "streamIndex": 0,
+            "serverId": "direct",
+        }});
+        playback["subtitles"] = json!([]);
+        playback.as_object_mut().unwrap().remove("streams");
+        let mut all = self.sessions.sessions.lock().unwrap();
+        if all.len() >= 64 {
+            return Err(PluginError::new(
+                "RATE_LIMITED",
+                "媒体会话数量超限，请关闭闲置播放",
+            ));
+        }
+        let prepared = PreparedMedia {
+            version: session.version,
+            session_id: id.clone(),
+            url: format!("{base}/hpp/{id}/{root}?v={}", session.version),
+            format: format.into(),
+            provider_id: plugin_id.to_string(),
+            playback,
+            choices,
+        };
+        *session.prepared.lock().unwrap() = Some(prepared.clone());
+        all.insert(id, session);
+        Ok(prepared)
     }
     pub async fn prepare_media(
         self: &Arc<Self>,
@@ -674,6 +762,7 @@ impl PluginManager {
         let session = Arc::new(Session {
             version: replacement.as_ref().map_or(0, |(_, old)| old.version + 1),
             refresh_input: Some(refresh_input),
+            direct: false,
             prepared: Mutex::new(None),
             playback: AtomicBool::new(params["reason"] != "preload"),
             providers,

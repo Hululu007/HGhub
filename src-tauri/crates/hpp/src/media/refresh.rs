@@ -85,6 +85,14 @@ impl PluginManager {
             if version != session.version {
                 return Err(PluginError::invalid("媒体版本无效"));
             }
+            if session.direct {
+                return session
+                    .prepared
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or_else(|| PluginError::invalid("直接会话无可播放内容"));
+            }
             let mut input = session
                 .refresh_input
                 .clone()
