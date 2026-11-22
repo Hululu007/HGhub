@@ -91,6 +91,15 @@ export async function shareDownloadedFile(path: string): Promise<void> {
   await invoke("share_file", { path });
 }
 
+/** 用外部播放器打开已下载的文件：iOS 弹系统“用…打开”菜单，SenPlayer
+ * 在列，点它就把文件交给 SenPlayer 播（文件直接交过去，播起来不用
+ * 红苹果在后台留着，也不断流）；其他平台用默认应用打开该文件。
+ * 注意不是走 SenPlayer 的 URL Scheme：下载的文件在红苹果沙盒里，
+ * 别的 App 读不到 file:// 地址，直接跳过去播不了。 */
+export async function openDownloadInPlayer(path: string): Promise<void> {
+  await invoke("open_in_file", { path });
+}
+
 /** 设置里下载管理列出的一个已下载文件。modified 是修改时间的 Unix 秒。
  * folder 是文件所在的资源文件夹名（多集资源才有）；单文件资源为 null。 */
 export interface DownloadedFile {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { deleteDownload, exportDownloadToPhotos, listDownloads, playDownloadedFile, shareDownloadedFile, type DownloadedFile } from "../download";
-import { IChevR, IChevronDown, IPlayF, IRefresh, ISendF, IShare, ITrash } from "../icons";
+import { deleteDownload, exportDownloadToPhotos, listDownloads, openDownloadInPlayer, playDownloadedFile, shareDownloadedFile, type DownloadedFile } from "../download";
+import { platform } from "../environment";
+import { IChevR, IChevronDown, IPlayF, IRefresh, ISendF, IShare, ITrash, ITrendUp } from "../icons";
 import { Notice } from "./BrowsePages";
 
 /** 设置与更多播放选项里的下载管理：列出文稿/Downloads 里的已完成下载。
@@ -8,7 +9,8 @@ import { Notice } from "./BrowsePages";
  * 文件夹可折叠；单个资源文件不建文件夹，直接散放在列表里。
  * 点按文件名直接在本机播（AVPlayer 全屏；HLS 拼合的 .ts 本机播不了，
  * 点按会提示改用导出）；每行有导出（存到相册，或走系统分享面存到
- * “文件”）、分享（直接弹系统分享面）与删除（点两下确认）。 */
+ * “文件”）、分享（直接弹系统分享面）、SenPlayer（仅 iOS，弹系统
+ * “用…打开”菜单，点 SenPlayer 就把文件交给它播）与删除（点两下确认）。 */
 /** Tauri invoke 失败时抛的是字符串本身，不是 Error 实例——直接读
  * e.message 会读不到，只剩兜底的“播放失败”；先把字符串原样报出来，
  * 下次真机报错才能看到到底是哪一步失败。 */
@@ -62,6 +64,14 @@ export default function DownloadManager() {
     catch (e) { setError(errText(e, "分享失败")); }
     finally { setBusy(null); }
   };
+  // SenPlayer：弹系统“用…打开”菜单，点 SenPlayer 就把文件交给它播。
+  // 文件是直接交过去的，播起来不用红苹果在后台留着，也不断流。
+  const openSenPlayer = async (f: DownloadedFile) => {
+    setBusy(f.path); setError(""); setInfo("");
+    try { await openDownloadInPlayer(f.path); }
+    catch (e) { setError(errText(e, "SenPlayer 打开失败")); }
+    finally { setBusy(null); }
+  };
   const remove = async (f: DownloadedFile) => {
     if (confirmPath !== f.path) { setConfirmPath(f.path); return; }
     setConfirmPath(null); setBusy(f.path); setError(""); setInfo("");
@@ -88,7 +98,7 @@ export default function DownloadManager() {
   }, [files]);
   const singles = files.filter(f => !f.folder);
   const total = files.reduce((n, f) => n + f.bytes, 0);
-  const rowProps = { busy, confirmPath, exportPath, onPlay: play, onExportPhotos: exportToPhotos, onExportFiles: exportToFiles, onShare: share, onRemove: remove, onToggleExport: (p: string) => setExportPath(exportPath === p ? null : p) };
+  const rowProps = { busy, confirmPath, exportPath, onPlay: play, onExportPhotos: exportToPhotos, onExportFiles: exportToFiles, onShare: share, onSenPlayer: openSenPlayer, onRemove: remove, onToggleExport: (p: string) => setExportPath(exportPath === p ? null : p) };
 
   return <div className="px-3.5 py-3">
     <div className="flex items-center justify-between gap-2">
@@ -132,11 +142,12 @@ type RowProps = {
   onExportPhotos: (f: DownloadedFile) => void;
   onExportFiles: (f: DownloadedFile) => void;
   onShare: (f: DownloadedFile) => void;
+  onSenPlayer: (f: DownloadedFile) => void;
   onRemove: (f: DownloadedFile) => void;
   onToggleExport: (path: string) => void;
 };
 
-function FileRow({ f, busy, confirmPath, exportPath, onPlay, onExportPhotos, onExportFiles, onShare, onRemove, onToggleExport }: RowProps) {
+function FileRow({ f, busy, confirmPath, exportPath, onPlay, onExportPhotos, onExportFiles, onShare, onSenPlayer, onRemove, onToggleExport }: RowProps) {
   return <li className="py-2.5">
     <div className="flex items-center gap-3">
       <button className="shrink-0 w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary pressable" aria-label={`播放 ${f.name}`} onClick={() => onPlay(f)}><IPlayF size={14}/></button>
@@ -146,6 +157,7 @@ function FileRow({ f, busy, confirmPath, exportPath, onPlay, onExportPhotos, onE
       </button>
       <button className="pressable disabled:opacity-50 shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-primary" aria-label={`导出 ${f.name}`} aria-expanded={exportPath === f.path} disabled={busy === f.path} onClick={() => onToggleExport(f.path)}><ISendF size={15}/></button>
       <button className="pressable disabled:opacity-50 shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-primary" aria-label={`分享 ${f.name}`} disabled={busy === f.path} onClick={() => onShare(f)}><IShare size={15}/></button>
+      {platform === "ios" && <button className="pressable disabled:opacity-50 shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-primary" aria-label={`SenPlayer 播放 ${f.name}`} disabled={busy === f.path} onClick={() => onSenPlayer(f)}><ITrendUp size={15}/></button>}
       <button className="pressable disabled:opacity-50 shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-mut" aria-label={`删除 ${f.name}`} disabled={busy === f.path} onClick={() => onRemove(f)}>{confirmPath === f.path ? <span className="text-[11px] text-primary">确认</span> : <ITrash size={15}/>}</button>
     </div>
     {exportPath === f.path && <div className="mt-2 ml-11 flex gap-2">

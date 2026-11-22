@@ -158,6 +158,17 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   `AVPlayerViewController.contentOverlayView` 右上角下方（顶边 +72px）
   叠同款角标，每 0.5s 的进度回调里刷新一次，HLS 切清晰度时能跟上；
   同样起播后显示 3 秒自动消失。
+  键名对齐（v0.0.39 修过）：Swift 的 `NativePlayerState` 无
+  CodingKeys，编码后键名是 Swift 属性名（`videoWidth` 驼峰）；Rust
+  侧 `NativePlayerState` 必须用 `serde rename_all="camelCase"` 对齐。
+  v0.0.38 之前 Rust 侧没加，`run_mobile_plugin_async` 解回包时报
+  `missing field 'video_width'`——7 个返回 state 的原生播放命令
+  （open/play/pause/seek/set_rate/set_volume/state）全都一样坏。
+  回包解不到不代表没播：Swift 侧在 open 完成回调里先 present 再
+  resolve，播放器已经弹出来了，只是 invoke 的 Promise 被拒，下载
+  管理点播时就显示报错横条（v0.0.37 的“播放失败”、v0.0.38 的真实
+  报错都是它）；更多菜单的“原生播放”入口同样受影响。修法是一行
+  属性 + 一个 serde 往返单元测试（`native_player.rs`）。
   MDK / KSPlayer / mpv 的 `videoSize` 目前返回 `.zero`（未接各家
   的尺寸 API），角标按未知隐藏，等 Mac 上接依赖时再按各家 API 补。
 - 真机验收时加一项：播 HLS/MP4 看角标是否出现、数值是否与实际
@@ -420,7 +431,7 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   锁定没做。另外 iOS 上 `set_orientation(false)` 是切回竖屏，与
   Android 的“恢复之前方向”语义不同。
 
-## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36；下载管理进更多菜单 + 导出 + 点播 + SenPlayer 跳转 v0.0.37；独立音频轨合轨 + 下载管理分享按钮 v0.0.38）
+## 资源下载（播放页，v0.0.33；下载管理 v0.0.34；过期刷新重下 v0.0.35；首页浮层下载 v0.0.36；下载管理进更多菜单 + 导出 + 点播 + SenPlayer 跳转 v0.0.37；独立音频轨合轨 + 下载管理分享按钮 v0.0.38；video_width 回包修复 + 下载管理 SenPlayer 按钮 v0.0.39）
 
 - 入口：详情页“更多播放选项”菜单与“影片信息”面板里各有一个“下载”
   按钮，播放器上（全屏右上角与非全屏顶栏、更多按钮旁）还有一个下载
@@ -499,7 +510,15 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   分享面（复用已有的 `shareDownloadedFile`，不用先展开导出菜单）；
   同时播放/导出/分享/删除失败时显示真实的报错原因，不再一律写
   “播放失败”（Tauri invoke 失败时返回的是纯字符串，之前按
-  `Error.message` 取不到）。
+  `Error.message` 取不到）。v0.0.39 起每行再多一个 SenPlayer 图标
+  按钮（`ITrendUp` ↗，仅 iOS）：点按弹系统“用…打开”菜单（新命令
+  `open_in_file` → SharePlugin 的 `openIn`，
+  `UIDocumentInteractionController`），菜单里点 SenPlayer 就把文件
+  交给它播——文件是直接交过去的，播起来不用红苹果在后台留着，也
+  不断流。不走 SenPlayer 的 URL Scheme：下载的文件在红苹果沙盒里，
+  别的 App 读不到 `file://` 地址；回环地址那条路要红苹果在后台播
+  着才不断流，下载本来就是为了摆脱这个依赖。菜单里没有能打开的
+  应用时明确报错。
 - 下载管理进更多菜单、导出、点播（v0.0.37）：详情页与首页的“更多播放
   选项”菜单里新增“下载管理”入口，打开同一份 `DownloadManager`（新
   面板 `downloads`，不走 `onPanelChange`）；设置里的下载管理不变。

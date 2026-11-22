@@ -21,6 +21,10 @@ import Tauri
 import UIKit
 
 public class SharePlugin: Plugin {
+  /// “用…打开”菜单须一直强引用着 UIDocumentInteractionController，
+  /// 菜单关掉前不能放，否则一点就闪退。插件实例随应用常驻，放这里正好。
+  private var documentInteractionController: UIDocumentInteractionController?
+
   @objc public func shareFile(_ invoke: Invoke) throws {
     struct ShareArgs: Decodable {
       var path: String
@@ -45,6 +49,41 @@ public class SharePlugin: Plugin {
       // 分享面弹出即 resolve（用户选什么、是否保存，由系统分享面接管）。
       presenter.present(vc, animated: true) {
         invoke.resolve()
+      }
+    }
+  }
+
+  /// 用外部播放器打开已下载文件：弹系统“用…打开”菜单（SenPlayer 在
+  /// 列），用户点 SenPlayer 就把文件交给它播。为什么不用 SenPlayer 的
+  /// URL Scheme 直接跳：下载的文件在红苹果沙盒里，别的 App 读不到
+  /// file:// 地址；回环地址那条路要红苹果在后台播着才不断流，下载
+  /// 本来就是为了摆脱这个依赖。文件是直接交给 SenPlayer 的，播起来
+  /// 不用红苹果在后台留着。菜单里没有能打开的应用时明确 reject。
+  @objc public func openIn(_ invoke: Invoke) throws {
+    struct OpenInArgs: Decodable {
+      var path: String
+    }
+    let args = try invoke.parseArgs(OpenInArgs.self)
+    DispatchQueue.main.async {
+      guard FileManager.default.fileExists(atPath: args.path) else {
+        invoke.reject("文件不存在")
+        return
+      }
+      guard let presenter = self.manager.viewController else {
+        invoke.reject("无法获取视图控制器")
+        return
+      }
+      let url = URL(fileURLWithPath: args.path)
+      let controller = UIDocumentInteractionController(url: url)
+      self.documentInteractionController = controller
+      let shown = controller.presentOpenInMenu(
+        from: CGRect(x: 0, y: 0, width: 1, height: 1),
+        in: presenter.view, animated: true)
+      if shown {
+        invoke.resolve()
+      } else {
+        self.documentInteractionController = nil
+        invoke.reject("没有能打开这个文件的应用")
       }
     }
   }

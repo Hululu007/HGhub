@@ -30,8 +30,15 @@ pub enum NativeEngine {
 }
 
 /// open / play / pause / seek / set_rate / set_volume 的回包：Swift 侧
-/// NativePlayerState 用同样字段名编码，serde 按名字对齐。
+/// NativePlayerState 编码后键名是 Swift 属性名（videoWidth/videoHeight
+/// 驼峰，无 CodingKeys），Rust 侧必须用 camelCase 对齐，否则
+/// run_mobile_plugin_async 反序列化回包时报
+/// "missing field `video_width`"——回包解不到不代表没播：Swift 侧在
+/// open 完成回调里先 present 再 resolve，播放器已经弹出来了，只是
+/// invoke 的 Promise 被拒，DownloadManager 就显示报错横条。
+/// 序列化方向也一样：前端 NativePlayerState 声明的是 videoWidth。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativePlayerState {
     pub engine: Option<String>,
     pub playing: bool,
@@ -242,4 +249,37 @@ pub async fn native_player_state(
 #[tauri::command]
 pub fn native_player_state() -> Result<NativePlayerState, String> {
     Err("当前平台不支持原生播放器".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativePlayerState;
+
+    /// Swift 侧 NativePlayerState 无 CodingKeys，编码后键名是 Swift
+    /// 属性名（videoWidth/videoHeight 驼峰）；Rust 侧必须用 camelCase
+    /// 对齐。v0.0.38 之前这里没加 rename_all，Rust 按 snake_case 解，
+    /// 真机报 missing field `video_width`（播放器其实已经弹出来了，
+    /// 只是回包解不到，invoke 被拒）。
+    #[test]
+    fn state_matches_swift_camel_case_keys() {
+        let from_swift = serde_json::json!({
+            "engine": "avplayer",
+            "playing": true,
+            "position": 1.5,
+            "duration": 187.0,
+            "rate": 1.0,
+            "volume": 1.0,
+            "muted": false,
+            "videoWidth": 1280,
+            "videoHeight": 720
+        });
+        let state: NativePlayerState =
+            serde_json::from_value(from_swift).expect("Swift 回包应按驼峰键解出");
+        assert_eq!(state.video_width, 1280);
+        assert_eq!(state.video_height, 720);
+        // 序列化方向也一样：前端 NativePlayerState 声明的是 videoWidth。
+        let back = serde_json::to_value(&state).unwrap();
+        assert_eq!(back["videoWidth"], 1280);
+        assert!(back.get("video_width").is_none());
+    }
 }

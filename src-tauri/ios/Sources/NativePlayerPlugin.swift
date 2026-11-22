@@ -50,7 +50,10 @@ struct NativePlayerVolumeArgs: Decodable {
   var muted: Bool
 }
 
-/// 与 Rust NativePlayerState 同名字段；resolve 后由 serde 按名字对齐。
+/// 与 Rust NativePlayerState 对齐的模型。注意：本 struct 无 CodingKeys，
+/// 编码后键名就是 Swift 属性名（videoWidth/videoHeight 驼峰）；Rust 侧
+/// 用 serde rename_all="camelCase" 对齐，不要改成 snake_case，否则
+/// Rust 解回包时报 missing field `video_width`。
 struct NativePlayerState: Encodable {
   var engine: String?
   var playing: Bool

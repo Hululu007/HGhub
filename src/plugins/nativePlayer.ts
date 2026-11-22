@@ -5,8 +5,14 @@ import { platform } from "../environment";
 // Swift NativePlayerPlugin -> 四个引擎。WebView / <video> 仍是默认路，
 // 这里只在用户选了原生引擎时调用（见 playbackEngine.ts 与 Feed.tsx）。
 //
-// 注意 invoke 参数名：Rust 命令形参是 snake_case（session_id），
-// 这里按 snake_case 传，不要改成 camelCase，否则 Tauri 反序列化不到。
+// 注意 invoke 参数名：Tauri `#[tauri::command]` 默认按 camelCase 传参
+// （tauri-macros 默认 rename_all="camelCase"），Rust 形参 session_id
+// 对应 JS 键 sessionId，这里传的就是 sessionId。不要改成 snake_case，
+// v0.0.33 的 downloadId 就是这么错过的。
+// 注意回包字段名：Swift 回包的键是驼峰 videoWidth（见
+// NativePlayerPlugin.swift 的 NativePlayerState，无 CodingKeys），
+// Rust 侧 NativePlayerState 用 rename_all="camelCase" 对齐，前端
+// NativePlayerState 接口声明的也是 videoWidth。
 
 export type NativeEngine = "avplayer" | "mdk" | "ksplayer" | "mpv";
 
