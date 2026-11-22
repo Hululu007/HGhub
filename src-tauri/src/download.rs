@@ -523,3 +523,83 @@ fn extension_for_content_type(content_type: &str) -> &'static str {
 fn path_string(path: &PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
+
+/// 已下载的文件（供设置里的下载管理列出、分享、删除）。
+#[derive(Serialize, Clone)]
+pub struct DownloadedFile {
+    pub name: String,
+    pub path: String,
+    pub bytes: u64,
+    /// 修改时间的 Unix 秒；取不到时为 null。
+    pub modified: Option<u64>,
+}
+
+/// 列出文稿/Downloads 里的已完成下载（跳过 .part 未完成文件），按修改时间倒序。
+/// 目录不存在时返回空列表（还没下过东西，不是错误）。
+#[tauri::command]
+pub async fn list_downloads(app: AppHandle) -> Result<Vec<DownloadedFile>, String> {
+    let dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| e.to_string())?
+        .join("Downloads");
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("无法读取下载目录：{e}")),
+    };
+    let mut files = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("无法读取下载目录：{e}"))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("part") {
+            continue;
+        }
+        let meta = match entry.metadata().await {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
+        };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        files.push(DownloadedFile {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            path: path_string(&path),
+            bytes: meta.len(),
+            modified,
+        });
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.modified.unwrap_or(0)));
+    Ok(files)
+}
+
+/// 删除一个已下载文件。只允许删 Downloads 目录里的文件（路径须落在该目录下），
+/// 防止误删应用外文件。
+#[tauri::command]
+pub async fn delete_download(app: AppHandle, path: String) -> Result<(), String> {
+    let dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| e.to_string())?
+        .join("Downloads");
+    let dir = tokio::fs::canonicalize(&dir)
+        .await
+        .map_err(|_| "下载目录不存在".to_string())?;
+    let target = tokio::fs::canonicalize(PathBuf::from(&path))
+        .await
+        .map_err(|_| "文件不存在".to_string())?;
+    if !target.starts_with(&dir) {
+        return Err("只能删除下载目录里的文件".to_string());
+    }
+    if !target.is_file() {
+        return Err("只能删除文件".to_string());
+    }
+    tokio::fs::remove_file(&target)
+        .await
+        .map_err(|e| format!("删除失败：{e}"))
+}

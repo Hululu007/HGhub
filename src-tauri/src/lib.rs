@@ -107,6 +107,8 @@ pub fn run() {
             commands::adjust_volume,
             commands::share_file,
             download::download_media,
+            download::list_downloads,
+            download::delete_download,
             commands::debug_log,
             commands::open_url,
             commands::open_external_media,

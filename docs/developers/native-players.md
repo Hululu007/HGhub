@@ -417,13 +417,22 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   锁定没做。另外 iOS 上 `set_orientation(false)` 是切回竖屏，与
   Android 的“恢复之前方向”语义不同。
 
-## 资源下载（播放页，v0.0.33）
+## 资源下载（播放页，v0.0.33；下载管理 v0.0.34）
 
 - 入口：详情页“更多播放选项”菜单与“影片信息”面板里各有一个“下载”
   按钮（仅 App 内，`isTauri()` 才显示），与“复制播放地址”并列。
   复制的地址是回环地址、只在应用活着时才有效，下载是把同一份资源
   存成本地文件，存好后不依赖应用进程、哪里都能播——这是下载相对
   复制地址的根本区别。
+- invoke 参数名：Tauri `#[tauri::command]` 默认按 camelCase 传参
+  （tauri-macros 默认 `rename_all="camelCase"`），Rust 形参
+  `download_id` 对应 JS 键 `downloadId`。v0.0.33 曾按 snake_case 传
+  `download_id`，真机报 `missing required key downloadId`，下载点按
+  后直接报错；v0.0.34 改为 camelCase。同根问题也修了原生播放
+  `native_player_open` 的 `sessionId`（之前按 snake_case 传
+  `session_id` 同样反序列化不到；`native_player.rs` 里那条“按
+  snake_case 传”的注释是错的，已改——那条注释说的是发给 Swift 插件
+  的载荷键名，不是 Tauri invoke 参数名）。
 - 实现：前端 `src/download.ts` 调 Rust 命令 `download_media`
  （`src-tauri/src/download.rs`），只消费已有的回环地址
   （`media.url`），不改媒体服务器、不改插件协议。直链文件
@@ -450,7 +459,13 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   会话过期（410/401）时报错“播放地址已失效，请重新播放后再下载”。
   下载时每次取分片都会取消预取缓存（媒体服务器的既有行为），播放
   可能多缓冲一点，这是 v1 接受的代价。
+- 下载管理（v0.0.34）：设置里新增“下载管理”一节（仅 App 内），列出
+  文稿/Downloads 里的已完成下载（`list_downloads` 命令，按修改时间
+  倒序，跳过 `.part` 未完成文件），每行显示文件名、大小与日期，可分
+  享（系统分享面，导出）或删除（点两下确认；`delete_download` 只允许
+  删 Downloads 目录里的文件，路径须落在该目录下）。
 - 真机验收（待 Mac / 设备）：点“下载”后进度走到 100%，文件在
   “文件”App 里能找到、能播；HLS 点播能完整拼出来；直播存的是当前
-  窗口的片段；点“分享”能弹出系统分享面、能存到“文件”。Swift 文件
+  窗口的片段；点“分享”能弹出系统分享面、能存到“文件”；设置里下载
+  管理能列出已下载的文件、能分享导出、能删除。Swift 文件
   未编译（本机无 Xcode），与上面其他插件一样。

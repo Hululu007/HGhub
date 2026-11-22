@@ -71,7 +71,7 @@ export function openNativePlayer(options: NativePlayerOpenOptions): Promise<Nati
   return invoke<NativePlayerState>("native_player_open", {
     engine: options.engine,
     url: options.url,
-    session_id: options.sessionId,
+    sessionId: options.sessionId,
     position: options.position ?? 0,
     rate: options.rate ?? 1,
     volume: options.volume ?? 1,

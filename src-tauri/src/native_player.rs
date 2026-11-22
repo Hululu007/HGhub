@@ -86,8 +86,10 @@ fn open_payload(
     muted: bool,
     title: Option<String>,
 ) -> Value {
-    // 注意：invoke 参数名按 Rust 形参的 snake_case 传（前端 nativePlayer.ts
-    // 里用 session_id 而不是 sessionId），否则 Tauri 反序列化不到。
+    // 注意：这里的 session_id 是发给 Swift 插件的载荷键名（Swift 侧按
+    // snake_case 解），与 Tauri invoke 参数名是两回事。Tauri invoke 默认
+    // 按 camelCase 传参（tauri-macros 默认 rename_all="camelCase"），所以
+    // 前端 nativePlayer.ts 里 invoke 用的是 sessionId。
     json!({
         "engine": engine,
         "url": url,

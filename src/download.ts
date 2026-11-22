@@ -33,9 +33,10 @@ export async function downloadMedia(
     if (e.payload.id === downloadId) onProgress(e.payload);
   });
   try {
-    // Rust 侧参数是 snake_case（download_id），传 camelCase 会反序列化不到，
-    // 见 native_player.rs 里 session_id 的注释。
-    return await invoke<DownloadResult>("download_media", { url, name, download_id: downloadId });
+    // Tauri invoke 参数默认按 camelCase 传（tauri-macros 默认
+    // rename_all="camelCase"）：Rust 形参 download_id 对应 JS 键 downloadId。
+    // 传 snake_case（download_id）会报 missing required key downloadId。
+    return await invoke<DownloadResult>("download_media", { url, name, downloadId });
   } finally {
     unlisten();
   }
@@ -45,6 +46,25 @@ export async function downloadMedia(
  * 其他平台用默认应用打开该文件。 */
 export async function shareDownloadedFile(path: string): Promise<void> {
   await invoke("share_file", { path });
+}
+
+/** 设置里下载管理列出的一个已下载文件。modified 是修改时间的 Unix 秒。 */
+export interface DownloadedFile {
+  name: string;
+  path: string;
+  bytes: number;
+  modified: number | null;
+}
+
+/** 列出文稿/Downloads 里的已完成下载（按修改时间倒序）。仅 App 内可用。 */
+export async function listDownloads(): Promise<DownloadedFile[]> {
+  if (!isTauri()) return [];
+  return await invoke<DownloadedFile[]>("list_downloads");
+}
+
+/** 删除一个已下载文件（只允许删 Downloads 目录里的文件）。 */
+export async function deleteDownload(path: string): Promise<void> {
+  await invoke("delete_download", { path });
 }
 
 /** 进度换算成百分比（0..100）：HLS 按分片数，直链按字节；都没总量时返回 null。 */
