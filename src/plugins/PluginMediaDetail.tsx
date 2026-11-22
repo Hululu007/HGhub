@@ -136,6 +136,16 @@ export default function PluginMediaDetail({ plugin, mediaId, onBack, manage, act
     return () => { live = false; };
   }, [plugin.meta.id, plugin.revision, mediaId, metadataRequest, needsDetail, detailRound]);
   useEffect(() => () => { autoStarted.current=false; startedFromSource.current=false; sequence.current++; if (session.current) releaseMedia(session.current.sessionId); void saveRef.current().catch(() => {}); }, [plugin.meta.id, mediaId]);
+  /* 回前台时重验会话：active/canPlay 不会在切后台/回前台时变，之前
+     只靠它们翻转才刷新——后台过期后回来不会触发，只能重启。现在回
+     前台就把下面这个 effect 再跑一遍（失败过、没会话、或地址 5 秒
+     内过期，都刷一次）。 */
+  const [foregroundTick, setForegroundTick] = useState(0);
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) setForegroundTick((t) => t + 1); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
   useEffect(() => {
     if (!active || !canPlay) {
       if (!session.current || !canPlay) { autoStarted.current = false; startedFromSource.current = false; }
@@ -150,7 +160,7 @@ export default function PluginMediaDetail({ plugin, mediaId, onBack, manage, act
       failedWhileHidden.current = false;
       void play(current.current.ep, 'refresh', current.current.playlistId);
     }
-  }, [active, canPlay]);
+  }, [active, canPlay, foregroundTick]);
   const play = async (ep: Episode, reason: "play" | "refresh" | "switch" | "fallback" = "play", listId: string | undefined = playlist || undefined, chosen = selection.current, proposedPosition?: number) => {
     if (!viewActive.current || !canPlay) return;
     const n = ++sequence.current;

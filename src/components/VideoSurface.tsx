@@ -52,7 +52,7 @@ export default forwardRef<VideoHandle, Props>(function VideoSurface(props, forwa
     rate:r=>{if(ref.current)ref.current.playbackRate=r;},mute:m=>{if(ref.current)ref.current.muted=m;},volume:n=>{if(ref.current)ref.current.volume=n;},
   }),[]);
   useEffect(()=>{
-    const v=ref.current!;let disposed=false,failed=false,resume=false;
+    const v=ref.current!;let disposed=false,failed=false;
     playAttempt.current++;wantsPlay.current=latest.current.autoPlay!==false;
     const started=performance.now(); let firstFrame: number | undefined;
     const p=latest.current;
@@ -61,7 +61,17 @@ export default forwardRef<VideoHandle, Props>(function VideoSurface(props, forwa
     const metadata=()=>{if(p.position>0&&Number.isFinite(v.duration))v.currentTime=Math.min(p.position,Math.max(0,v.duration-.15));if(latest.current.active&&wantsPlay.current)play();};
     const playing=()=>{if(!disposed){activity(true);latest.current.onPlaying();}};
     const paused=()=>{if(!disposed&&v.paused){activity(false);latest.current.onTime(v.currentTime);if(!v.ended){if(wantsPlay.current&&latest.current.active&&v.readyState<3)latest.current.onWaiting();else latest.current.onPause();}}};
-    const visibility=()=>{if(document.hidden){resume=!v.paused;v.pause();hls.current?.stopLoad();}else if(resume){resume=false;if(latest.current.active){hls.current?.startLoad(v.currentTime);play();}}};
+    const visibility=()=>{
+      if(document.hidden){
+        /* 后台保活：播着就继续播，不暂停、不停 HLS——音频后台模式靠
+           持续出声留着进程，回环服务才不断流（SenPlayer/浏览器播的
+           都是这个地址）。之前这里 pause + stopLoad，音频一停 iOS
+           很快挂起进程，过段时间回环就死了，回来也只能重启。已暂
+           停的不动（wantsPlay 为 false，回来也不续播）。 */
+        return;
+      }
+      if(wantsPlay.current&&latest.current.active){hls.current?.startLoad(v.currentTime);play();}
+    };
     v.muted=p.muted;v.volume=p.volume;v.playbackRate=p.rate;
     v.addEventListener("loadedmetadata",metadata);v.addEventListener("error",fail);v.addEventListener("playing",playing);v.addEventListener("pause",paused);document.addEventListener("visibilitychange",visibility);
     if(p.media.format==="hls"&&hlsPlaybackPath(v)==="mse"){
@@ -76,7 +86,10 @@ export default forwardRef<VideoHandle, Props>(function VideoSurface(props, forwa
     return()=>{disposed=true;playAttempt.current++;if(firstFrame!==undefined)v.cancelVideoFrameCallback(firstFrame);clearTimeout(timer);activity(false);document.removeEventListener("visibilitychange",visibility);v.removeEventListener("loadedmetadata",metadata);v.removeEventListener("error",fail);v.removeEventListener("playing",playing);v.removeEventListener("pause",paused);hls.current?.destroy();hls.current=null;v.pause();v.removeAttribute("src");v.load();};
   },[props.media.sessionId,props.media.version]);
   useEffect(()=>{const v=ref.current;if(v){v.muted=props.muted;v.volume=props.volume;v.playbackRate=props.rate;}},[props.muted,props.volume,props.rate]);
-  useEffect(()=>{if(!props.active||document.hidden){ref.current?.pause();hls.current?.stopLoad();}else if(hls.current)hls.current.startLoad(ref.current?.currentTime||props.position);},[props.active,props.media.sessionId,props.media.version]);
+  /* 切后台不暂停（见上面 visibility 的注释）：只有切到别的卡片/
+     详情页（active 变 false）才停；会话在后台刷出来时也继续加载，
+     不然回环没流可供。 */
+  useEffect(()=>{if(!props.active){ref.current?.pause();hls.current?.stopLoad();}else if(hls.current)hls.current.startLoad(ref.current?.currentTime||props.position);},[props.active,props.media.sessionId,props.media.version]);
   const dimensions=()=>{const v=ref.current!;if(Number.isFinite(v.duration))latest.current.onDuration(v.duration);if(v.videoWidth)latest.current.onSize(v.videoWidth,v.videoHeight);};
   const buffered=(v:HTMLVideoElement)=>{props.onBuffered(v.duration&&v.buffered.length?v.buffered.end(v.buffered.length-1)/v.duration:0);let ahead=0;for(let i=0;i<v.buffered.length;i++)if(v.buffered.start(i)<=v.currentTime+.1&&v.buffered.end(i)>v.currentTime)ahead=v.buffered.end(i)-v.currentTime;props.onBuffer?.(ahead);};
   return <div className="absolute inset-0 overflow-hidden flex items-center justify-center" onClick={props.onClick}>
