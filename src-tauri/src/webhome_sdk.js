@@ -3,17 +3,31 @@
 // 不依赖页面自身的任何库；页面可通过 window.fm / window.fongmi / window.webhome 调用。
 (function () {
   "use strict";
-  function invoke(method, payload) {
+  // Tauri 2 默认不注入 window.__TAURI__（withGlobalTauri 缺省为 false），
+  // 但每个 WebView 一定有 window.__TAURI_INTERNALS__（官方 @tauri-apps/api
+  // 的 invoke 就是调它）。优先用它，__TAURI__.core 只作后备。
+  function getInvoke() {
+    var internals = window.__TAURI_INTERNALS__;
+    if (internals && typeof internals.invoke === "function") {
+      return function (cmd, args) { return internals.invoke(cmd, args); };
+    }
     var core = window.__TAURI__ && window.__TAURI__.core;
-    if (!core || typeof core.invoke !== "function") {
+    if (core && typeof core.invoke === "function") {
+      return function (cmd, args) { return core.invoke(cmd, args); };
+    }
+    return null;
+  }
+  function invoke(method, payload) {
+    var fn = getInvoke();
+    if (!fn) {
       return Promise.reject(new Error("WebHome 桥未就绪"));
     }
-    return core.invoke("webhome_call", { method: method, payload: payload || {} });
+    return fn("webhome_call", { method: method, payload: payload || {} });
   }
   function closeWindow() {
-    var core = window.__TAURI__ && window.__TAURI__.core;
-    if (!core || typeof core.invoke !== "function") return Promise.resolve({ code: 0 });
-    return core.invoke("webhome_close", {});
+    var fn = getInvoke();
+    if (!fn) return Promise.resolve({ code: 0 });
+    return fn("webhome_close", {});
   }
   function post(method, payload) {
     // 导航与视口不经过宿主，在页内直接处理。
