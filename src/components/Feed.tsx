@@ -292,7 +292,7 @@ export default function Feed({media, position, active=true, preparing=false, err
      textarea + execCommand 兜底；失败给提示，不静默。 */
   const copyPlayUrl = async () => {
     if (!playUrl) return;
-    const done = () => { toast("已复制，切出应用后地址会失效"); pokeInfoOverlay(); };
+    const done = () => { toast(phase === "playing" ? "已复制，播着时切出可用" : "已复制，须先播放再切出"); pokeInfoOverlay(); };
     try { await navigator.clipboard.writeText(playUrl); done(); return; } catch { /* 走兜底 */ }
     try {
       const ta = document.createElement("textarea");
