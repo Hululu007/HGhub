@@ -3,6 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { platform } from "./environment";
 import type { PlaybackEngine } from "./plugins/playbackEngine";
 import { DEFAULT_PLAYBACK_ENGINE, isPlaybackEngine } from "./plugins/playbackEngine";
+/** 画面设置（更多播放选项 → 画面设置）：适应 = 原来的自动逻辑（横屏/全屏
+ *  完整显示，竖屏看横屏视频默认完整显示，竖屏视频竖屏看铺满）；拉伸 = 拉满
+ *  （object-fit: fill，画面变形）；铺满 = 裁切铺满（cover）；16:9 / 4:3 =
+ *  按比例裁切显示（cover + 画面框定死比例）。 */
+export type PictureMode = "fit" | "stretch" | "fill" | "16:9" | "4:3";
+export function isPictureMode(v: string): v is PictureMode { return ["fit", "stretch", "fill", "16:9", "4:3"].includes(v); }
 import type { SourceStart } from "./plugins/sourceMatching";
 export type Tab = "home" | "category" | "search" | "profile";
 export type Theme = "dark" | "light";
@@ -18,19 +24,20 @@ function useApplication() {
   const [muted, setMuted] = useState(muteOnStartup);
   const [theater, setTheater] = useState(false), [fs, setFs] = useState(false), [clean, setClean] = useState(false);
   const [playbackEngine, setPlaybackEngine] = useState<PlaybackEngine>(() => { const v = read<string>("hpp.playbackEngine", DEFAULT_PLAYBACK_ENGINE); return isPlaybackEngine(v) ? v : DEFAULT_PLAYBACK_ENGINE; });
+  const [pictureMode, setPictureMode] = useState<PictureMode>(() => { const v = read<string>("hpp.pictureMode", "fit"); return isPictureMode(v) ? v : "fit"; });
   const [strictSecurity, setStrict] = useState(true), [strictSecurityReady, setSecurityReady] = useState(false), [securityPending, setPending] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     document.documentElement.classList.toggle("theme-light", theme === "light"); document.documentElement.style.colorScheme = theme;
-    try { localStorage.setItem("hpp.theme", JSON.stringify(theme)); localStorage.setItem("hpp.startMuted", JSON.stringify(muteOnStartup)); localStorage.setItem("hpp.volume", JSON.stringify(volume)); localStorage.setItem("hpp.playbackEngine", JSON.stringify(playbackEngine)); } catch { setError("无法保存应用偏好"); }
-  }, [theme, muteOnStartup, volume, playbackEngine]);
+    try { localStorage.setItem("hpp.theme", JSON.stringify(theme)); localStorage.setItem("hpp.startMuted", JSON.stringify(muteOnStartup)); localStorage.setItem("hpp.volume", JSON.stringify(volume)); localStorage.setItem("hpp.playbackEngine", JSON.stringify(playbackEngine)); localStorage.setItem("hpp.pictureMode", JSON.stringify(pictureMode)); } catch { setError("无法保存应用偏好"); }
+  }, [theme, muteOnStartup, volume, playbackEngine, pictureMode]);
   useEffect(() => { void invoke<{strict_security:boolean}>("app_boot").then(v => { setStrict(v.strict_security); setSecurityReady(true); }).catch(() => setError("无法读取网络设置")); }, []);
   const setStrictSecurity = useCallback(async (strict: boolean) => { setPending(true); try { setStrict(await invoke<boolean>("security_set", { strict })); } finally { setPending(false); } }, []);
   const setTab = useCallback((tab: Tab) => { setTabRaw(tab); setStack([]); }, []);
   const push = useCallback((p: PageInput) => setStack(old => [...old, { ...p, key: crypto.randomUUID() }]), []);
   const replace = useCallback((p: PageInput) => setStack(old => [...old.slice(0, -1), { ...p, key: crypto.randomUUID() }]), []);
   const pop = useCallback(() => setStack(old => old.slice(0, -1)), []);
-  return { watching, setWatching, platform, theme, setTheme, tab, setTab, stack, push, replace, pop, muteOnStartup, setMuteOnStartup, volume, setVolume, muted, setMuted, theater, setTheater, fs, setFs, clean, setClean, playbackEngine, setPlaybackEngine, strictSecurity, strictSecurityReady, securityPending, setStrictSecurity, error };
+  return { watching, setWatching, platform, theme, setTheme, tab, setTab, stack, push, replace, pop, muteOnStartup, setMuteOnStartup, volume, setVolume, muted, setMuted, theater, setTheater, fs, setFs, clean, setClean, playbackEngine, setPlaybackEngine, pictureMode, setPictureMode, strictSecurity, strictSecurityReady, securityPending, setStrictSecurity, error };
 }
 const Context = createContext<ReturnType<typeof useApplication>>(null!);
 export const useStore = () => useContext(Context);

@@ -45,6 +45,7 @@ node scripts/sync-ios-icons.mjs
 node scripts/sync-ios-launch-screen.mjs
 node scripts/sync-ios-status-bar.mjs
 node scripts/sync-ios-background-audio.mjs
+node scripts/sync-ios-file-sharing.mjs
 
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.

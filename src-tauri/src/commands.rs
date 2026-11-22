@@ -107,3 +107,21 @@ pub fn open_external_media(app: tauri::AppHandle, url: String) -> Result<(), Str
     hghub_hpp::model::url(&url, true, true).map_err(|e| e.message)?;
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
+
+/// 分享已下载的文件：iOS 弹系统分享面（可存到“文件”、发到微信等）；
+/// 其他平台用默认应用打开该文件。
+#[cfg(target_os = "ios")]
+pub struct SharePlugin(pub tauri::plugin::PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn share_file(path: String, plugin: tauri::State<'_, SharePlugin>) -> Result<(), String> {
+    plugin.0.run_mobile_plugin_async::<()>("shareFile", serde_json::json!({"path": path})).await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "ios"))]
+#[tauri::command]
+pub fn share_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
+}

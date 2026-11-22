@@ -13,7 +13,10 @@ export interface VideoHandle {
 }
 interface Props {
   media: PreparedMedia; position: number; active: boolean; autoPlay?: boolean;
-  poster?: string; muted: boolean; volume: number; rate: number; fit: "contain" | "cover";
+  poster?: string; muted: boolean; volume: number; rate: number; fit: "contain" | "cover" | "fill";
+  /** 画面设置 16:9 / 4:3：画面框定死比例（cover 裁切），null 时画面框
+   *  跟容器一样大（适应/拉伸/铺满走 object-fit）。 */
+  aspect?: "16:9" | "4:3" | null;
   scale: number; panX: number; panY: number; isGesturing: boolean;
   onClick: () => void; onTime: (t: number) => void; onDuration: (d: number) => void;
   onSize: (w: number,h: number) => void; onBuffered: (fraction: number) => void;
@@ -76,9 +79,9 @@ export default forwardRef<VideoHandle, Props>(function VideoSurface(props, forwa
   useEffect(()=>{if(!props.active||document.hidden){ref.current?.pause();hls.current?.stopLoad();}else if(hls.current)hls.current.startLoad(ref.current?.currentTime||props.position);},[props.active,props.media.sessionId,props.media.version]);
   const dimensions=()=>{const v=ref.current!;if(Number.isFinite(v.duration))latest.current.onDuration(v.duration);if(v.videoWidth)latest.current.onSize(v.videoWidth,v.videoHeight);};
   const buffered=(v:HTMLVideoElement)=>{props.onBuffered(v.duration&&v.buffered.length?v.buffered.end(v.buffered.length-1)/v.duration:0);let ahead=0;for(let i=0;i<v.buffered.length;i++)if(v.buffered.start(i)<=v.currentTime+.1&&v.buffered.end(i)>v.currentTime)ahead=v.buffered.end(i)-v.currentTime;props.onBuffer?.(ahead);};
-  return <div className="absolute inset-0 overflow-hidden" onClick={props.onClick}>
-    <video ref={ref} playsInline preload="auto" autoPlay={props.autoPlay && props.active} crossOrigin="anonymous" poster={props.poster} className="w-full h-full"
-      style={{objectFit:props.fit,transform:`translate(${props.panX}px, ${props.panY}px) scale(${props.scale})`,transition:props.isGesturing?"none":"transform .18s ease"}}
+  return <div className="absolute inset-0 overflow-hidden flex items-center justify-center" onClick={props.onClick}>
+    <video ref={ref} playsInline preload="auto" autoPlay={props.autoPlay && props.active} crossOrigin="anonymous" poster={props.poster} className={props.aspect ? "max-w-full max-h-full" : "w-full h-full"}
+      style={{objectFit:props.fit,aspectRatio:props.aspect ? (props.aspect === "16:9" ? "16 / 9" : "4 / 3") : undefined,transform:`translate(${props.panX}px, ${props.panY}px) scale(${props.scale})`,transition:props.isGesturing?"none":"transform .18s ease"}}
       onLoadedMetadata={dimensions} onLoadedData={dimensions} onTimeUpdate={e=>{props.onTime(e.currentTarget.currentTime);buffered(e.currentTarget);}}
       onProgress={e=>buffered(e.currentTarget)}
       onPlay={()=>{if(!ref.current?.paused){wantsPlay.current=true;props.onWaiting();}}}

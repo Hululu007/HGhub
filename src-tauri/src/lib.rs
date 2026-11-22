@@ -1,4 +1,5 @@
 mod commands;
+mod download;
 mod logging;
 mod native_player;
 #[cfg(target_os = "macos")]
@@ -19,6 +20,10 @@ use tauri::Manager;
 /// 插件的 setup 闭包也在本文件内引用它。
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_orientation);
+/// Swift 侧的分享插件入口（src-tauri/ios/Sources/SharePlugin.swift 里的
+/// `@_cdecl("init_plugin_share")`），只在 iOS 编译；与 orientation 同一写法。
+#[cfg(target_os = "ios")]
+tauri::ios_plugin_binding!(init_plugin_share);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -60,6 +65,20 @@ pub fn run() {
                 .build(),
         )
         .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("share")
+                .setup(|app, api| {
+                    #[cfg(target_os = "ios")]
+                    {
+                        let handle = api.register_ios_plugin(init_plugin_share)?;
+                        app.manage(commands::SharePlugin(handle));
+                    }
+                    #[cfg(not(target_os = "ios"))]
+                    let _ = (app, api);
+                    Ok(())
+                })
+                .build(),
+        )
+        .plugin(
             tauri_plugin_opener::Builder::new()
                 .open_js_links_on_click(false)
                 .build(),
@@ -86,6 +105,8 @@ pub fn run() {
             commands::set_status_bar_hidden,
             commands::adjust_brightness,
             commands::adjust_volume,
+            commands::share_file,
+            download::download_media,
             commands::debug_log,
             commands::open_url,
             commands::open_external_media,

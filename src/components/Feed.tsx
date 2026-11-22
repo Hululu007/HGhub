@@ -4,9 +4,10 @@ import { isTauri } from "@tauri-apps/api/core";
 import { setMobileOrientation } from "../orientation";
 import { setStatusBarHidden } from "../statusBar";
 import { adjustBrightness, adjustVolume } from "../screenControl";
+import { downloadMB, downloadMedia, downloadPercent, shareDownloadedFile, type DownloadResult } from "../download";
 import { isMobile, platform } from "../environment";
 import { fmtTime, formatResolution } from "../format";
-import { useStore } from "../store";
+import { useStore, type PictureMode } from "../store";
 import { PlaybackWindowActions } from "./DesktopChrome";
 import { Sheet } from "./ui";
 import VideoSurface, { type VideoHandle } from "./VideoSurface";
@@ -17,7 +18,7 @@ import { useVerticalSwipe } from './useVerticalSwipe';
 import type { PreparedMedia } from "../plugins/client";
 import { closeNativePlayer, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
 import { playbackEngineFallbackChain, playbackEngineLabel, type PlaybackEngine } from "../plugins/playbackEngine";
-import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IInfo, IList, ILockF, IPauseF, IPlayF, IRotate, ISearch, ISettings, IVol, IVolMute } from "../icons";
+import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IDownload, IInfo, IList, ILockF, IPauseF, IPlayF, IRotate, ISearch, ISettings, IVol, IVolMute } from "../icons";
 
 export type PlayerPanel = "detail" | "episodes" | "comments" | "playback";
 type SurfacePanel = PlayerPanel | "more" | "info";
@@ -42,7 +43,7 @@ export interface FeedProps extends FeedPresentation {
 export default function Feed({media, position, active=true, preparing=false, error="", onRetry, onPosition, onFailure, onPlaying, onStopped, onEnded, onBuffer, onWaiting,
  title="", author="", description="", score, poster:posterUrl, episodeLabel="", qualityLabel, episodeCount=0, favorite=false, onFavorite,
  playIntent=0, mode="full", onOpenDetail, panels={}, social, onPanelChange, onBack, onNext, onPrevious, onNextEpisode, onPreviousEpisode, queueIndex=0, total=1, previousPreview, nextPreview}: FeedProps) {
-  const store=useStore(), {muted,setMuted,volume,setVolume,playbackEngine,setPlaybackEngine}=store;
+  const store=useStore(), {muted,setMuted,volume,setVolume,playbackEngine,setPlaybackEngine,pictureMode,setPictureMode}=store;
   const activeRef = useRef(active); activeRef.current = active;
   const isDesktop=!isMobile, preview=mode==="preview";
   const boxRef=useRef<HTMLDivElement>(null), videoRef=useRef<VideoHandle>(null);
@@ -158,7 +159,6 @@ export default function Feed({media, position, active=true, preparing=false, err
   const [scrub, setScrub] = useState<{ pct: number; target: number } | null>(null);
   const scrubTarget = useRef<number | null>(null);
   /* 竖屏下横屏视频适应模式 + 双指无级缩放/平移 */
-  const [portraitFit, setPortraitFit] = useState<"contain" | "cover">("contain");
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0, gesturing: false });
   const swipe = useVerticalSwipe(!isDesktop && active && !controlsLocked && !panel && zoom.scale <= 1.05, preview ? onPrevious : onPreviousEpisode, preview ? onNext : onNextEpisode);
   const pinchRef = useRef<{
@@ -309,10 +309,14 @@ export default function Feed({media, position, active=true, preparing=false, err
 
   /* 复制当前视频的真实播放地址（media.url）：WKWebView 里
      navigator.clipboard 需用户手势（点按即满足），不可用时走
-     textarea + execCommand 兜底；失败给提示，不静默。 */
+     textarea + execCommand 兜底；失败给提示，不静默。
+     提示按状态区分：回环地址只在应用进程活着时才响应，播着
+     （有声音）切出时音频后台模式保活；暂停没声音保活不了；
+     静音播着也没声音，同样保活不了——应用默认启动静音
+     （hpp.startMuted 默认 true），所以静音时也要先取消静音。 */
   const copyPlayUrl = async () => {
     if (!playUrl) return;
-    const done = () => { toast(phase === "playing" ? "已复制，播着时切出可用" : "已复制，须先播放再切出"); pokeInfoOverlay(); };
+    const done = () => { toast(phase !== "playing" ? "已复制，须先播放再切出" : muted ? "已复制，须先取消静音再切出" : "已复制，播着时切出可用"); pokeInfoOverlay(); };
     try { await navigator.clipboard.writeText(playUrl); done(); return; } catch { /* 走兜底 */ }
     try {
       const ta = document.createElement("textarea");
@@ -324,6 +328,40 @@ export default function Feed({media, position, active=true, preparing=false, err
       document.body.removeChild(ta);
       done();
     } catch { toast("复制失败"); }
+  };
+
+  /* 资源下载（更多播放选项 / 影片信息里的“下载”按钮）：经回环地址取流存到
+     文稿/Downloads，直链文件直接存，HLS 拼分片；直播只存当前窗口的片段。
+     下载中按钮显示进度，完成后变“已下载 · 分享”，点按弹系统分享面
+     （可存到“文件”、发到微信等）。切集后状态复位。仅 App 内可用。 */
+  const [dlActive, setDlActive] = useState(false);
+  const [dlLabel, setDlLabel] = useState("下载");
+  const [dlDone, setDlDone] = useState<DownloadResult | null>(null);
+  useEffect(() => { setDlActive(false); setDlLabel("下载"); setDlDone(null); }, [playKey]);
+  const startDownload = async () => {
+    if (dlDone) {
+      try { await shareDownloadedFile(dlDone.path); } catch { toast("分享失败"); }
+      return;
+    }
+    if (!playUrl || dlActive) return;
+    setDlActive(true);
+    setDlLabel("下载中…");
+    try {
+      const result = await downloadMedia(playUrl, title || "视频", (p) => {
+        const pct = downloadPercent(p);
+        setDlLabel(pct != null ? `下载中 ${pct}%` : `下载中 ${downloadMB(p.downloaded)}`);
+      });
+      setDlDone(result);
+      setDlLabel("已下载 · 分享");
+      toast(result.live
+        ? `已保存当前直播片段（约 ${Math.round(result.durationSec ?? 0)} 秒），点“已下载 · 分享”可存到文件`
+        : "已下载，点“已下载 · 分享”可存到文件");
+    } catch (error) {
+      setDlLabel("下载");
+      toast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDlActive(false);
+    }
   };
 
 
@@ -407,15 +445,17 @@ export default function Feed({media, position, active=true, preparing=false, err
       <label>播放速度<select aria-label="播放速度" value={rate} onChange={e=>setRate(Number(e.target.value))}>{[.5,.75,1,1.25,1.5,2].map(v=><option key={v} value={v}>{v}×{v===1?" · 正常":""}</option>)}</select></label>
       <label>音量<input aria-label="音量" type="range" min="0" max="1" step=".01" value={muted?0:volume} onChange={e=>{setMuted(false);setVolume(Number(e.target.value));}}/></label>
       {platform === "ios" && <label>播放内核<select aria-label="播放内核" value={playbackEngine} onChange={e=>setPlaybackEngine(e.target.value as PlaybackEngine)}>{(["webview","avplayer","mdk","ksplayer","mpv","auto"] as const).map(engine=><option key={engine} value={engine}>{playbackEngineLabel(engine)}</option>)}</select></label>}
+      <label>画面设置<select aria-label="画面设置" value={pictureMode} onChange={e=>setPictureMode(e.target.value as PictureMode)}><option value="fit">适应</option><option value="stretch">拉伸</option><option value="fill">铺满</option><option value="16:9">16:9</option><option value="4:3">4:3</option></select></label>
       {platform === "ios" && playbackEngine !== "webview" && <button onClick={()=>{setPanel(null);void openNative();}}><IPlayF size={19}/>原生播放</button>}
       <button onClick={()=>{setPanel(null);void togglePip();}}><IPip size={19}/>画中画</button>
       <button onClick={()=>{setPanel(null);lockControls();}}><ILockF size={18}/>锁定播放控制</button>
+      {isTauri() && playUrl && <button onClick={()=>{void startDownload();}} disabled={dlActive}><IDownload size={19}/>{dlLabel}</button>}
       <details><summary>操作说明</summary><p>{isDesktop ? "空格 播放/暂停 · ← → 快退/快进 · M 静音 · F 全屏 · E 选集" : "单击显示/隐藏控制 · 双击播放/暂停 · 横滑调整进度 · 长按临时倍速 · 双指缩放画面"}</p></details>
       {onBack&&<button onClick={onBack}><IBack size={19}/>退出播放</button>}
     </div> : panel === "info" ? <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-3"><span className="text-[13px] text-mut">分辨率</span><span className="text-[13px] font-semibold text-on tabular-nums">{vsize.w > 0 && vsize.h > 0 ? formatResolution(vsize.w, vsize.h) : "分辨率未知"}</span></div>
       <div className="flex items-center justify-between gap-3"><span className="text-[13px] text-mut">格式</span><span className="text-[13px] font-semibold text-on">{mediaFormatLabel}</span></div>
-      <div className="flex flex-col items-start gap-2"><span className="text-[13px] text-mut">资源播放地址</span><span className="text-[12px] text-on break-all">{playUrl ?? "暂无播放地址"}</span><button onClick={() => { void copyPlayUrl(); }} disabled={!playUrl} className="mt-1 px-4 py-1.5 rounded-full text-[12.5px] font-semibold pressable disabled:opacity-40">复制播放地址</button></div>
+      <div className="flex flex-col items-start gap-2"><span className="text-[13px] text-mut">资源播放地址</span><span className="text-[12px] text-on break-all">{playUrl ?? "暂无播放地址"}</span><button onClick={() => { void copyPlayUrl(); }} disabled={!playUrl} className="mt-1 px-4 py-1.5 rounded-full text-[12.5px] font-semibold pressable disabled:opacity-40">复制播放地址</button>{isTauri() && <button onClick={() => { void startDownload(); }} disabled={!playUrl || dlActive} className="mt-1 px-4 py-1.5 rounded-full text-[12.5px] font-semibold pressable disabled:opacity-40">{dlLabel}</button>}</div>
     </div> : panels[panel]}
     {panel==="playback"&&media?.playback.subtitles?.some(t=>t.format==="vtt")&&<label className="flex flex-col gap-2 mt-4">字幕<select aria-label="字幕" value={subtitle} onChange={e=>{const n=Number(e.target.value);setSubtitle(n);const v=videoRef.current?.el();if(v)Array.from(v.textTracks).forEach((t,i)=>{t.mode=i===n?"showing":"disabled";});}}><option value={-1}>字幕关闭</option>{media.playback.subtitles.filter(t=>t.format==="vtt").map((t,i)=><option key={t.url} value={i}>{t.label||t.language||`字幕 ${i+1}`}</option>)}</select></label>}
   </div></>;
@@ -727,11 +767,14 @@ export default function Feed({media, position, active=true, preparing=false, err
     } catch { toast("画中画开启失败", "info"); }
   };
 
-  const effectiveFit: "contain" | "cover" = isDesktop
-    ? "contain"
-    : isLandscapeVideo
-      ? (fs || vpLandscape ? "contain" : portraitFit)
-      : (vpLandscape ? "contain" : "cover");
+  /* 画面设置（更多播放选项 → 画面设置，默认适应）：适应 = 原来的自动逻辑
+     （横屏/全屏完整显示，竖屏看横屏视频默认完整显示，竖屏视频竖屏看铺满）；
+     拉伸 = 拉满（fill，画面变形）；铺满 = 裁切铺满（cover）；16:9 / 4:3 =
+     按比例裁切显示（cover + 画面框定死比例，见 VideoSurface 的 aspect）。 */
+  const effectiveFit: "contain" | "cover" | "fill" =
+    pictureMode === "stretch" ? "fill"
+    : pictureMode === "fill" || pictureMode === "16:9" || pictureMode === "4:3" ? "cover"
+    : (isDesktop || isLandscapeVideo || vpLandscape ? "contain" : "cover");
 
   return (
     <div className="hg-swipe-viewport absolute inset-0 overflow-hidden bg-black">
@@ -781,6 +824,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                       volume={volume}
                       rate={effRate}
                       fit={effectiveFit}
+                      aspect={pictureMode === "16:9" ? "16:9" : pictureMode === "4:3" ? "4:3" : null}
                       scale={zoom.scale}
                       panX={zoom.x}
                       panY={zoom.y}
@@ -815,22 +859,38 @@ export default function Feed({media, position, active=true, preparing=false, err
                       <div className="mt-2 h-1.5 w-40 rounded-full bg-white/20 overflow-hidden"><div className="h-full rounded-full bg-white" style={{ width: `${Math.round(adjustIndicator.value * 100)}%` }} /></div>
                     </div>
                   )}
-                  {/* 详情页角标（仅 iOS）：分辨率在左、当前播放内核在右，与 3 秒角标
-                      同款式，位置同样在标题栏下方（顶边 + 安全区 + 96px），左右
-                      按横向安全区留白。显隐跟控制条同显同隐，起播/切集后的 3 秒
-                      窗口内也短暂显示一次。 */}
+                  {/* 详情页角标（仅 iOS）：竖屏时分辨率在左、当前播放内核在右；
+                      横屏时分辨率改到播放内核上面（右侧上下叠放）——用户
+                      2026-11-22 09:45 要求；横屏左边的角标还会被左沿裁掉
+                      （--sal 是 0），叠到右边也顺带避开了。与 3 秒角标同款式，
+                      位置同样在标题栏下方（顶边 + 安全区 + 96px），左右按横向
+                      安全区留白。显隐跟控制条同显同隐，起播/切集后的 3 秒窗口
+                      内也短暂显示一次。 */}
                   {platform === "ios" && !preview && playUrl && vsize.w > 0 && vsize.h > 0 && detailBadgesVisible && (
                     <div className="absolute inset-x-0 z-20 pointer-events-none" style={{ top: "calc(var(--sat, 0px) + 96px)" }}>
-                      <div className="flex items-start justify-between" style={{ paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
-                        <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
-                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
-                          {formatResolution(vsize.w, vsize.h)}
-                        </span>
-                        <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
-                          style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
-                          {playbackEngineLabel(playbackEngine)}
-                        </span>
-                      </div>
+                      {vpLandscape ? (
+                        <div className="flex flex-col items-end gap-2" style={{ paddingRight: "var(--sar, 12px)" }}>
+                          <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
+                            style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                            {formatResolution(vsize.w, vsize.h)}
+                          </span>
+                          <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
+                            style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                            {playbackEngineLabel(playbackEngine)}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between" style={{ paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }}>
+                          <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink tabular-nums backdrop-blur-md"
+                            style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                            {formatResolution(vsize.w, vsize.h)}
+                          </span>
+                          <span className="rounded-full px-3 py-2 text-[13px] font-bold hg-ink backdrop-blur-md"
+                            style={{ background: "rgba(0,0,0,.55)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.12)" }}>
+                            {playbackEngineLabel(playbackEngine)}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
                   {/* 首页清屏信息浮层（仅 iOS 预览卡片）：清屏时双击唤醒。左为分辨率
@@ -1015,7 +1075,8 @@ export default function Feed({media, position, active=true, preparing=false, err
                   style={{ background: "linear-gradient(0deg, rgba(8,11,15,.86) 0, rgba(11,14,20,.18) 26%, transparent 48%)" }} />
               )}
 
-              {/* 竖屏下观看横屏视频：快捷「放大铺满 / 完整显示 / 全屏横屏」与双指缩放复位胶囊 */}
+              {/* 竖屏下观看横屏视频：快捷「放大铺满 / 完整显示」与双指缩放复位胶囊
+                  （v0.0.32：横屏全屏按钮已拿掉——竖屏详情页里点它没反应） */}
               {isActive && !fs && !clean && !isDesktop && ((!preview && isLandscapeVideo) || zoom.scale > 1.05) && (
                 <div
                   className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2"
@@ -1027,23 +1088,17 @@ export default function Feed({media, position, active=true, preparing=false, err
                         onClick={() => {
                           if (zoom.scale > 1.05) {
                             setZoom({ scale: 1, x: 0, y: 0, gesturing: false });
-                            setPortraitFit("contain");
+                            setPictureMode("fit");
                           } else {
-                            setPortraitFit((f) => (f === "contain" ? "cover" : "contain"));
+                            setPictureMode((m) => (m === "fit" ? "fill" : "fit"));
                           }
                         }}
                         className="hg-chip-strong backdrop-blur-md px-3 h-7 rounded-full text-[11.5px] font-semibold flex items-center gap-1.5 pressable elev-1">
                         {zoom.scale > 1.05
                           ? `还原缩放 (${zoom.scale.toFixed(1)}x)`
-                          : portraitFit === "contain"
+                          : pictureMode === "fit"
                             ? "放大铺满"
                             : "完整适应"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={enterFs}
-                        className="hg-chip-strong backdrop-blur-md px-3 h-7 rounded-full text-[11.5px] font-semibold flex items-center gap-1 pressable elev-1">
-                        <IExpand size={12} />横屏全屏
                       </button>
                     </>
                   )}
@@ -1109,10 +1164,14 @@ export default function Feed({media, position, active=true, preparing=false, err
         />
       )}
 
-      {/* 影片信息面板横屏时内容右移 330px：横屏下弹层是全宽的，内容贴左沿、
-          用户要求移到截图红框位置（红框左沿约 330px）；只动 info 面板，
-          其他面板与竖屏不受影响。 */}
-      {isDesktop ? <div className={`desktop-dock-panel ${panel ? "is-open" : ""}`}><div className="desktop-dock-inner">{panelContent}</div></div> : <Sheet open={!!panel && active} z="z-[60]" onClose={() => setPanel(null)}><div role="dialog" aria-modal="true" aria-label="播放面板" className="hg-player-sheet flex flex-col" style={panel === "info" && vpLandscape ? { paddingLeft: 330 } : undefined}>{panelContent}</div></Sheet>}
+      {/* 播放面板横屏时内容左右留白：横屏下弹层是全宽的，面板内容
+          （标题、选集按钮、快捷入口、播放速度行）贴左右沿，刘海会挡住
+          （13 Pro Max 录像 2026-11-22 09:52：选集“1”按钮与更多面板标题
+          都在左沿 20px 处，正落在刘海区）。横屏时弹层 div 左右各加
+          --sal/--sar（v0.0.32 起横屏兜底 44px，见 index.css），面板
+          自身 20px 内边距还在，内容离边约 64pt，左右都避开刘海；info
+          面板左沿仍保持 330px（v0.0.29），只补右边。竖屏与桌面不受影响。 */}
+      {isDesktop ? <div className={`desktop-dock-panel ${panel ? "is-open" : ""}`}><div className="desktop-dock-inner">{panelContent}</div></div> : <Sheet open={!!panel && active} z="z-[60]" onClose={() => setPanel(null)}><div role="dialog" aria-modal="true" aria-label="播放面板" className="hg-player-sheet flex flex-col" style={vpLandscape ? (panel === "info" ? { paddingLeft: 330, paddingRight: "var(--sar, 12px)" } : { paddingLeft: "var(--sal, 12px)", paddingRight: "var(--sar, 12px)" }) : undefined}>{panelContent}</div></Sheet>}
       </div>
       {hint&&<div role="status" className="absolute top-1/3 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-black/70 text-white text-xs pointer-events-none">{hint}</div>}
       {controlsLocked && <PlaybackLock active={active} onUnlock={() => { setControlsLocked(false); wake(); }} />}

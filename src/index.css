@@ -184,6 +184,25 @@ input[type="range"].hg-range::-webkit-slider-thumb { -webkit-appearance: none; w
 
 /* ——— Windows 无边框窗口 ——— */
 .win-root { background: var(--p-canvas); }
+
+/* ——— 移动端安全区（原在 App.tsx 行内样式，v0.0.32 起放这里）———
+   横屏时左右安全区在本机 WKWebView 里 env() 是 0（13 Pro Max 实测，
+   见 native-players.md 首页浮层一节），贴边内容会被刘海挡住，所以
+   iOS 横屏时左右按系统横屏安全区 44px 兜底，不再信 env()；竖屏保持
+   12px。orientation 媒体查询随旋转实时生效，不用等 React 重渲染。
+   Android 保持原样（只搬定义，不改值）。 */
+.plat-ios.win-root, .plat-android.win-root {
+  --sat: max(env(safe-area-inset-top), 12px);
+  --sab: min(max(env(safe-area-inset-bottom), 0px), 48px);
+  --sal: max(env(safe-area-inset-left), 12px);
+  --sar: max(env(safe-area-inset-right), 12px);
+}
+@media (orientation: landscape) {
+  .plat-ios.win-root {
+    --sal: max(env(safe-area-inset-left), 44px);
+    --sar: max(env(safe-area-inset-right), 44px);
+  }
+}
 /* height 改动时同步 src-tauri/src/macos_titlebar.rs 的 TITLEBAR_HEIGHT（macOS 红绿灯据此垂直居中） */
 .win-titlebar {
   height: 44px; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 14px;
