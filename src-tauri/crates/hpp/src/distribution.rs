@@ -1,6 +1,5 @@
 //! Distribution is a host operation. Downloads never inherit a plugin's credentials.
 use super::*;
-use std::path::Path;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -309,7 +308,13 @@ impl PluginManager {
             })
         } else {
             use std::io::Read;
-            let path = Path::new(location).canonicalize()?;
+            // 选择器返回的是 file:// 地址（iOS 上常见），先转成本地路径再读；
+            // 直接把地址当路径拼会 canonicalize 失败，报找不到文件。
+            let path = Url::parse(location)
+                .ok()
+                .and_then(|u| u.to_file_path().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from(location));
+            let path = path.canonicalize()?;
             let mut bytes = vec![];
             std::fs::File::open(&path)?
                 .take((JS_LIMIT + 1) as u64)

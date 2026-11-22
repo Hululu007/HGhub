@@ -53,20 +53,119 @@ pub async fn pick_plugin_directory(app: tauri::AppHandle) -> Result<Value> {
     }
 }
 
+/// 选择器返回的地址可能是 tmp 中转文件（iOS 上从别处打开的文件先落在
+/// tmp/...-Inbox），也可能在选择器关闭后失效；选完立刻拷进应用自己的
+/// plugin-imports 目录再返回，后面的预览与安装读的都是这份拷贝。
+const STAGE_LIMIT: usize = 2 * 1024 * 1024; // 与 hpp 的 JS_LIMIT 一致
+const STAGE_KEEP_SECS: u64 = 7 * 24 * 3600;
+
 #[tauri::command]
 pub async fn pick_plugin_files(app: tauri::AppHandle) -> Result<Vec<String>> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
+        let picked = app
+            .dialog()
             .file()
             .add_filter("HPP 插件或列表", &["js", "mjs", "json"])
             .blocking_pick_files()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|file| Ok(file.to_string()))
-            .collect()
+            .unwrap_or_default();
+        if picked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let staging = stage_dir(&app)?;
+        prune_staging(&staging);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut out = Vec::new();
+        for (i, file) in picked.into_iter().enumerate() {
+            let bytes = read_picked(&app, &file)?;
+            let name = staged_name(&file.to_string(), i, stamp);
+            let target = staging.join(name);
+            std::fs::write(&target, &bytes).map_err(|e| {
+                hghub_hpp::PluginError::internal(format!("无法暂存所选文件：{e}"))
+            })?;
+            out.push(target.to_string_lossy().into_owned());
+        }
+        Ok(out)
     })
     .await
     .map_err(|_| hghub_hpp::PluginError::internal("无法打开文件选择器"))?
+}
+
+fn stage_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| hghub_hpp::PluginError::internal("无法确定应用数据目录"))?
+        .join("plugin-imports");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| hghub_hpp::PluginError::internal(format!("无法创建导入暂存目录：{e}")))?;
+    Ok(dir)
+}
+
+fn prune_staging(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let Some(cutoff) =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(STAGE_KEEP_SECS))
+    else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t < cutoff)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn staged_name(location: &str, index: usize, stamp: u128) -> String {
+    let last = location.rsplit('/').next().unwrap_or("").trim();
+    let last = if last.is_empty() { "plugin.js" } else { last };
+    let (stem, ext) = match last.rfind('.') {
+        Some(i) if i > 0 => (&last[..i], &last[i + 1..]),
+        _ => (last, "js"),
+    };
+    let safe: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{safe}-{stamp}-{index}.{ext}")
+}
+
+fn read_picked(app: &tauri::AppHandle, file: &tauri_plugin_fs::FilePath) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    let mut options = tauri_plugin_fs::OpenOptions::new();
+    options.read(true);
+    let opened = app.fs().open(file.clone(), options).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            hghub_hpp::PluginError::invalid("文件已不存在，请重新打开附件再导入")
+        } else {
+            hghub_hpp::PluginError::internal(format!("无法读取所选文件：{e}"))
+        }
+    })?;
+    opened
+        .take((STAGE_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| hghub_hpp::PluginError::internal(format!("无法读取所选文件：{e}")))?;
+    if bytes.len() > STAGE_LIMIT {
+        return Err(hghub_hpp::PluginError::invalid("插件文件超过 2 MiB"));
+    }
+    Ok(bytes)
 }
 
 pub struct PluginHost {

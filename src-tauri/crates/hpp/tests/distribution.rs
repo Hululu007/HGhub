@@ -589,3 +589,24 @@ async fn update_url_precedes_manifest_identity_mismatch_and_download_cancellatio
     assert_eq!(manager.list().await.len(), 1);
     server.abort();
 }
+
+#[tokio::test]
+async fn file_url_preview_reads_local_plugin() {
+    // 选择器返回 file:// 地址时，预览要按本地路径读到文件（不是报找不到文件）。
+    let dir = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    std::fs::write(files.path().join("demo.js"), SOURCE).unwrap();
+    let location = format!(
+        "file://{}",
+        files.path().join("demo.js").to_string_lossy()
+    );
+    let manager = PluginManager::open(dir.path().into()).unwrap();
+    let preview = manager
+        .preview_import(vec![location], "file-url-preview")
+        .await
+        .unwrap();
+    assert_eq!(preview.items.len(), 1);
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    assert_eq!(preview.items[0].id, "fixture.source");
+    assert_eq!(preview.items[0].name, "虚构影视源");
+}
