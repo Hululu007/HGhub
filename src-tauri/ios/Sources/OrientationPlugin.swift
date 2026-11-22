@@ -116,6 +116,13 @@ public class OrientationPlugin: Plugin {
 /// 数字是否与系统值一致）。
 private var volumeView: MPVolumeView?
 
+/* 最近一次写的值（2 秒内有效）：系统音量读回有滞后——刚用滑块写完，
+   outputVolume 可能还是旧值；连续快滑时按读回值加增量会互相抵消，
+   看着就像没反应甚至反了。亮度读回是同步的，也走同一份基准，保持
+   两路行为一致。超过 2 秒没调就重新读（音量键改过的值不会一直盖住）。 */
+private var lastBrightness: (value: Double, at: Date)?
+private var lastVolume: (value: Double, at: Date)?
+
 private func volumeSlider() -> UISlider? {
   if volumeView == nil {
     let v = MPVolumeView(frame: CGRect(x: -100, y: -100, width: 1, height: 1))
@@ -138,8 +145,12 @@ private func volumeSlider() -> UISlider? {
   }
   let args = try invoke.parseArgs(AdjustArgs.self)
   DispatchQueue.main.async {
-    let current = Double(UIScreen.main.brightness)
-    let next = min(1.0, max(0.05, current + args.delta))
+    let now = Date()
+    let base: Double
+    if let last = self.lastBrightness, now.timeIntervalSince(last.at) < 2.0 { base = last.value }
+    else { base = Double(UIScreen.main.brightness) }
+    let next = min(1.0, max(0.05, base + args.delta))
+    self.lastBrightness = (next, now)
     UIScreen.main.brightness = CGFloat(next)
     invoke.resolve(["value": next])
   }
@@ -151,12 +162,16 @@ private func volumeSlider() -> UISlider? {
   }
   let args = try invoke.parseArgs(AdjustArgs.self)
   DispatchQueue.main.async {
-    let current = Double(AVAudioSession.sharedInstance().outputVolume)
-    let next = min(1.0, max(0.0, current + args.delta))
+    let now = Date()
+    let base: Double
+    if let last = self.lastVolume, now.timeIntervalSince(last.at) < 2.0 { base = last.value }
+    else { base = Double(AVAudioSession.sharedInstance().outputVolume) }
+    let next = min(1.0, max(0.0, base + args.delta))
     guard let slider = self.volumeSlider() else {
       invoke.reject("找不到系统音量滑块")
       return
     }
+    self.lastVolume = (next, now)
     slider.value = Float(next)
     slider.sendActions(for: .valueChanged)
     invoke.resolve(["value": next])

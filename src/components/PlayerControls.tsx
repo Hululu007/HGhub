@@ -56,6 +56,25 @@ export default function PlayerControls({
   return (
     <div ref={boxRef} className={`desktop-controls ${mobile?"hg-mobile-controls":""} ${fullscreen ? "is-fullscreen" : ""} ${visible ? "" : "is-hidden"}`}
       onPointerDown={(e) => e.stopPropagation()}>
+      {mobile ? <>
+        <div className="hg-mobile-seek-row">
+          {onPrevious && <button className="hg-mobile-episode" aria-label="上一集" disabled={!onPrevious} onClick={onPrevious}><INext size={18} className="rotate-180" /></button>}
+          <div className={`desktop-seek ${seekEnabled ? "is-seekable" : ""}`}>
+            <div className="desktop-seek-track">
+              <span className="desktop-seek-buffer" style={{ width: `${Math.min(1, buffered) * 100}%` }} />
+              <span className="desktop-seek-played" style={{ width: `${pct}%` }} />
+            </div>
+            <input aria-label="播放进度" type="range" {...seek.inputProps} />
+          </div>
+          {onNext && <button className="hg-mobile-episode" aria-label={nextTitle} disabled={nextDisabled} onClick={onNext}><INext size={18} strokeWidth={1.7} /></button>}
+        </div>
+        <div className="hg-mobile-control-row">
+          <span className="hg-mobile-time">{clock(seek.time)}</span>
+          <span className="hg-mobile-time dim">/ {clock(duration)}</span>
+          <span className="hg-mobile-spacer" />
+          <button aria-label="锁定播放控制" onClick={onLock}><ILockF size={22}/></button>{onRotate&&<button aria-label="旋转屏幕" onClick={onRotate}><IRotate size={22}/></button>}<button aria-label="全屏" onClick={onFullscreen}><IExpand size={24}/></button>
+        </div>
+      </> : <>
       {!mobile&&<div className="hg-player-times"><span>{clock(seek.time)}</span><span>{clock(duration)}</span></div>}
       <div className={`desktop-seek ${seekEnabled ? "is-seekable" : ""}`}>
         <div className="desktop-seek-track">
@@ -65,7 +84,7 @@ export default function PlayerControls({
         <input aria-label="播放进度" type="range" {...seek.inputProps} />
       </div>
 
-      {mobile ? <div className="hg-mobile-control-row"><button aria-label="锁定播放控制" onClick={onLock}><ILockF size={22}/></button>{onRotate&&<button aria-label="旋转屏幕" onClick={onRotate}><IRotate size={22}/></button>}<button aria-label="全屏" onClick={onFullscreen}><IExpand size={24}/></button></div> : <div className="desktop-control-row">
+      <div className="desktop-control-row">
         {(onEpisodes || onPrevious) && <button className="player-control" aria-label="上一集" data-tooltip="上一集 PageUp" disabled={!onPrevious} onClick={onPrevious}><INext size={18} className="rotate-180"/></button>}
         <button className="player-control primary-play" aria-label={paused ? "播放" : "暂停"} data-tooltip={paused ? "播放 Space" : "暂停 Space"} onClick={onToggle}>
           {paused ? <IPlayF size={19} /> : <IPauseF size={18} />}
@@ -111,7 +130,7 @@ export default function PlayerControls({
           {fullscreen ? <ICompress size={19} strokeWidth={1.6} /> : <IExpand size={19} strokeWidth={1.6} />}
         </button>
         <button className="player-control" aria-label="更多" data-tooltip="更多" onClick={onMore}><IMore size={22}/></button>
-      </div>}
+      </div></>}
     </div>
   );
 }

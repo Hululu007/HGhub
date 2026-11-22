@@ -25,7 +25,7 @@ import { IMore, IHeart, IHeartF, IPip, IBack, IBoltF, IChevR, IChevronDown, IChe
 export type PlayerPanel = "detail" | "episodes" | "comments" | "playback";
 type SurfacePanel = PlayerPanel | "more" | "info" | "downloads";
 export interface FeedPresentation {
-  playIntent?: number; mode?: "preview" | "full"; onOpenDetail?: () => void;
+  playIntent?: number; mode?: "preview" | "full"; onOpenDetail?: () => void; onOpenDetailFromStart?: () => void;
   title?: string; author?: string; description?: string; score?: number; poster?: string;
   episodeLabel?: string; qualityLabel?: string; episodeCount?: number; favorite?: boolean; onFavorite?: () => void;
   panels?: Partial<Record<PlayerPanel, ReactNode>>; social?: ReactNode;
@@ -44,7 +44,7 @@ export interface FeedProps extends FeedPresentation {
  * Plugin adapters own metadata, sessions and persistence; this component owns presentation. */
 export default function Feed({media, position, active=true, preparing=false, error="", onRetry, onPosition, onFailure, onPlaying, onStopped, onEnded, onBuffer, onWaiting,
  title="", author="", description="", score, poster:posterUrl, episodeLabel="", qualityLabel, episodeCount=0, favorite=false, onFavorite,
- playIntent=0, mode="full", onOpenDetail, panels={}, social, onPanelChange, onBack, onNext, onPrevious, onNextEpisode, onPreviousEpisode, queueIndex=0, total=1, previousPreview, nextPreview}: FeedProps) {
+ playIntent=0, mode="full", onOpenDetail, onOpenDetailFromStart, panels={}, social, onPanelChange, onBack, onNext, onPrevious, onNextEpisode, onPreviousEpisode, queueIndex=0, total=1, previousPreview, nextPreview}: FeedProps) {
   const store=useStore(), {muted,setMuted,volume,setVolume,playbackEngine,setPlaybackEngine,pictureMode,setPictureMode}=store;
   const activeRef = useRef(active); activeRef.current = active;
   const isDesktop=!isMobile, preview=mode==="preview";
@@ -176,20 +176,31 @@ export default function Feed({media, position, active=true, preparing=false, err
   } | null>(null);
 
   /* 详情页左右竖滑调亮度/音量（仅 iOS 原生应用）：左半屏亮度、右半屏音量，
-     上滑增大；指示条显示调完后的值，停 1 秒后收起。调用串行化（上一
-     次调完再调下一次），避免并发读到的旧值互相覆盖。 */
+     上滑增大；指示条显示调完后的值，停 1 秒后收起。同一路的增量先攒
+     着、一次原生调用只发合并后的值（快滑时调用排队会跟不上手指），
+     两路互不干扰；原生侧以最近一次写的值为基准（系统音量读回有滞后，
+     按读回值加增量会互相抵消，见 OrientationPlugin）。 */
   const [adjustIndicator, setAdjustIndicator] = useState<{ kind: "brightness" | "volume"; value: number } | null>(null);
-  const adjustChain = useRef(Promise.resolve());
   const adjustTimer = useRef(0);
+  const adjustPending = useRef({ brightness: 0, volume: 0 });
+  const adjustRunning = useRef({ brightness: false, volume: false });
   const adjustBy = (kind: "brightness" | "volume" | null, delta: number) => {
     if (!kind || !Number.isFinite(delta) || delta === 0) return;
-    adjustChain.current = adjustChain.current.then(async () => {
-      const value = kind === "brightness" ? await adjustBrightness(delta) : await adjustVolume(delta);
-      if (value == null) return;
-      setAdjustIndicator({ kind, value });
-      window.clearTimeout(adjustTimer.current);
-      adjustTimer.current = window.setTimeout(() => setAdjustIndicator(null), 1000);
-    }).catch(() => {});
+    adjustPending.current[kind] += delta;
+    if (adjustRunning.current[kind]) return;
+    adjustRunning.current[kind] = true;
+    void (async () => {
+      while (Math.abs(adjustPending.current[kind]) > 1e-9) {
+        const d = adjustPending.current[kind];
+        adjustPending.current[kind] = 0;
+        const value = kind === "brightness" ? await adjustBrightness(d) : await adjustVolume(d);
+        if (value == null) break;
+        setAdjustIndicator({ kind, value });
+        window.clearTimeout(adjustTimer.current);
+        adjustTimer.current = window.setTimeout(() => setAdjustIndicator(null), 1000);
+      }
+      adjustRunning.current[kind] = false;
+    })().catch(() => { adjustRunning.current[kind] = false; });
   };
 
   /* 倍速：长按 / 锁定 → 2.0x，否则用基准倍速 */
@@ -659,6 +670,27 @@ export default function Feed({media, position, active=true, preparing=false, err
 
     /* 长按中：上滑 64px 进入「松开即锁定」 */
     if (g.mode === "hold") {
+      /* 按住 380ms 后才开始竖滑：此前直接没反应（hold 只认上滑锁定）。
+         竖滑超过 32px 就改走正常竖滑手势：详情页进亮度/音量调节，
+         首页进切视频。代价：长按后上滑锁定 2x 的手势没了（长按本身
+         仍是临时 2x；要锁 2x 可再加按钮）。 */
+      const vDy = e.clientY - g.startY;
+      const vDx = e.clientX - g.startX;
+      if (Math.abs(vDy) > 32 && Math.abs(vDy) > Math.abs(vDx) * 1.5) {
+        holdRef.current = false;
+        setHoldSpeed(false);
+        lockArmedRef.current = false;
+        setLockArmed(false);
+        if (!preview && platform === "ios" && isTauri()) {
+          g.mode = "adjust";
+          g.adjustKind = g.startX < window.innerWidth / 2 ? "brightness" : "volume";
+          g.lastY = e.clientY;
+        } else {
+          g.mode = "pan";
+          swipe.move(vDy, boxRef.current?.clientHeight || window.innerHeight);
+        }
+        return;
+      }
       const upDist = g.startY - e.clientY;
       const armed = upDist > 64;
       if (armed !== lockArmedRef.current) {
@@ -669,7 +701,7 @@ export default function Feed({media, position, active=true, preparing=false, err
     }
 
     if (g.mode === "idle") {
-      if (Math.abs(dx) > 16 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      if (Math.abs(dx) > 16 && Math.abs(dx) > Math.abs(dy) * 2) {
         clearTapTimer();
         if (g.timer) window.clearTimeout(g.timer);
         g.mode = "scrub";
@@ -731,6 +763,17 @@ export default function Feed({media, position, active=true, preparing=false, err
       const target = scrubTarget.current;
       setScrub(null);
       scrubTarget.current = null;
+      /* 首页预览：向左快滑进详情页、从第一集播；慢拖仍是定位。
+         只认速度（> 0.55 px/ms，取自竖滑切视频同一阈值），不认
+         距离——慢拖 100px 也必须还是定位，不能误进详情页。 */
+      if (preview && !cancelled && e) {
+        const dx = e.clientX - g.startX;
+        const dt = Date.now() - g.t;
+        if (dx < -32 && Math.abs(dx) / Math.max(1, dt) > 0.55) {
+          if (onOpenDetailFromStart) onOpenDetailFromStart(); else showDetails();
+          return;
+        }
+      }
       if (!cancelled && target != null) {
         setErr("");
         setTime(target);
@@ -1229,7 +1272,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                 </div>
                 <div className="hg-preview-copy"><h1>{title}</h1><div className="hg-preview-meta"><span>{author}</span>{score!==undefined&&<strong>评分 {score.toFixed(1)}</strong>}</div><button onClick={showDetails} className="hg-preview-synopsis"><span>{description || "发现下一部值得看的故事"}</span><b>展开</b></button></div>
                 <div className="hg-preview-footer"><button className="hg-preview-watch" onClick={showDetails}><IPlayF size={17}/><span>观看完整作品{episodeCount ? ` · 共 ${episodeCount} 集` : ""}</span><IChevR size={20}/></button>
-                  <input aria-label="预览进度" type="range" min={0} max={duration||1} step=".1" disabled={!duration} value={Math.min(time,duration||1)} onChange={e=>{videoRef.current?.seek(Number(e.target.value));setTime(Number(e.target.value));}} style={{"--progress":`${barProgress*100}%`} as React.CSSProperties}/>
+                  <div className="hg-preview-progress"><span>{fmtTime(time)}</span><input aria-label="预览进度" type="range" min={0} max={duration||1} step=".1" disabled={!duration} value={Math.min(time,duration||1)} onChange={e=>{videoRef.current?.seek(Number(e.target.value));setTime(Number(e.target.value));}} style={{"--progress":`${barProgress*100}%`} as React.CSSProperties}/><span>{fmtTime(duration)}</span></div>
                 </div>
                 {isDesktop&&<div className="hg-preview-pager"><button aria-label="上一个" disabled={!onPrevious} onClick={()=>go(-1)}><IChevronUp size={20}/></button><button aria-label="下一个" disabled={!onNext} onClick={()=>go(1)}><IChevronDown size={20}/></button><small>{queueIndex+1} / {total}</small></div>}
               </>}

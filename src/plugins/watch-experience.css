@@ -30,6 +30,9 @@
 .hg-preview-watch>span{flex:1}
 .hg-preview-watch>svg:last-child{color:#fff8}
 .hg-preview-footer input{display:block;width:100%;height:28px;appearance:none;background:transparent;cursor:pointer;accent-color:#fff}
+.hg-preview-progress{display:flex;align-items:center;gap:10px}
+.hg-preview-progress span{font-size:11px;color:#ffffffb0;font-variant-numeric:tabular-nums;flex-shrink:0}
+.hg-preview-footer .hg-preview-progress input{flex:1;min-width:0;width:auto}
 .hg-preview-footer input::-webkit-slider-runnable-track{height:3px;border-radius:3px;background:linear-gradient(to right,#eee var(--progress),#ffffff30 var(--progress))}
 .hg-preview-footer input::-webkit-slider-thumb{appearance:none;width:7px;height:7px;border-radius:50%;background:#fff;margin-top:-2px}
 .hg-preview-footer input::-moz-range-track{height:3px;background:#ffffff30}
@@ -117,10 +120,16 @@
 .hg-detail-secondary .hpp-interactions{margin:12px 0;display:flex;gap:12px;flex-wrap:wrap}
 .hg-detail-error{font-size:12px;line-height:1.7;padding:12px;border-radius:10px;background:var(--p-s3)}
 .hg-detail-error button{color:var(--p-primary);margin-top:6px}
-.hg-mobile-controls{display:flex;align-items:center;gap:20px}
-.hg-mobile-controls .desktop-seek{flex:1}
-.hg-mobile-control-row{display:flex;gap:16px}
+.hg-mobile-controls{display:flex;flex-direction:column;align-items:stretch;gap:2px}
+.hg-mobile-controls .desktop-seek{flex:1;min-width:0}
+.hg-mobile-seek-row{display:flex;align-items:center;gap:10px}
+.hg-mobile-episode{display:grid;place-items:center;width:36px;height:44px;color:#fffb;flex-shrink:0}
+.hg-mobile-episode:disabled{opacity:.3}
+.hg-mobile-control-row{display:flex;align-items:center;gap:8px;width:100%}
 .hg-mobile-control-row button{display:grid;place-items:center;width:36px;height:44px;color:#fffb}
+.hg-mobile-time{font-size:11.5px;font-weight:600;color:#ffffffc8;font-variant-numeric:tabular-nums;flex-shrink:0}
+.hg-mobile-time.dim{color:#ffffff66}
+.hg-mobile-spacer{flex:1}
 .plat-macos .hg-watch-heading{padding-left:88px}
 .plat-android .hg-preview-heading,.plat-ios .hg-preview-heading{padding:calc(var(--sat,0px) + 16px) 20px 20px}
 .plat-android .hg-preview-copy,.plat-ios .hg-preview-copy{left:20px;right:80px;bottom:116px}

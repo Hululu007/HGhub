@@ -59,6 +59,15 @@ export default function PluginMediaDetail({ plugin, mediaId, onBack, manage, act
     leaveRef.current(); return true;
   }); }, [fullPlayback, active]);
   const openDetail = () => { setNeedsDetail(true); setDetailOpen(true); };
+  /* 首页左滑进详情页：从第一集开始播（不是断点续播那集）。列表已
+     在手上时直接切第一集；还没回来时只进详情页（与点“观看完整作品”
+     一样），分集到了用户再点第一集。 */
+  const openDetailFromStart = () => {
+    setNeedsDetail(true); setDetailOpen(true);
+    const list = detail?.playlists[0];
+    const first = list?.episodes[0];
+    if (first && !first.locked && current.current?.ep.id !== first.id) void play(first, "play", list.id);
+  };
   const [playlist, setPlaylist] = useState(""), [episode, setEpisode] = useState<Episode | null>(null);
   const [media, setMedia] = useState<PreparedMedia | null>(null), [busy, setBusy] = useState(false);
   const [choices, setChoices] = useState<PreparedMedia["choices"] | null>(null);
@@ -378,7 +387,7 @@ export default function PluginMediaDetail({ plugin, mediaId, onBack, manage, act
   return <div className={`legacy-media-page ${fullPlayback ? "hg-watching" : homePreview ? "hg-discovering" : "hg-detail-entry"}`}>
     {active && !busy && choices?.external && <div className="absolute inset-x-4 top-4 z-50"><ExternalPlayback key={choices.external.url} target={choices.external}/></div>}
     {playbackRequested &&
-    <PluginPlayer {...presentation} playIntent={playIntent} mode={fullPlayback ? "full" : "preview"} onOpenDetail={openDetail} media={canPlay?media:null} preparing={busy && (transitioning.current || !media)} active={active && !detailOpen && !transitioning.current} position={position.current} error={error} onRetry={refresh}
+    <PluginPlayer {...presentation} playIntent={playIntent} mode={fullPlayback ? "full" : "preview"} onOpenDetail={openDetail} onOpenDetailFromStart={openDetailFromStart} media={canPlay?media:null} preparing={busy && (transitioning.current || !media)} active={active && !detailOpen && !transitioning.current} position={position.current} error={error} onRetry={refresh}
       previousPreview={fullPlayback ? previousEpisode ? {title:previousEpisode.label || '上一集',poster} : undefined : presentation.previousPreview}
       nextPreview={fullPlayback ? nextEpisode ? {title:nextEpisode.label || '下一集',poster} : undefined : presentation.nextPreview}
       onPanelChange={panel=>{if(panel==='detail'||panel==='episodes')setNeedsDetail(true);}}
