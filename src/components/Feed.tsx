@@ -330,36 +330,76 @@ export default function Feed({media, position, active=true, preparing=false, err
     } catch { toast("复制失败"); }
   };
 
-  /* 资源下载（更多播放选项 / 影片信息里的“下载”按钮）：经回环地址取流存到
+  /* 资源下载（更多播放选项 / 影片信息 / 播放器上的“下载”按钮）：经回环地址取流存到
      文稿/Downloads，直链文件直接存，HLS 拼分片；直播只存当前窗口的片段。
      下载中按钮显示进度，完成后变“已下载 · 分享”，点按弹系统分享面
-     （可存到“文件”、发到微信等）。切集后状态复位。仅 App 内可用。 */
+     （可存到“文件”、发到微信等）。切集后状态复位。仅 App 内可用。
+     播放地址有有效期（expiresAt），播着播着过期时取流会报“已失效”
+     （410/401）：这时按协议 09 §5 触发一次刷新（onRetry → media.refresh），
+     新地址到后用新地址重下一次；重下仍失败才提示用户重试。 */
   const [dlActive, setDlActive] = useState(false);
   const [dlLabel, setDlLabel] = useState("下载");
   const [dlDone, setDlDone] = useState<DownloadResult | null>(null);
-  useEffect(() => { setDlActive(false); setDlLabel("下载"); setDlDone(null); }, [playKey]);
+  // 地址过期时等刷新后重下：存下要重下的分集（sessionId）与标题。
+  const dlRetryRef = useRef<{ sessionId: string; title: string } | null>(null);
+  const dlRetryTimerRef = useRef<number | null>(null);
+  const runDownload = async (url: string, name: string) => {
+    const result = await downloadMedia(url, name, (p) => {
+      const pct = downloadPercent(p);
+      setDlLabel(pct != null ? `下载中 ${pct}%` : `下载中 ${downloadMB(p.downloaded)}`);
+    });
+    setDlDone(result);
+    setDlLabel("已下载 · 分享");
+    toast(result.live
+      ? `已保存当前直播片段（约 ${Math.round(result.durationSec ?? 0)} 秒），点“已下载 · 分享”可存到文件`
+      : "已下载，点“已下载 · 分享”可存到文件");
+    return result;
+  };
+  // 切集/刷新后下载状态复位；若正等刷新后重下（同分集、新版本），则用新地址重下。
+  useEffect(() => {
+    const retry = dlRetryRef.current;
+    if (retry && media && media.sessionId === retry.sessionId && playUrl) {
+      dlRetryRef.current = null;
+      if (dlRetryTimerRef.current) { window.clearTimeout(dlRetryTimerRef.current); dlRetryTimerRef.current = null; }
+      setDlLabel("下载中…");
+      void runDownload(playUrl, retry.title).catch((error) => {
+        setDlLabel("下载");
+        toast(error instanceof Error ? error.message : String(error));
+      }).finally(() => setDlActive(false));
+      return;
+    }
+    if (retry) dlRetryRef.current = null; // 切到别的分集，取消待重下
+    setDlActive(false); setDlLabel("下载"); setDlDone(null);
+  }, [playKey]);
   const startDownload = async () => {
     if (dlDone) {
       try { await shareDownloadedFile(dlDone.path); } catch { toast("分享失败"); }
       return;
     }
-    if (!playUrl || dlActive) return;
+    if (!playUrl || dlActive || !media) return;
     setDlActive(true);
     setDlLabel("下载中…");
     try {
-      const result = await downloadMedia(playUrl, title || "视频", (p) => {
-        const pct = downloadPercent(p);
-        setDlLabel(pct != null ? `下载中 ${pct}%` : `下载中 ${downloadMB(p.downloaded)}`);
-      });
-      setDlDone(result);
-      setDlLabel("已下载 · 分享");
-      toast(result.live
-        ? `已保存当前直播片段（约 ${Math.round(result.durationSec ?? 0)} 秒），点“已下载 · 分享”可存到文件`
-        : "已下载，点“已下载 · 分享”可存到文件");
+      await runDownload(playUrl, title || "视频");
+      setDlActive(false);
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // 地址过期（410/401）：刷新播放地址后用新地址重下一次。刷新由父组件
+      // 的 onRetry 完成（media.refresh），新地址到后上面的 effect 会重下。
+      if (msg.includes("已失效") && onRetry && !dlRetryRef.current) {
+        dlRetryRef.current = { sessionId: media.sessionId, title: title || "视频" };
+        setDlLabel("刷新地址…");
+        if (dlRetryTimerRef.current) window.clearTimeout(dlRetryTimerRef.current);
+        dlRetryTimerRef.current = window.setTimeout(() => {
+          dlRetryRef.current = null;
+          setDlActive(false); setDlLabel("下载");
+          toast("刷新地址超时，请重新播放后再下载");
+        }, 20000);
+        onRetry();
+        return;
+      }
       setDlLabel("下载");
-      toast(error instanceof Error ? error.message : String(error));
-    } finally {
+      toast(msg);
       setDlActive(false);
     }
   };
@@ -998,6 +1038,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                           <ILockF size={17} />
                         </button>
                         <button aria-label="选集" onClick={()=>setPanel("episodes")} className="hg-chip-strong w-9 h-9 rounded-full flex items-center justify-center"><IList size={18}/></button>
+                        {isTauri() && playUrl && <button aria-label={dlDone ? "已下载 · 分享" : "下载"} onClick={()=>{void startDownload();}} disabled={dlActive} className="hg-chip-strong w-9 h-9 rounded-full flex items-center justify-center disabled:opacity-40"><IDownload size={18}/></button>}
                         <button aria-label="更多" onClick={()=>setPanel("more")} className="hg-chip-strong w-9 h-9 rounded-full flex items-center justify-center"><IMore size={18}/></button>
                         <button onClick={exitFs} aria-label="退出全屏"
                           className="hg-chip-strong w-9 h-9 rounded-full backdrop-blur-md flex items-center justify-center pressable elev-1">
@@ -1130,7 +1171,7 @@ export default function Feed({media, position, active=true, preparing=false, err
                 onMouseDown={e=>{if(isDesktop&&e.button===0&&!(e.target as HTMLElement).closest("button,input,select,a")){e.preventDefault();const win=getCurrentWindow();void (e.detail===2?win.toggleMaximize():win.startDragging()).catch(()=>{});}}}>
                 {onBack&&<button aria-label="返回" onClick={onBack}><IBack size={22}/></button>}
                 <div className="hg-watch-title"><h1>{title}</h1><p>{episodeLabel ? `${/^第/.test(episodeLabel)?episodeLabel:`第 ${episodeLabel} 集`}${episodeCount?` / 共 ${episodeCount} 集`:""}` : author}{qualityLabel ? ` · ${qualityLabel}` : ""}</p></div>
-                {!isDesktop&&<><button aria-label={muted?"取消静音":"静音"} onClick={()=>setMuted(v=>!v)}>{muted?<IVolMute size={23}/>:<IVol size={23}/>}</button>{panels.episodes&&<button aria-label="选集" onClick={()=>setPanel("episodes")}><IList size={24}/></button>}<button aria-label="更多" onClick={()=>setPanel("more")}><IMore size={24}/></button></>}
+                {!isDesktop&&<><button aria-label={muted?"取消静音":"静音"} onClick={()=>setMuted(v=>!v)}>{muted?<IVolMute size={23}/>:<IVol size={23}/>}</button>{panels.episodes&&<button aria-label="选集" onClick={()=>setPanel("episodes")}><IList size={24}/></button>}{isTauri() && playUrl && <button aria-label={dlDone ? "已下载 · 分享" : "下载"} onClick={()=>{void startDownload();}} disabled={dlActive}><IDownload size={23}/></button>}<button aria-label="更多" onClick={()=>setPanel("more")}><IMore size={24}/></button></>}
                 {isDesktop&&store.watching&&<PlaybackWindowActions/>}
               </header>}
             </section>
