@@ -84,6 +84,8 @@
     openKeep: function () { return post("app.openKeep", {}); },
     openSetting: function () { return post("app.openSetting", {}); },
     history: function () { return post("app.history", {}); },
+    webhomeSources: function () { return post("app.webhomeSources", {}); },
+    openWebhome: function (pluginId) { return post("app.openWebhome", { pluginId: pluginId }); },
   };
   var nav = {
     back: function () { return post("navigation.back", {}); },
@@ -172,18 +174,121 @@
   window.webhome = window.fm;
   window.fongmiClient = { mode: "webhome", isLeanback: false };
 
-  // 退出按钮：WebHome 窗口是独立 WebView，页面自己的返回关不掉它。
-  var btn = document.createElement("button");
-  btn.id = "hg-webhome-close";
-  btn.type = "button";
-  btn.setAttribute("aria-label", "关闭");
-  btn.textContent = "×";
-  btn.style.cssText = "position:fixed;top:max(12px, env(safe-area-inset-top));right:12px;z-index:2147483647;width:32px;height:32px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:20px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;";
-  btn.addEventListener("click", function () { closeWindow(); });
-  (document.body || document.documentElement).appendChild(btn);
+  // 小房子：WebHome 窗口的源切换与关闭控件（04 §14、08 §10）。
+  // 平时只在右边中部露出一个“‹”；点它展开成 🏠；点 🏠 弹出源面板
+  // （列已装的 WebHome 源，点一个切过去，下面一行“关闭”回主界面）；
+  // 几秒不用自动收回右边。窗口常驻不销毁，× 由此控件代替。
+  var houseTab = document.createElement("button");
+  houseTab.id = "hg-webhome-tab";
+  houseTab.type = "button";
+  houseTab.setAttribute("aria-label", "展开");
+  houseTab.textContent = "‹";
+  houseTab.style.cssText = "position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483647;width:18px;height:48px;border:none;border-radius:8px 0 0 8px;background:rgba(0,0,0,.55);color:#fff;font-size:18px;line-height:1;padding:0;cursor:pointer;";
+  var houseBtn = document.createElement("button");
+  houseBtn.id = "hg-webhome-btn";
+  houseBtn.type = "button";
+  houseBtn.setAttribute("aria-label", "源切换");
+  houseBtn.textContent = "🏠";
+  houseBtn.style.cssText = "position:fixed;right:8px;top:50%;transform:translateY(-50%);z-index:2147483647;width:40px;height:40px;border:none;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:19px;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;";
+  var housePanel = document.createElement("div");
+  housePanel.id = "hg-webhome-panel";
+  housePanel.style.cssText = "position:fixed;right:56px;top:50%;transform:translateY(-50%);z-index:2147483647;width:230px;max-height:60vh;overflow-y:auto;border-radius:12px;background:rgba(20,20,24,.92);color:#fff;box-shadow:0 4px 24px rgba(0,0,0,.4);padding:6px;display:none;";
+  var houseErr = document.createElement("div");
+  houseErr.style.cssText = "display:none;padding:6px 10px;color:#ff8a80;font-size:12px;line-height:1.4;";
+  var houseTimer = null;
+  var houseRoot = document.body || document.documentElement;
+  houseRoot.appendChild(houseTab);
+  houseRoot.appendChild(houseBtn);
+  houseRoot.appendChild(housePanel);
+  function houseCollapse() {
+    houseTimer = null;
+    housePanel.style.display = "none";
+    houseBtn.style.display = "none";
+    houseTab.style.display = "";
+  }
+  function houseArm() {
+    if (houseTimer) clearTimeout(houseTimer);
+    houseTimer = setTimeout(houseCollapse, 4000);
+  }
+  function houseShowError(msg) {
+    houseErr.textContent = msg;
+    houseErr.style.display = "";
+  }
+  function houseRow(label, opts) {
+    var row = document.createElement("button");
+    row.type = "button";
+    row.textContent = label;
+    row.style.cssText = "display:block;width:100%;text-align:left;border:none;background:transparent;color:#fff;font-size:14px;line-height:1.3;padding:10px;border-bottom:1px solid rgba(255,255,255,.08);cursor:pointer;";
+    if (opts && opts.disabled) {
+      row.disabled = true;
+      row.style.opacity = ".45";
+      row.style.cursor = "default";
+    }
+    return row;
+  }
+  function houseOpenPanel() {
+    housePanel.style.display = "block";
+    housePanel.innerHTML = "";
+    houseErr.style.display = "none";
+    houseErr.textContent = "";
+    var loading = houseRow("加载中…", { disabled: true });
+    housePanel.appendChild(loading);
+    housePanel.appendChild(houseErr);
+    houseArm();
+    post("app.webhomeSources", {}).then(function (sources) {
+      housePanel.innerHTML = "";
+      (sources || []).forEach(function (s) {
+        var row = houseRow(s.name + (s.current ? " · 当前" : ""), { disabled: !s.ready });
+        if (!s.current) {
+          row.addEventListener("click", function () {
+            houseArm();
+            post("app.openWebhome", { pluginId: s.id }).catch(function (e) {
+              houseShowError(e && e.message ? e.message : "切换失败");
+            });
+          });
+        }
+        housePanel.appendChild(row);
+      });
+      var closeRow = houseRow("关闭");
+      closeRow.style.borderBottom = "none";
+      closeRow.addEventListener("click", function () { closeWindow(); });
+      housePanel.appendChild(closeRow);
+      housePanel.appendChild(houseErr);
+    }).catch(function (e) {
+      houseShowError(e && e.message ? e.message : "加载失败");
+    });
+  }
+  houseTab.addEventListener("click", function () {
+    houseTab.style.display = "none";
+    houseBtn.style.display = "flex";
+    houseArm();
+  });
+  houseBtn.addEventListener("click", function () {
+    if (housePanel.style.display === "block") {
+      housePanel.style.display = "none";
+      houseArm();
+    } else {
+      houseOpenPanel();
+    }
+  });
+  // 点面板外面只收起面板，小房子留着，4 秒后自己收回。
+  document.addEventListener("click", function (e) {
+    if (housePanel.style.display !== "block") return;
+    var t = e.target;
+    if (housePanel.contains(t) || houseBtn.contains(t)) return;
+    housePanel.style.display = "none";
+    houseArm();
+  }, true);
   window.__hgWebHome = {
     setToolbar: function (visible) {
-      btn.style.display = visible ? "" : "none";
+      if (visible === false) {
+        if (houseTimer) { clearTimeout(houseTimer); houseTimer = null; }
+        houseTab.style.display = "none";
+        houseBtn.style.display = "none";
+        housePanel.style.display = "none";
+      } else {
+        houseCollapse();
+      }
     },
   };
 

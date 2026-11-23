@@ -99,6 +99,30 @@ async fn webhome_cache_round_trip() {
 }
 
 #[tokio::test]
+async fn webhome_sources_and_open() {
+    let (_dir, manager) = host().await;
+    let sources = value(call(&manager, "app.webhomeSources", json!({})).await);
+    let list = sources.as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"], ID);
+    assert_eq!(list[0]["name"], "虚构 WebHome 源");
+    assert_eq!(list[0]["current"], true);
+    assert_eq!(list[0]["ready"], true);
+    match call(
+        &manager,
+        "app.openWebhome",
+        json!({ "pluginId": "other.webhome" }),
+    )
+    .await
+    {
+        webhome::Outcome::OpenWebhome(id) => assert_eq!(id, "other.webhome"),
+        _ => panic!("openWebhome should switch sources"),
+    }
+    let missing = webhome::dispatch(&manager, ID, "app.openWebhome", json!({}), state()).await;
+    assert!(missing.is_err(), "openWebhome without pluginId must fail");
+}
+
+#[tokio::test]
 async fn webhome_direct_play_and_unknown() {
     let (_dir, manager) = host().await;
     match call(

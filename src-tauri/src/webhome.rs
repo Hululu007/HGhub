@@ -50,10 +50,21 @@ pub async fn open_webhome(
     state: State<'_, WebHomeState>,
     plugin_id: String,
 ) -> Result<Value, String> {
+    open_webhome_inner(&app, &host, &state, plugin_id).await
+}
+
+/// 打开 / 换源的共用实现：主窗口的 open_webhome 命令与 WebHome 窗口里
+/// 小房子面板的 app.openWebhome 都走这里，不复制第二份逻辑。
+async fn open_webhome_inner(
+    app: &AppHandle,
+    host: &PluginHost,
+    state: &WebHomeState,
+    plugin_id: String,
+) -> Result<Value, String> {
     // 整个打开过程串行化：两次打开不能交错（建窗与导航、写 session
     // 之间不能插进另一次打开），否则窗口与 session 会对不上。
     let _open_guard = state.open_lock.lock().await;
-    let manager = host.manager(&app).await.map_err(err)?;
+    let manager = host.manager(app).await.map_err(err)?;
     let meta = manager.meta(&plugin_id).await.map_err(err)?;
     // 远程用 homePage；本地页面用当前回环地址（端口每次启动都变，现算）。
     let home_page = hghub_hpp::media::MediaSessions::webhome_page_url(&manager, &plugin_id)
@@ -85,7 +96,7 @@ pub async fn open_webhome(
     }
     // 窗口不存在才建新窗。建窗仍撞 label 说明有窗口存在但前面没认
     // 出来，聚焦它只会重现“打开了却什么都没出现”的静默失败；直接报出来。
-    let window = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::External(home_page.parse().map_err(err)?))
+    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(home_page.parse().map_err(err)?))
         .title(meta.name.clone())
         .initialization_script(SDK)
         .build()
@@ -175,6 +186,11 @@ pub async fn webhome_call(
                 .map_err(err)?;
             }
             Ok(json!({ "code": 0 }))
+        }
+        Outcome::OpenWebhome(target_id) => {
+            // 小房子面板切源：与主窗口的 open_webhome 同一条复用逻辑
+            //（窗口已存在就导航，窗口不存在才建新窗）。
+            open_webhome_inner(&app, &host, &state, target_id).await
         }
         Outcome::OpenLive => {
             if let Some(main) = main {

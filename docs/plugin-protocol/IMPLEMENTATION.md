@@ -108,6 +108,11 @@ WebHome（HTML 源）v1 已落地：`meta.webhome` 声明与 `webhome: {}` 能�
 hpp 有 5 个 WebHome 集成测试通过；`hg.env.features` 含 `"webhome"`。
 iOS 上第二个 WebView 窗口尚未真机验证，是 v1 的主要待验收项。
 
+v0.0.66 窗口里的 × 换成小房子控件：平时右边中部只露出一个“‹”，点它展开
+成 🏠，再点弹出源面板（`app.webhomeSources` 列源、`app.openWebhome` 切源、
+“关闭”隐藏窗口）；几秒不用自动收回右边。`ui.setToolbar` 控制的是小房子
+控件的显隐。
+
 v0.0.48 支持直接导入 HTML 文件为 WebHome 源：导入时按内容识别（不认扩展名），
 远程 HTML 的 `meta.webhome.homePage` 就是原地址，页面留在远端；本地 HTML 文件存进
 插件目录，`meta.webhome.localPage` 记文件名，打开时宿主用回环地址（`/webhome/:id`，

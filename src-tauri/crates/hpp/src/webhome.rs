@@ -27,6 +27,8 @@ pub enum Outcome {
     OpenSetting,
     /// 切换 WebHome 窗口的关闭按钮显隐。
     SetToolbar(bool),
+    /// 切换到另一 WebHome 源：宿主复用窗口（导航 + 更新 session），见 08 §10。
+    OpenWebhome(String),
 }
 
 fn text<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
@@ -216,6 +218,21 @@ pub async fn dispatch(
         }
         "ext.toast" => Outcome::Toast(text(p, "message")?.into()),
         "ui.setToolbar" => Outcome::SetToolbar(p["visible"].as_bool().unwrap_or(true)),
+        "app.webhomeSources" => {
+            let mut sources = vec![];
+            for info in manager.list().await {
+                if info.meta.webhome.is_some() {
+                    sources.push(json!({
+                        "id": info.meta.id,
+                        "name": info.meta.name,
+                        "current": info.meta.id == plugin_id,
+                        "ready": info.enabled && info.status == "ready",
+                    }));
+                }
+            }
+            Outcome::Value(json!(sources))
+        }
+        "app.openWebhome" => Outcome::OpenWebhome(text(p, "pluginId")?.to_string()),
         "app.openLive" => Outcome::OpenLive,
         "app.openKeep" => Outcome::OpenKeep,
         "app.openSetting" => Outcome::OpenSetting,
