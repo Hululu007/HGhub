@@ -206,6 +206,7 @@ interface Cookie {
 - `set` 省略 domain 时绑定 URL 的主机；给出 domain 时默认非 host-only，可显式设为 true 限定该主机。
 - `hg.http.fetch` 自动保存响应的 `Set-Cookie` 并在后续请求中附加，除非 `credentials: "omit"`。
 - 机器人管理 Cookie `__cf_bm` 例外：挑战页发的它只在当次挑战有效，宿主不保存、也不在后续请求中附加（存下来再发只会让上游一直重新挑战）；加载时罐子里残留的也一并清掉。
+- WebView clearance 拿到的通行证 `cf_clearance` 例外：宿主只认 WebView 挑战通过后从浏览器 Cookie 存储里读出的这一个，只在内存里按插件保存（不落盘、不进 Cookie 罐），WebHome 插件的 net 请求按目标主机匹配后附加（`credentials: "omit"` 时不带；已有同名 Cookie 不重复带）；`__cf_bm` 绝不进这份内存存储。
 - 会话 Cookie 在插件卸载后**保留**（插件随时可能被卸载，不能以此模拟浏览器会话结束）；
   插件登出或用户清除数据时清空。
 

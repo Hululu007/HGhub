@@ -1,4 +1,5 @@
 mod commands;
+mod clearance;
 mod download;
 pub mod fmp4;
 mod logging;

@@ -2,6 +2,7 @@ use crate::{
     model::{self, Meta},
     native::Logs,
     network::Network,
+    network::ClearanceCookie,
     node::{NodeBootstrap, UnavailableNode},
     python::{PyWorker, PythonBootstrap, RuntimeWorker, UnavailablePython},
     runtime::{self, Worker},
@@ -976,6 +977,12 @@ impl PluginManager {
             return Err(PluginError::new("UNSUPPORTED", "插件已停用"));
         }
         Ok(p.network.clone())
+    }
+    /// WebView clearance 拿到的通行证存到该插件的内存存储（v0.0.77）：
+    /// 只认 `cf_clearance`，不落盘、不进 Cookie 罐。
+    pub async fn set_clearance(&self, id: &str, cookie: ClearanceCookie) -> Result<()> {
+        self.network(id).await?.set_clearance(cookie);
+        Ok(())
     }
     /// WebHome 缓存与插件共用同一份存储（store.rs），不是另一份副本。
     pub(crate) async fn store(&self, id: &str) -> Result<Arc<Store>> {

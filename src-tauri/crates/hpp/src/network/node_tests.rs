@@ -339,3 +339,135 @@ async fn node_restart_on_new_port_retries_request() {
     server_b.shutdown().await;
     upstream_server.abort();
 }
+
+/// v0.0.77：WebView clearance 通行证只认 `cf_clearance`；过期不带；
+/// `credentials: omit` 时不带；已有 Cookie 头时追加、不重复。
+fn clearance_fixture() -> ClearanceCookie {
+    ClearanceCookie {
+        name: "cf_clearance".into(),
+        value: "abc123".into(),
+        domain: "127.0.0.1".into(),
+        path: "/".into(),
+        // mock 上游是 http：Secure 的通行证按浏览器规则不能发给 http
+        // 目标，真站点的 cf_clearance 本来就是 Secure 的（配 https 用）。
+        secure: false,
+        http_only: false,
+        expires_at: None,
+    }
+}
+
+async fn fetch_cookie_seen_by_node(
+    network: &Arc<Network>,
+    node: &Arc<MockNode>,
+    url: &str,
+    extra: Value,
+) -> Value {
+    let mut req = json!({"url": url, "responseType": "text"});
+    if let Some(o) = extra.as_object() {
+        for (k, v) in o {
+            req[k] = v.clone();
+        }
+    }
+    network
+        .fetch(Transfer::from_json(req), CancellationToken::new())
+        .await
+        .unwrap();
+    node.last.lock().unwrap().clone().unwrap()["headers"]["cookie"].clone()
+}
+
+#[tokio::test]
+async fn clearance_cookie_attached_to_node_requests() {
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    network.set_clearance(clearance_fixture());
+    let cookie =
+        fetch_cookie_seen_by_node(&network, &node, &format!("{upstream}/x"), json!({})).await;
+    assert_eq!(cookie, json!("cf_clearance=abc123"));
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn clearance_cookie_expired_or_bot_or_omitted_is_not_attached() {
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    // 过期的通行证不带。
+    let mut expired = clearance_fixture();
+    expired.expires_at = Some(now().saturating_sub(1000));
+    network.set_clearance(expired);
+    let cookie =
+        fetch_cookie_seen_by_node(&network, &node, &format!("{upstream}/x"), json!({})).await;
+    assert_eq!(cookie, Value::Null);
+    // `__cf_bm` 不收进内存存储（v0.0.75 的教训），所以也带不出去。
+    let mut bot = clearance_fixture();
+    bot.name = "__cf_bm".into();
+    network.set_clearance(bot);
+    let cookie =
+        fetch_cookie_seen_by_node(&network, &node, &format!("{upstream}/x"), json!({})).await;
+    assert_eq!(cookie, Value::Null);
+    // Secure 的通行证不发给 http 目标（浏览器同款规则）。
+    let mut secure = clearance_fixture();
+    secure.secure = true;
+    network.set_clearance(secure);
+    let cookie =
+        fetch_cookie_seen_by_node(&network, &node, &format!("{upstream}/x"), json!({})).await;
+    assert_eq!(cookie, Value::Null);
+    // credentials: omit 时连通行证也不带（与罐子同一门禁）。
+    network.set_clearance(clearance_fixture());
+    let cookie = fetch_cookie_seen_by_node(
+        &network,
+        &node,
+        &format!("{upstream}/x"),
+        json!({"credentials": "omit"}),
+    )
+    .await;
+    assert_eq!(cookie, Value::Null);
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn clearance_cookie_appends_to_existing_cookie_header() {
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    network.set_clearance(clearance_fixture());
+    let cookie = fetch_cookie_seen_by_node(
+        &network,
+        &node,
+        &format!("{upstream}/x"),
+        json!({"headers": {"cookie": "session=xyz"}}),
+    )
+    .await;
+    assert_eq!(cookie, json!("session=xyz; cf_clearance=abc123"));
+    // 已有同名 Cookie 时不重复带。
+    let cookie = fetch_cookie_seen_by_node(
+        &network,
+        &node,
+        &format!("{upstream}/x"),
+        json!({"headers": {"cookie": "cf_clearance=from-page"}}),
+    )
+    .await;
+    assert_eq!(cookie, json!("cf_clearance=from-page"));
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[test]
+fn looks_like_challenge_matches_cloudflare_markers() {
+    // v0.0.77：与页面 `_getInner` 同一组标记（另加拦截页常见的两项）。
+    assert!(looks_like_challenge("<title>Just a moment...</title>"));
+    assert!(looks_like_challenge("Attention Required! | Cloudflare"));
+    assert!(looks_like_challenge("cf-browser-verification"));
+    assert!(looks_like_challenge("Access Denied"));
+    assert!(looks_like_challenge("var _cf_chl_opt={cvId:'2'}"));
+    // 正常页面不误判。
+    assert!(!looks_like_challenge("<html><body>hello</body></html>"));
+    assert!(!looks_like_challenge(""));
+    assert!(!looks_like_challenge(r#"{"code":0,"data":[]}"#));
+}

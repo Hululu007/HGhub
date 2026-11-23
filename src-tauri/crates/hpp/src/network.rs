@@ -54,6 +54,34 @@ struct CookieJars {
 /// （见 docs/developers/node-engine.md §7）
 const BOT_MANAGEMENT_COOKIE: &str = "__cf_bm";
 
+/// WebView clearance 拿到的通行证 Cookie 名：内存存储只认这一个；
+/// `__cf_bm` 绝不进这份存储（v0.0.75 的教训）。
+const CLEARANCE_COOKIE: &str = "cf_clearance";
+
+/// WebView clearance 拿到的通行证（v0.0.77）：只在内存里保存，不落盘、
+/// 不进 Cookie 罐；域名/路径/过期按普通 Cookie 规则匹配，过期即失效。
+#[derive(Clone, Debug)]
+pub struct ClearanceCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub expires_at: Option<u64>,
+}
+
+/// 响应体是不是 Cloudflare 拦截页：页面 `_getInner` 用的同一组标记
+/// （`just a moment` / `cf-browser` / `access denied`），另加拦截页
+/// 常见的 `attention required` 与挑战表单标记 `cf_chl`。只做子串匹配，
+/// 不解析 HTML——拦截页是 HTTP 200，状态码分不出来。
+pub fn looks_like_challenge(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["just a moment", "cf-browser", "access denied", "attention required", "cf_chl"]
+        .iter()
+        .any(|m| lower.contains(m))
+}
+
 impl CookieJars {
     fn len(&self) -> usize {
         self.ordinary.len()
@@ -95,6 +123,9 @@ pub struct Network {
     node_bootstrap: Mutex<Arc<dyn NodeBootstrap>>,
     /// 已建好的 Node 边车客户端（地址可能换端口，重探后换新）。
     node_client: Mutex<Option<Arc<NodeClient>>>,
+    /// WebView clearance 拿到的通行证（v0.0.77）：只在内存里按插件
+    /// 保存，不落盘、不进 Cookie 罐；`__cf_bm` 绝不进这里。
+    clearance: Mutex<Vec<SavedCookie>>,
 }
 #[derive(Clone)]
 struct RedactedSetCookie;
@@ -149,6 +180,7 @@ impl Network {
             cooldown,
             node_bootstrap: Mutex::new(node_bootstrap),
             node_client: Default::default(),
+            clearance: Default::default(),
         };
         if purged > 0 {
             let jars = this.jar.lock().unwrap().clone();
@@ -161,6 +193,62 @@ impl Network {
     pub fn set_node_bootstrap(&self, bootstrap: Arc<dyn NodeBootstrap>) {
         *self.node_bootstrap.lock().unwrap() = bootstrap;
         *self.node_client.lock().unwrap() = None;
+    }
+    /// 存入 WebView clearance 拿到的通行证（v0.0.77）：只认
+    /// `cf_clearance`，其他名字（包括 `__cf_bm`）一律不收；过期
+    /// （或已过期）的不要。只在内存里保存，不落盘、不进 Cookie 罐。
+    pub fn set_clearance(&self, cookie: ClearanceCookie) {
+        if !cookie.name.eq_ignore_ascii_case(CLEARANCE_COOKIE) {
+            return;
+        }
+        let domain = cookie.domain.trim_start_matches('.').to_ascii_lowercase();
+        if domain.is_empty() || cookie.value.is_empty() {
+            return;
+        }
+        if cookie.expires_at.is_some_and(|t| t <= now()) {
+            return;
+        }
+        let c = SavedCookie {
+            name: cookie.name,
+            value: cookie.value,
+            domain,
+            path: if cookie.path.is_empty() {
+                "/".into()
+            } else {
+                cookie.path
+            },
+            host_only: false,
+            // Secure / HttpOnly 取 WebView 里那只 Cookie 自身的属性，
+            // 不硬编码：Secure 的通行证不能发给 http 目标（浏览器同款
+            // 规则；真站点的 cf_clearance 本来就是 Secure 的）。
+            secure: cookie.secure,
+            http_only: cookie.http_only,
+            expires_at: cookie.expires_at,
+        };
+        Self::upsert(&mut self.clearance.lock().unwrap(), c);
+    }
+    /// 匹配目标 URL 的通行证（`name=value` 串，已按路径长度排过序）：
+    /// 请求头里已有同名 Cookie 的不重复带；`__cf_bm` 永不从这里出去。
+    fn clearance_cookies(&self, url: &Url, existing_cookie: Option<&str>) -> String {
+        let present: Vec<&str> = existing_cookie
+            .map(|v| {
+                v.split(';')
+                    .filter_map(|p| p.trim().split('=').next())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let guard = self.clearance.lock().unwrap();
+        let mut matched: Vec<_> = guard.iter().filter(|c| Self::matches(c, url)).collect();
+        matched.sort_by_key(|c| std::cmp::Reverse(c.path.len()));
+        matched
+            .into_iter()
+            .filter(|c| {
+                !c.name.eq_ignore_ascii_case(BOT_MANAGEMENT_COOKIE)
+                    && !present.iter().any(|n| n.eq_ignore_ascii_case(&c.name))
+            })
+            .map(|c| format!("{}={}", c.name, c.value))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
     /// 插件 net 请求走不走 Node 传输（iOS + 引导可用才走）。
     pub(crate) fn node_transport(&self) -> bool {

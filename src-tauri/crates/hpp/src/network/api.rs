@@ -53,6 +53,22 @@ impl Network {
                 HeaderValue::from_str(&cookie).map_err(|_| PluginError::invalid("Cookie 无效"))?,
             );
         }
+        // v0.0.77：WebView clearance 拿到的通行证（只在内存里），按目标
+        // 主机匹配后并进 Cookie 头——已有同名 Cookie 的不重复带；合并
+        // 失败（非法字符）时只放弃附加通行证，不让整个请求失败。
+        if cookies {
+            let existing = headers.get("cookie").and_then(|v| v.to_str().ok());
+            let extra = self.clearance_cookies(&target, existing);
+            if !extra.is_empty() {
+                let merged = match existing {
+                    Some(cur) if !cur.is_empty() => format!("{cur}; {extra}"),
+                    _ => extra,
+                };
+                if let Ok(value) = HeaderValue::from_str(&merged) {
+                    headers.insert("cookie", value);
+                }
+            }
+        }
         // 页面给的 UA 原样发出（哪怕是裸 "Mozilla/5.0"）：插件 net 请求
         // 走 Node 式极简画像（HTTP/1.1、无浏览器头），UA 与画像必须
         // 自洽，不能一边发裸 UA 一边补 Chrome 指纹。
