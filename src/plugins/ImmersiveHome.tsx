@@ -23,7 +23,11 @@ export const playbackSources = (sources: InstalledPlugin[]) => sources.filter(p 
 export default function ImmersiveHome({ open, manage, settings, active = true }: { open: OpenMedia; manage: () => void; settings: () => void; active?: boolean }) {
   const host = useHost(), request = usePluginRequests(), app = useStore();
   const available = playbackSources(host.sources);
-  const chosen = host.prefs.homeMode === "all" ? available : host.prefs.homeIds.flatMap(id => available.find(p => p.meta.id === id) || []).slice(0, host.prefs.homeMode === "single" ? 1 : undefined);
+  // homeIds 指向的源都不在了（重导后 id 变了）时兜底用已装源，不写回 prefs；
+  // homeIds 为空是用户没选的状态，不兜底。
+  const resolved = host.prefs.homeMode === "all" ? available : host.prefs.homeIds.flatMap(id => available.find(p => p.meta.id === id) || []);
+  const fallback = host.prefs.homeMode !== "all" && host.prefs.homeIds.length > 0 && resolved.length === 0 && available.length > 0;
+  const chosen = fallback ? (host.prefs.homeMode === "single" ? available.slice(0, 1) : available) : host.prefs.homeMode === "single" ? resolved.slice(0, 1) : resolved;
   const signature = chosen.map(p => p.meta.id + p.revision).join("|");
   const [queue, setQueue] = useState<QueueItem[]>([]), [index, setIndex] = useState(0), [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({}), [round, setRound] = useState(0);

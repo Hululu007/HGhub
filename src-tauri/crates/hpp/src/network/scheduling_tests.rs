@@ -411,3 +411,34 @@ async fn plugin_method_and_body_limit_boundaries_remain_independent() {
     assert_eq!(first.gate.available_permits(), 6);
     server.abort();
 }
+
+#[test]
+fn webhome_plugin_target_allows_http_plain_plugin_rejects() {
+    let dir = tempfile::tempdir().unwrap();
+    let webhome = Meta::parse(json!({
+        "id": "fixture.webhome",
+        "name": "WebHome",
+        "protocol": 1,
+        "version": "1.0.0",
+        "webhome": {"homePage": "https://example.com/"},
+    }))
+    .unwrap();
+    let network =
+        Network::new(webhome, dir.path().into(), Some(false), Default::default()).unwrap();
+    assert!(network.target("http://example.com/list").is_ok());
+    assert!(network.target("https://example.com/list").is_ok());
+
+    let dir = tempfile::tempdir().unwrap();
+    let plain = Meta::parse(json!({
+        "id": "fixture.plain",
+        "name": "Plain",
+        "protocol": 1,
+        "version": "1.0.0",
+    }))
+    .unwrap();
+    let network =
+        Network::new(plain, dir.path().into(), Some(false), Default::default()).unwrap();
+    let err = network.target("http://example.com/list").unwrap_err();
+    assert_eq!(err.code, "INVALID_ARGUMENT");
+    assert!(network.target("https://example.com/list").is_ok());
+}

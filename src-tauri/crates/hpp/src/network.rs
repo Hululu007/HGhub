@@ -126,7 +126,10 @@ impl Network {
             .unwrap_or_else(network_policy::strict_security)
     }
     pub fn target(&self, raw: &str) -> Result<Url> {
-        crate::model::url(raw, self.meta.allow_insecure_http, false)?;
+        // WebHome 页面是普通网页，其站点可能是 http：带 webhome 声明的
+        // 插件，宿主对其网络请求放行 http；普通插件仍按 allowInsecureHttp 门禁。
+        let allow_http = self.meta.allow_insecure_http || self.meta.webhome.is_some();
+        crate::model::url(raw, allow_http, false)?;
         network_policy::parse_target_with_mode(raw, self.strict())
             .map_err(|e| PluginError::new("NETWORK", e))
     }

@@ -410,7 +410,7 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 
 | 方法 | 行为 |
 | --- | --- |
-| `net.request`（别名 `req`） | 用绑定插件的网络发请求：共享该插件的 Cookie 罐、网络规则与限速；参数与返回值同 `hg.http`（见 §2），`responseType` 默认为文本 |
+| `net.request`（别名 `req`） | 用绑定插件的网络发请求：共享该插件的 Cookie 罐、网络规则与限速；参数与返回值同 `hg.http`（见 §2），`responseType` 默认为文本。带 `meta.webhome` 的插件，其 `net.request` 也允许 `http`（页面站点可能是 http 地址）；没有该声明的插件仍需 `allowInsecureHttp` 才能用 `http` |
 | `net.resourceUrl`（别名 `res`） | v1 返回原地址，不代理图片 |
 | `player.playUrl`（别名 `play`） | 直链播放：宿主为该地址建一个媒体会话（走本地回环代理，请求头与 HLS 改写同普通播放），在主窗口用同一套播放器播出 |
 | `player.playVod` / `player.playVodInline`（别名 `vod` / `vodInline`） | 打开点播详情：宿主调绑定插件的 `media.getDetail`，在主窗口打开详情页；`siteKey` 与绑定插件不一致时抛 `UNSUPPORTED`；v1 两者行为相同 |
