@@ -20,6 +20,19 @@ struct MockNode {
     last: Mutex<Option<Value>>,
     /// 置 true 时 /request 回 500（v0.0.76：测 Node 报错的诊断后缀）。
     fail: AtomicBool,
+    /// v0.0.78：proxyUrl 非空时回的上游状态（Some(502) 模拟代理路
+    /// 502）；None 回 200。
+    proxy_status: Mutex<Option<u16>>,
+    /// v0.0.78：proxyUrl 为空（直连重试）时回的上游状态；None 回 200。
+    direct_status: Mutex<Option<u16>>,
+    /// v0.0.78：proxyUrl 非空时回的边车 500 错误文案（模拟代理握手
+    /// 失败，如“代理拒绝 CONNECT（HTTP 502）”）；None 不触发。
+    proxy_error: Mutex<Option<String>>,
+    /// v0.0.78：proxyUrl 为空时回的边车 500 错误文案；None 不触发。
+    direct_error: Mutex<Option<String>>,
+    /// v0.0.78：每次调用的 proxyUrl（Some=经代理，None=直连），
+    /// 按调用顺序记——断言回落只发生一次且第二跳是直连。
+    proxy_urls: Mutex<Vec<Option<String>>>,
 }
 
 struct MockUpstream {
@@ -54,6 +67,11 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
         calls: AtomicUsize::new(0),
         last: Mutex::new(None),
         fail: AtomicBool::new(false),
+        proxy_status: Default::default(),
+        direct_status: Default::default(),
+        proxy_error: Default::default(),
+        direct_error: Default::default(),
+        proxy_urls: Default::default(),
     });
     let health = state.clone();
     let request = state.clone();
@@ -71,19 +89,47 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
                 let state = request.clone();
                 async move {
                     state.calls.fetch_add(1, Ordering::Relaxed);
-                    *state.last.lock().unwrap() = Some(body);
+                    *state.last.lock().unwrap() = Some(body.clone());
+                    let proxy_url = body
+                        .get("proxyUrl")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    state.proxy_urls.lock().unwrap().push(proxy_url.clone());
                     if state.fail.load(Ordering::Relaxed) {
                         return (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({"error": "mock node down", "code": "NETWORK"})),
                         );
                     }
+                    // v0.0.78：按有没有 proxyUrl 分流——代理路与直连
+                    // 重试可以各自回不同的状态/错误，测窄回落。
+                    let error = if proxy_url.is_some() {
+                        state.proxy_error.lock().unwrap().clone()
+                    } else {
+                        state.direct_error.lock().unwrap().clone()
+                    };
+                    if let Some(msg) = error {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": msg, "code": "NETWORK"})),
+                        );
+                    }
+                    let status = if proxy_url.is_some() {
+                        state.proxy_status.lock().unwrap().unwrap_or(200)
+                    } else {
+                        state.direct_status.lock().unwrap().unwrap_or(200)
+                    };
+                    let text = if status == 200 {
+                        "node-body"
+                    } else {
+                        "bad gateway"
+                    };
                     (
                         axum::http::StatusCode::OK,
                         Json(json!({
-                            "status": 200,
+                            "status": status,
                             "headers": {"content-type": "text/plain", "x-node": "1"},
-                            "bodyBase64": BASE64.encode("node-body"),
+                            "bodyBase64": BASE64.encode(text),
                         })),
                     )
                 }
@@ -470,4 +516,436 @@ fn looks_like_challenge_matches_cloudflare_markers() {
     assert!(!looks_like_challenge("<html><body>hello</body></html>"));
     assert!(!looks_like_challenge(""));
     assert!(!looks_like_challenge(r#"{"code":0,"data":[]}"#));
+}
+
+// ── v0.0.78：窄回落（只在跟随系统模式、只在 Api 的 Node 路径）──
+// mock Node 按有没有 proxyUrl 分流（见 MockNode 的 proxy_status /
+// direct_status / proxy_error / direct_error）；代理决议用
+// `set_proxy_decision` 注入（不改进程全局代理状态）。
+
+async fn fetch_text(network: &Arc<Network>, url: &str) -> Result<Transfer> {
+    network
+        .fetch(
+            Transfer::from_json(json!({"url": url, "responseType": "text"})),
+            CancellationToken::new(),
+        )
+        .await
+}
+
+fn fallback_network(
+    dir: &std::path::Path,
+    node_base: String,
+    mode: crate::proxy::Mode,
+    proxy_url: Option<&str>,
+) -> Arc<Network> {
+    let network = node_network(dir, Arc::new(FixedBootstrap { base: node_base }));
+    network.set_proxy_decision(mode, proxy_url.map(str::to_string));
+    network
+}
+
+#[tokio::test]
+async fn proxy_502_falls_back_to_direct_once() {
+    // 代理路 502 → 直连重试一次，成功正常返回；只调两次，首跳经
+    // 代理、第二跳直连。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("http://127.0.0.1:7890"),
+    );
+    *node.proxy_status.lock().unwrap() = Some(502);
+    let result = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap();
+    assert_eq!(result.json()["data"], json!("node-body"));
+    assert_eq!(
+        node.calls.load(Ordering::Relaxed),
+        2,
+        "代理 502 后应直连重试一次"
+    );
+    assert_eq!(
+        *node.proxy_urls.lock().unwrap(),
+        vec![Some("http://127.0.0.1:7890".to_string()), None],
+        "首跳经代理，第二跳直连"
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn proxy_502_and_direct_502_returns_first_error() {
+    // 直连重试也 502 → 返回首跳（代理）的原始错误，转 UPSTREAM_ERROR，
+    // 消息含状态 + 代理描述 + 解析地址 + 两次结果 + Cookie 名字。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("http://127.0.0.1:7890"),
+    );
+    *node.proxy_status.lock().unwrap() = Some(502);
+    *node.direct_status.lock().unwrap() = Some(502);
+    let err = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "UPSTREAM_ERROR");
+    assert!(
+        err.message.contains("上游返回 HTTP 502"),
+        "应报原始状态：{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("代理: 跟随系统 http://127.0.0.1:7890"),
+        "应带代理描述：{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("解析: 127.0.0.1:"),
+        "应带解析地址：{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("直连重试: 同样 502"),
+        "应带两次尝试结果：{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("Cookie: 未附带"),
+        "应带 Cookie 附带情况：{}",
+        err.message
+    );
+    assert_eq!(err.details.as_ref().unwrap()["status"], 502);
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        *node.proxy_urls.lock().unwrap(),
+        vec![Some("http://127.0.0.1:7890".to_string()), None]
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn proxy_503_returns_upstream_error_with_diagnosis() {
+    // 503 同样转 UPSTREAM_ERROR（不是只报 502）。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("http://127.0.0.1:7890"),
+    );
+    *node.proxy_status.lock().unwrap() = Some(503);
+    *node.direct_status.lock().unwrap() = Some(503);
+    let err = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "UPSTREAM_ERROR");
+    assert!(err.message.contains("上游返回 HTTP 503"), "{}", err.message);
+    assert!(
+        err.message.contains("直连重试: 同样 503"),
+        "{}",
+        err.message
+    );
+    assert_eq!(err.details.as_ref().unwrap()["status"], 503);
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2);
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn custom_proxy_never_falls_back() {
+    // 自定义代理是用户显式路由，不擅自绕过：代理路 502 直接报错，
+    // 只调一次，消息写明未回落的原因。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::Custom,
+        Some("http://127.0.0.1:7890"),
+    );
+    *node.proxy_status.lock().unwrap() = Some(502);
+    let err = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "UPSTREAM_ERROR");
+    assert!(
+        err.message.contains("代理: 自定义 http://127.0.0.1:7890"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("直连重试: 未尝试（自定义代理）"),
+        "{}",
+        err.message
+    );
+    assert_eq!(node.calls.load(Ordering::Relaxed), 1, "自定义代理永不回落");
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn direct_mode_never_falls_back() {
+    // 直连模式无代理可回落：502 直接报错，只调一次。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
+    *node.direct_status.lock().unwrap() = Some(502);
+    let err = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "UPSTREAM_ERROR");
+    assert!(err.message.contains("代理: 直连"), "{}", err.message);
+    assert!(
+        err.message.contains("直连重试: 未尝试（已直连）"),
+        "{}",
+        err.message
+    );
+    assert_eq!(node.calls.load(Ordering::Relaxed), 1, "直连模式无回落");
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn system_without_proxy_never_falls_back() {
+    // 跟随系统但没解析出代理：502 直接报错，只调一次。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::System, None);
+    *node.direct_status.lock().unwrap() = Some(502);
+    let err = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "UPSTREAM_ERROR");
+    assert!(
+        err.message.contains("代理: 跟随系统（无代理）"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("直连重试: 未尝试（无代理）"),
+        "{}",
+        err.message
+    );
+    assert_eq!(node.calls.load(Ordering::Relaxed), 1, "无代理时无回落");
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn proxy_handshake_error_falls_back_to_direct() {
+    // 代理握手失败（CONNECT 被拒）→ 直连重试一次，成功正常返回。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("http://127.0.0.1:7890"),
+    );
+    *node.proxy_error.lock().unwrap() = Some("代理拒绝 CONNECT（HTTP 502）".to_string());
+    let result = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap();
+    assert_eq!(result.json()["data"], json!("node-body"));
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        *node.proxy_urls.lock().unwrap(),
+        vec![Some("http://127.0.0.1:7890".to_string()), None]
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn socks_unreachable_error_falls_back_to_direct() {
+    // SOCKS 连不上代理：host.js 文案是裸 ECONNREFUSED + 代理地址
+    // （不含“代理”二字），靠代理 host 识别，同样回落。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("socks5://127.0.0.1:1080"),
+    );
+    *node.proxy_error.lock().unwrap() = Some("connect ECONNREFUSED 127.0.0.1:1080".to_string());
+    let result = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap();
+    assert_eq!(result.json()["data"], json!("node-body"));
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2);
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn proxy_handshake_error_and_direct_failure_returns_first_error() {
+    // 直连重试也失败（传输层）→ 返回首跳（代理）的原始错误，附
+    // 两次尝试结果。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("http://127.0.0.1:7890"),
+    );
+    *node.proxy_error.lock().unwrap() = Some("代理拒绝 CONNECT（HTTP 502）".to_string());
+    *node.direct_error.lock().unwrap() =
+        Some("connect ECONNREFUSED 93.184.216.34:443".to_string());
+    let err = fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "NETWORK");
+    assert!(
+        err.message.contains("代理拒绝 CONNECT（HTTP 502）"),
+        "应返回首跳原始错误：{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("代理: 跟随系统 http://127.0.0.1:7890"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains("直连重试: 失败：Node 边车请求失败：connect ECONNREFUSED 93.184.216.34:443"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("（解析: 127.0.0.1:"),
+        "{}",
+        err.message
+    );
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2);
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn upstream_error_reports_cookie_names_only() {
+    // Cookie 附带情况只报名字：值绝不进报错。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("http://127.0.0.1:7890"),
+    );
+    *node.proxy_status.lock().unwrap() = Some(502);
+    *node.direct_status.lock().unwrap() = Some(502);
+    let err = network
+        .fetch(
+            Transfer::from_json(json!({
+                "url": format!("{upstream}/x"),
+                "responseType": "text",
+                "headers": {"cookie": "session=xyz; cf_clearance=abc"},
+            })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "UPSTREAM_ERROR");
+    assert!(
+        err.message
+            .contains("Cookie: 已附带（名字：session, cf_clearance）"),
+        "{}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("xyz"),
+        "Cookie 值绝不进报错：{}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("abc"),
+        "Cookie 值绝不进报错：{}",
+        err.message
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn proxy_decision_is_logged_to_ext_log() {
+    // 每次 net.request 的代理决议写进 ext.log（requestId "net"）。
+    let (node_base, _node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(
+        dir.path(),
+        node_base,
+        crate::proxy::Mode::System,
+        Some("http://127.0.0.1:7890"),
+    );
+    let logs: crate::native::Logs = Default::default();
+    network.set_logs(logs.clone());
+    fetch_text(&network, &format!("{upstream}/x"))
+        .await
+        .unwrap();
+    let entries = logs.lock().unwrap().snapshot();
+    let line = entries
+        .iter()
+        .find(|e| e["requestId"] == "net")
+        .expect("应有一条 requestId 为 net 的日志");
+    assert_eq!(line["level"], "info");
+    let text = line["text"].as_str().unwrap();
+    assert!(
+        text.contains("跟随系统 http://127.0.0.1:7890"),
+        "日志应含代理决议：{text}"
+    );
+    assert!(
+        text.contains("目标：127.0.0.1"),
+        "日志应含目标 host：{text}"
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[test]
+fn rate_limit_cooldown_still_written_on_503_error() {
+    // v0.0.78：503 转 UPSTREAM_ERROR 时，Retry-After 冷却仍要落
+    // （协议 03 §3）；502 不写；429 也写。
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(UnavailableNode));
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("60"));
+    network.note_rate_limit("example.com", 503, &headers);
+    assert!(
+        network.cooldown.lock().unwrap().contains_key("example.com"),
+        "503 + Retry-After 应落冷却"
+    );
+    network.note_rate_limit("example.org", 502, &headers);
+    assert!(
+        !network.cooldown.lock().unwrap().contains_key("example.org"),
+        "502 不落冷却"
+    );
+    network.note_rate_limit("example.net", 429, &headers);
+    assert!(
+        network.cooldown.lock().unwrap().contains_key("example.net"),
+        "429 + Retry-After 应落冷却"
+    );
+    // Retry-After 缺失或非法时不写。
+    network.note_rate_limit("example.io", 503, &HeaderMap::new());
+    assert!(
+        !network.cooldown.lock().unwrap().contains_key("example.io"),
+        "无 Retry-After 时不落冷却"
+    );
 }

@@ -1,5 +1,6 @@
 use crate::{
     model::Meta,
+    native::Logs,
     network_policy,
     node::{NodeBootstrap, NodeClient},
     store::{atomic_write, now},
@@ -126,6 +127,13 @@ pub struct Network {
     /// WebView clearance 拿到的通行证（v0.0.77）：只在内存里按插件
     /// 保存，不落盘、不进 Cookie 罐；`__cf_bm` 绝不进这里。
     clearance: Mutex<Vec<SavedCookie>>,
+    /// 该插件的 ext.log 面板（v0.0.78）：`Installed::installed` 在装配
+    /// 时绑定；net.request 的代理决议写进这里。没绑定时不记（测试用
+    /// 的 Network 没有日志面板）。
+    logs: Mutex<Option<Logs>>,
+    /// 仅测试：注入的代理决议（见 `proxy_decision`）。
+    #[cfg(test)]
+    proxy_override: Mutex<Option<(crate::proxy::Mode, Option<String>)>>,
 }
 #[derive(Clone)]
 struct RedactedSetCookie;
@@ -181,6 +189,9 @@ impl Network {
             node_bootstrap: Mutex::new(node_bootstrap),
             node_client: Default::default(),
             clearance: Default::default(),
+            logs: Default::default(),
+            #[cfg(test)]
+            proxy_override: Default::default(),
         };
         if purged > 0 {
             let jars = this.jar.lock().unwrap().clone();
@@ -193,6 +204,30 @@ impl Network {
     pub fn set_node_bootstrap(&self, bootstrap: Arc<dyn NodeBootstrap>) {
         *self.node_bootstrap.lock().unwrap() = bootstrap;
         *self.node_client.lock().unwrap() = None;
+    }
+    /// 绑定该插件的 ext.log 面板（v0.0.78）：manager 在装配 Installed
+    /// 时调（见 `set_node_bootstrap` 的先例）。绑定后 net.request 的
+    /// 代理决议写进该面板。
+    pub(crate) fn set_logs(&self, logs: Logs) {
+        *self.logs.lock().unwrap() = Some(logs);
+    }
+
+    /// 本跳的代理决议（v0.0.78）：生产走全局设置快照（模式 + 解析后
+    /// 的代理 URL）。测试用 `set_proxy_decision` 注入：全局代理状态
+    /// 是进程共享的（`proxy::snapshot()` + `HGHUB_PROXY` 环境变量），
+    /// 测试里直接改它会互相干扰，并行跑还会竞态。
+    fn proxy_decision(&self) -> (crate::proxy::Mode, Option<String>) {
+        #[cfg(test)]
+        if let Some(d) = self.proxy_override.lock().unwrap().clone() {
+            return d;
+        }
+        let config = crate::proxy::snapshot();
+        (config.mode, crate::proxy::effective_proxy_url(&config))
+    }
+
+    #[cfg(test)]
+    fn set_proxy_decision(&self, mode: crate::proxy::Mode, proxy_url: Option<String>) {
+        *self.proxy_override.lock().unwrap() = Some((mode, proxy_url));
     }
     /// 存入 WebView clearance 拿到的通行证（v0.0.77）：只认
     /// `cf_clearance`，其他名字（包括 `__cf_bm`）一律不收；过期

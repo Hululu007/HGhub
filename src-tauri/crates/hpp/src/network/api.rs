@@ -278,6 +278,9 @@ impl Network {
     /// iOS 上不静默回落 wreq：引擎起不来、边车连不上、/request 500
     /// 都直接报明错——v0.0.70 是假设检验，静默回落会让真机结果
     /// 无法判断到底是哪条路过的。非 iOS 本来就没有 Node（见 read_hop）。
+    ///
+    /// v0.0.78：窄回落与 5xx 诊断（见 `node_hop_with_fallback`）——
+    /// 只在跟随系统模式；5xx 不再当正常数据返回（wreq 路径仍当数据）。
     async fn send_api_hop(
         &self,
         outgoing: Outgoing,
@@ -315,20 +318,10 @@ impl Network {
             _ = cancel.cancelled() => return Err(PluginError::cancelled()),
             value = network_policy::resolve_target_keep_order(&target, self.strict()) => value.map_err(|e| PluginError::new("NETWORK", e))?,
         };
-        let request = NodeRequest {
-            url: target.to_string(),
-            method: outgoing.method.to_string(),
-            headers: outgoing.headers.clone(),
-            body: outgoing.body.clone(),
-            timeout,
-            // 代理每跳重新解析（不缓存地址），设置改动立即生效。
-            proxy_url: crate::proxy::effective_proxy_url(&crate::proxy::snapshot()),
-            pinned_addrs: vec![],
-        };
+        let started = Instant::now();
         let response = self
-            .node_request_with_refresh(request, cancel)
-            .await
-            .map_err(|e| with_resolved_addrs(e, &addrs))?;
+            .node_hop_with_fallback(&outgoing, timeout, &addrs, started, cancel)
+            .await?;
         let mut headers = response.headers;
         let redacted = self.receive_cookies(
             &target,
@@ -336,18 +329,7 @@ impl Network {
             outgoing.generation.as_deref(),
             outgoing.cookies,
         )?;
-        if matches!(response.status, 429 | 503) {
-            if let Some(sec) = headers
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-            {
-                self.cooldown.lock().unwrap().insert(
-                    host.to_string(),
-                    Instant::now() + Duration::from_secs(sec.min(600)),
-                );
-            }
-        }
+        self.note_rate_limit(host, response.status, &headers);
         // 重定向跳不读体（与 wreq 分支一致）：body 已由 Node 取回，
         // 这里只跳过 maxBytes 校验，buffered() 按 Location 跟进。
         let is_redirect = follow && matches!(response.status, 301 | 302 | 303 | 307 | 308);
@@ -424,6 +406,158 @@ impl Network {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Node 一跳 + 窄回落与 5xx 诊断（v0.0.78）：只在跟随系统模式、
+    /// 只在 Api 的 Node 路径（即本函数）。首跳经代理快速失败（< 5 秒）
+    /// 且是上游 5xx 或代理握手失败时，同一 URL/头/方法直连重试一次；
+    /// 成功正常返回；失败返回首跳原始错误（附两次尝试结果）。自定义
+    /// 代理、直连模式、慢失败不回落——首跳永远先走代理（用户 2026-11-23
+    /// 的规矩：不许默认直连；回落本身也是定性仪器——重试成功坐实代理
+    /// 路径，重试也 502 则与代理无关）。
+    ///
+    /// 5xx 不再当正常数据返回：转 `UPSTREAM_ERROR`（原始状态 + 代理
+    /// 描述 + 解析地址 + 两次结果 + Cookie 名字，`details.status`
+    /// 保留供 `fetch()` 的重试判定）。wreq 路径（非 iOS）仍把 5xx 当
+    /// 数据返回——契约只改 Node 路径（见 node-engine.md §7）。
+    /// `429/503` 的 Retry-After 冷却只在返回错误时写：重试成功说明
+    /// 直连能通，不应再冷却该主机。
+    async fn node_hop_with_fallback(
+        &self,
+        outgoing: &Outgoing,
+        timeout: Duration,
+        addrs: &[std::net::SocketAddr],
+        started: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<NodeResponse> {
+        let (mode, proxy_url) = self.proxy_decision();
+        let proxy_desc = describe_proxy(mode, &proxy_url);
+        let cookie_note = cookie_note(&outgoing.headers);
+        self.log_proxy_decision(&outgoing.target, &proxy_desc, &cookie_note);
+        let host = outgoing.target.host_str().unwrap_or("");
+        let request = NodeRequest {
+            url: outgoing.target.to_string(),
+            method: outgoing.method.to_string(),
+            headers: outgoing.headers.clone(),
+            body: outgoing.body.clone(),
+            timeout,
+            // 代理每跳重新解析（不缓存地址），设置改动立即生效。
+            proxy_url: proxy_url.clone(),
+            pinned_addrs: vec![],
+        };
+        let eligible = fallback_eligible(mode, &proxy_url);
+        let first = self
+            .node_request_with_refresh(request.clone(), cancel)
+            .await;
+        match first {
+            Ok(response) if (500..600).contains(&response.status) => {
+                let outcome = if eligible && started.elapsed() < Duration::from_secs(5) {
+                    match self.direct_retry(&request, started, cancel).await {
+                        Ok(retry) if retry.status < 500 => return Ok(retry),
+                        Ok(retry) => format!("同样 {}", retry.status),
+                        Err(e) => format!("失败：{}", short_error(&e)),
+                    }
+                } else {
+                    no_retry_reason(mode, &proxy_url, started.elapsed())
+                };
+                if response.status == 503 {
+                    self.note_rate_limit(host, response.status, &response.headers);
+                }
+                Err(upstream_5xx_error(
+                    response.status,
+                    &proxy_desc,
+                    addrs,
+                    &outcome,
+                    &cookie_note,
+                ))
+            }
+            Ok(response) => Ok(response),
+            Err(e)
+                if eligible
+                    && started.elapsed() < Duration::from_secs(5)
+                    && is_proxy_handshake_error(&e, &proxy_url) =>
+            {
+                match self.direct_retry(&request, started, cancel).await {
+                    Ok(retry) if (500..600).contains(&retry.status) => {
+                        // 直连重试也拿到 503 时，Retry-After 冷却仍要落
+                        // （与 5xx 分支一致）。
+                        if retry.status == 503 {
+                            self.note_rate_limit(host, retry.status, &retry.headers);
+                        }
+                        let mut first_err = e;
+                        first_err.message = format!(
+                            "{}（代理: {proxy_desc}；直连重试: 同样 {}；Cookie: {cookie_note}）",
+                            first_err.message, retry.status
+                        );
+                        Err(with_resolved_addrs(first_err, addrs))
+                    }
+                    Ok(retry) => Ok(retry),
+                    Err(retry_err) => {
+                        let mut first_err = e;
+                        first_err.message = format!(
+                            "{}（代理: {proxy_desc}；直连重试: 失败：{}；Cookie: {cookie_note}）",
+                            first_err.message,
+                            short_error(&retry_err),
+                        );
+                        Err(with_resolved_addrs(first_err, addrs))
+                    }
+                }
+            }
+            Err(e) => Err(with_resolved_addrs(e, addrs)),
+        }
+    }
+
+    /// 直连重试一次：同一请求，`proxy_url` 置空；超时用首跳剩余预算
+    /// （外层 `fetch_once` 的总超时仍兜底——重试不会把单次请求拖
+    /// 超过用户设的超时）。
+    async fn direct_retry(
+        &self,
+        request: &NodeRequest,
+        started: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<NodeResponse> {
+        let mut retry = request.clone();
+        retry.proxy_url = None;
+        retry.timeout = request.timeout.saturating_sub(started.elapsed());
+        self.node_request_with_refresh(retry, cancel).await
+    }
+
+    /// `429/503` 的 Retry-After 冷却（协议 03 §3）：响应与转错误时
+    /// 都写——`send_api_hop` 的收尾与 5xx 错误路径共用。
+    /// `pub(crate)`：冷却写入的保持测试在 node_tests.rs 里调它。
+    pub(crate) fn note_rate_limit(&self, host: &str, status: u16, headers: &HeaderMap) {
+        if !matches!(status, 429 | 503) {
+            return;
+        }
+        if let Some(sec) = headers
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            self.cooldown.lock().unwrap().insert(
+                host.to_string(),
+                Instant::now() + Duration::from_secs(sec.min(600)),
+            );
+        }
+    }
+
+    /// 每次 net.request 的代理决议写进 ext.log（模式 + host:port +
+    /// 认证有/无；不记密码、不记 Cookie 值）：下次真机测试不用猜
+    /// 跟随系统到底解析出了什么代理。没绑日志面板时（测试用的
+    /// Network）不记。
+    fn log_proxy_decision(&self, target: &Url, proxy_desc: &str, cookie_note: &str) {
+        let Some(logs) = self.logs.lock().unwrap().clone() else {
+            return;
+        };
+        logs.lock().unwrap().push(
+            "info",
+            &format!(
+                "net.request 代理：{proxy_desc}；目标：{}；Cookie: {cookie_note}",
+                target.host_str().unwrap_or("")
+            ),
+            "net",
+            None,
+        );
     }
 
     async fn read_hop_wreq(
@@ -567,6 +701,155 @@ impl Network {
     }
 }
 
+/// 代理决议的对外描述（报错与日志共用）：模式 + `scheme://host[:port]`；
+/// 认证只写有/无，绝不写值；解析失败时不回显原始地址。
+fn describe_proxy(mode: crate::proxy::Mode, proxy_url: &Option<String>) -> String {
+    use crate::proxy::Mode;
+    match (mode, proxy_url) {
+        (Mode::Off, _) => "直连".to_string(),
+        (Mode::Custom, None) => "自定义（无代理）".to_string(),
+        (Mode::System, None) => "跟随系统（无代理）".to_string(),
+        (Mode::System, Some(url)) => match redact_proxy_url(url) {
+            Some((addr, authed)) => {
+                format!("跟随系统 {addr}{}", if authed { "（有认证）" } else { "" })
+            }
+            None => "跟随系统（代理地址无效）".to_string(),
+        },
+        (Mode::Custom, Some(url)) => match redact_proxy_url(url) {
+            Some((addr, authed)) => {
+                format!("自定义 {addr}{}", if authed { "（有认证）" } else { "" })
+            }
+            None => "自定义（代理地址无效）".to_string(),
+        },
+    }
+}
+
+/// 代理 URL → `scheme://host[:port]`（去 userinfo）+ 是否有认证。
+/// IPv6 host 加方括号。
+fn redact_proxy_url(url: &str) -> Option<(String, bool)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    Some((
+        format!("{}://{host}{port}", parsed.scheme()),
+        !parsed.username().is_empty(),
+    ))
+}
+
+/// 窄回落只在跟随系统且实际解析出代理时才有意义：自定义是用户显式
+/// 路由，不擅自绕过；直连/无代理时没有可回落的对象。
+fn fallback_eligible(mode: crate::proxy::Mode, proxy_url: &Option<String>) -> bool {
+    mode == crate::proxy::Mode::System && proxy_url.is_some()
+}
+
+/// 是不是代理层握手失败（host.js 的代理错误文案都含“代理”；SOCKS
+/// 连不上代理时文案是裸 `connect ECONNREFUSED <代理 host>:<port>`，
+/// 用代理 host 认）。隧道建好后的上游失败（TLS 被断、DNS 失败、
+/// 上游 ECONNREFUSED）不含这两项，不触发回落。
+fn is_proxy_handshake_error(e: &PluginError, proxy_url: &Option<String>) -> bool {
+    if e.code != "NETWORK" {
+        return false;
+    }
+    if e.message.contains("代理") {
+        return true;
+    }
+    let Some(url) = proxy_url else {
+        return false;
+    };
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    e.message.contains(host)
+}
+
+/// Cookie 头里的名字（只报名字，不报值）：诊断用，排除罐子 Cookie
+/// 嫌疑。名字按 `;` 分段、取每段第一个 `=` 之前。
+fn cookie_names(headers: &HeaderMap) -> Option<Vec<String>> {
+    let value = headers.get("cookie")?.to_str().ok()?;
+    let names: Vec<String> = value
+        .split(';')
+        .filter_map(|part| {
+            let name = part.trim().split('=').next().unwrap_or("").trim();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect();
+    Some(names)
+}
+
+/// 附带的 Cookie 只报名字（值绝不记）：`已附带（名字：a, b）` /
+/// `未附带`。
+fn cookie_note(headers: &HeaderMap) -> String {
+    match cookie_names(headers) {
+        Some(names) if !names.is_empty() => {
+            format!("已附带（名字：{}）", names.join(", "))
+        }
+        _ => "未附带".to_string(),
+    }
+}
+
+/// 错误消息的简写（前 120 字）：重试失败的原因此处只做定性，不
+/// 展开全文（消息里可能带长 URL）。
+fn short_error(e: &PluginError) -> String {
+    const LIMIT: usize = 120;
+    let mut out: String = e.message.chars().take(LIMIT).collect();
+    if e.message.chars().count() > LIMIT {
+        out.push('…');
+    }
+    out
+}
+
+/// 没做直连重试的原因（结构性原因优先于耗时原因）。
+fn no_retry_reason(
+    mode: crate::proxy::Mode,
+    proxy_url: &Option<String>,
+    elapsed: Duration,
+) -> String {
+    use crate::proxy::Mode;
+    match (mode, proxy_url) {
+        (Mode::Custom, _) => "未尝试（自定义代理）".to_string(),
+        (Mode::Off, _) => "未尝试（已直连）".to_string(),
+        (_, None) => "未尝试（无代理）".to_string(),
+        (_, Some(_)) => format!("未尝试（首跳耗时 {:.1} 秒）", elapsed.as_secs_f64()),
+    }
+}
+
+/// 5xx 的诊断错误：原始状态 + 代理描述 + 解析地址 + 两次尝试结果 +
+/// Cookie 名字（不报值）；`details.status` 保留，供 `fetch()` 的
+/// 重试判定（`details.status >= 500` 才算失败，见 network.rs）。
+fn upstream_5xx_error(
+    status: u16,
+    proxy_desc: &str,
+    addrs: &[std::net::SocketAddr],
+    retry_outcome: &str,
+    cookie_note: &str,
+) -> PluginError {
+    let mut parts = vec![format!("代理: {proxy_desc}")];
+    if !addrs.is_empty() {
+        let list = addrs
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("解析: {list}"));
+    }
+    parts.push(format!("直连重试: {retry_outcome}"));
+    parts.push(format!("Cookie: {cookie_note}"));
+    let mut e = PluginError::new(
+        "UPSTREAM_ERROR",
+        format!("上游返回 HTTP {status}（{}）", parts.join("；")),
+    );
+    e.details = Some(json!({"status": status}));
+    e
+}
+
 /// Node 请求失败时，把 Rust 侧预检解析到的地址附在报错末尾
 /// （`（解析: <ip1>, <ip2>）`），让真机测试在所有失败路径
 /// （直连/代理、NETWORK/TIMEOUT/INTERNAL）上都能看到实际解析到了
@@ -608,5 +891,171 @@ mod tests {
         assert_eq!(e.message, "超时");
         let e = with_resolved_addrs(PluginError::cancelled(), &addrs);
         assert_eq!(e.message, "调用已取消");
+    }
+
+    #[test]
+    fn proxy_description_redacts_auth_and_covers_all_modes() {
+        // v0.0.78：代理描述只含模式 + host:port，认证只写有/无。
+        use crate::proxy::Mode;
+        let sys = Some("http://127.0.0.1:7890".to_string());
+        assert_eq!(
+            describe_proxy(Mode::System, &sys),
+            "跟随系统 http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            describe_proxy(
+                Mode::System,
+                &Some("http://user:secret@127.0.0.1:7890".to_string())
+            ),
+            "跟随系统 http://127.0.0.1:7890（有认证）"
+        );
+        assert_eq!(
+            describe_proxy(Mode::Custom, &Some("socks5h://127.0.0.1:1080".to_string())),
+            "自定义 socks5h://127.0.0.1:1080"
+        );
+        assert_eq!(
+            describe_proxy(Mode::System, &Some("http://user:pw@[::1]:8080".to_string())),
+            "跟随系统 http://[::1]:8080（有认证）"
+        );
+        assert_eq!(describe_proxy(Mode::System, &None), "跟随系统（无代理）");
+        assert_eq!(describe_proxy(Mode::Custom, &None), "自定义（无代理）");
+        assert_eq!(describe_proxy(Mode::Off, &sys), "直连");
+        assert_eq!(
+            describe_proxy(Mode::System, &Some("not a url".to_string())),
+            "跟随系统（代理地址无效）"
+        );
+        // 密码绝不出现在描述里。
+        assert!(!describe_proxy(
+            Mode::System,
+            &Some("http://user:secret@127.0.0.1:7890".to_string())
+        )
+        .contains("secret"));
+    }
+
+    #[test]
+    fn fallback_only_for_system_with_a_proxy() {
+        // v0.0.78：窄回落只在跟随系统且实际解析出代理时。
+        use crate::proxy::Mode;
+        let proxy = Some("http://127.0.0.1:7890".to_string());
+        assert!(fallback_eligible(Mode::System, &proxy));
+        assert!(!fallback_eligible(Mode::Custom, &proxy));
+        assert!(!fallback_eligible(Mode::Off, &proxy));
+        assert!(!fallback_eligible(Mode::System, &None));
+        assert!(!fallback_eligible(Mode::Custom, &None));
+    }
+
+    #[test]
+    fn proxy_handshake_detection_matches_host_js_messages() {
+        // v0.0.78：host.js 的代理错误文案（见 node-sidecar/host.js）。
+        let proxy = Some("http://127.0.0.1:7890".to_string());
+        let socks = Some("socks5://127.0.0.1:1080".to_string());
+        let cases = [
+            ("代理拒绝 CONNECT（HTTP 502）", &proxy),
+            (
+                "无法连接代理目标服务器：connect ECONNREFUSED 1.2.3.4:443",
+                &proxy,
+            ),
+            ("SOCKS5 代理拒绝连接（REP 0x05）", &socks),
+            ("SOCKS5 代理认证失败", &socks),
+            ("SOCKS5 代理返回无效版本", &socks),
+            ("SOCKS4 代理拒绝连接（状态 0x5b）", &socks),
+            // SOCKS 连不上代理：文案是裸 ECONNREFUSED + 代理地址。
+            ("connect ECONNREFUSED 127.0.0.1:1080", &socks),
+        ];
+        for (msg, p) in cases {
+            let e = PluginError::new("NETWORK", format!("Node 边车请求失败：{msg}"));
+            assert!(is_proxy_handshake_error(&e, p), "应识别：{msg}");
+        }
+        // 隧道建好后的失败不触发回落。
+        let upstream = [
+            "read ECONNRESET",
+            "connect ECONNREFUSED 93.184.216.34:443",
+            "getaddrinfo ENOTFOUND example.com",
+            "socket hang up",
+        ];
+        for msg in upstream {
+            let e = PluginError::new("NETWORK", format!("Node 边车请求失败：{msg}"));
+            assert!(!is_proxy_handshake_error(&e, &proxy), "不应识别：{msg}");
+        }
+        // 非 NETWORK 码不识别。
+        let e = PluginError::new("TIMEOUT", "Node 边车请求失败：代理拒绝 CONNECT（HTTP 502）");
+        assert!(!is_proxy_handshake_error(&e, &proxy));
+    }
+
+    #[test]
+    fn cookie_note_reports_names_only() {
+        // v0.0.78：Cookie 只报名字，值绝不出现。
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            HeaderValue::from_static("cf_clearance=abc123; session=xyz; theme=dark"),
+        );
+        assert_eq!(
+            cookie_note(&headers),
+            "已附带（名字：cf_clearance, session, theme）"
+        );
+        assert!(!cookie_note(&headers).contains("abc123"));
+        assert!(!cookie_note(&headers).contains("xyz"));
+        let empty = HeaderMap::new();
+        assert_eq!(cookie_note(&empty), "未附带");
+    }
+
+    #[test]
+    fn upstream_5xx_error_carries_diagnosis_and_details_status() {
+        // v0.0.78：5xx 转 UPSTREAM_ERROR，消息含状态+代理+解析+两次
+        // 结果+Cookie 名字；details.status 保留供 fetch() 重试判定。
+        let addrs: Vec<std::net::SocketAddr> = vec!["104.18.32.0:443".parse().unwrap()];
+        let e = upstream_5xx_error(
+            502,
+            "跟随系统 http://127.0.0.1:7890",
+            &addrs,
+            "同样 502",
+            "已附带（名字：cf_clearance）",
+        );
+        assert_eq!(e.code, "UPSTREAM_ERROR");
+        assert_eq!(
+            e.message,
+            "上游返回 HTTP 502（代理: 跟随系统 http://127.0.0.1:7890；解析: 104.18.32.0:443；直连重试: 同样 502；Cookie: 已附带（名字：cf_clearance））"
+        );
+        assert_eq!(e.details.as_ref().unwrap()["status"], 502);
+        // 无解析地址时不写解析段。
+        let e = upstream_5xx_error(503, "直连", &[], "未尝试（已直连）", "未附带");
+        assert_eq!(
+            e.message,
+            "上游返回 HTTP 503（代理: 直连；直连重试: 未尝试（已直连）；Cookie: 未附带）"
+        );
+    }
+
+    #[test]
+    fn no_retry_reasons_cover_every_mode() {
+        // v0.0.78：未回落的原因按模式区分；慢首跳报耗时。
+        use crate::proxy::Mode;
+        let proxy = Some("http://127.0.0.1:7890".to_string());
+        assert_eq!(
+            no_retry_reason(Mode::Custom, &proxy, Duration::from_secs(1)),
+            "未尝试（自定义代理）"
+        );
+        assert_eq!(
+            no_retry_reason(Mode::Off, &None, Duration::from_secs(1)),
+            "未尝试（已直连）"
+        );
+        assert_eq!(
+            no_retry_reason(Mode::System, &None, Duration::from_secs(1)),
+            "未尝试（无代理）"
+        );
+        assert_eq!(
+            no_retry_reason(Mode::System, &proxy, Duration::from_millis(6200)),
+            "未尝试（首跳耗时 6.2 秒）"
+        );
+    }
+
+    #[test]
+    fn short_error_truncates_long_messages() {
+        let e = PluginError::new("NETWORK", "x".repeat(200));
+        let s = short_error(&e);
+        assert_eq!(s.chars().count(), 121);
+        assert!(s.ends_with('…'));
+        let e = PluginError::new("NETWORK", "短消息");
+        assert_eq!(short_error(&e), "短消息");
     }
 }

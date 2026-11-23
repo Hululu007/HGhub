@@ -247,18 +247,22 @@ impl PluginManager {
         node_bootstrap: Arc<dyn NodeBootstrap>,
     ) -> Result<Installed> {
         std::fs::create_dir_all(&dir)?;
+        let logs: Logs = Default::default();
+        let network = Arc::new(Network::new(
+            entry.meta.clone(),
+            dir.clone(),
+            strict,
+            cooldown,
+            node_bootstrap,
+        )?);
+        // net.request 的代理决议写进该插件的 ext.log（v0.0.78）。
+        network.set_logs(logs.clone());
         Ok(Installed {
-            network: Arc::new(Network::new(
-                entry.meta.clone(),
-                dir.clone(),
-                strict,
-                cooldown,
-                node_bootstrap,
-            )?),
+            network,
             store: Arc::new(Store::open(dir.join("storage.json"))?),
             entry,
             worker: None,
-            logs: Default::default(),
+            logs,
             error: None,
             revision: uuid::Uuid::new_v4().to_string(),
             retired: false,

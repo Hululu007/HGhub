@@ -4,7 +4,10 @@
 //! 监听回环地址，客户端强制直连（`no_proxy`），不经过系统代理。
 //! 成功时 /request 返回上游的 `{status, headers, bodyBase64}`；失败
 //! 时边车返回 `{error}` + HTTP 500，映射为 INTERNAL（异常文本截断
-//! 后进错误消息）。上游的 3xx/4xx/5xx 是正常返回的数据，不是错误。
+//! 后进错误消息）。上游的 3xx/4xx/5xx 是正常返回的数据，不是错误——
+//! 但 v0.0.78 起例外：`send_api_hop` 里 5xx 转 `UPSTREAM_ERROR`
+//! （窄回落 + 诊断，见 network/api.rs 的 `node_hop_with_fallback`）；
+//! wreq 路径仍把 5xx 当数据返回。
 use crate::{PluginError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
