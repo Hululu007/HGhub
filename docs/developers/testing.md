@@ -74,7 +74,7 @@ Windows 与 Android 的实际验收环境见[实现范围](../plugin-protocol/IM
 
 设置 → 网络 → 代理访问支持跟随系统、自定义与直连。自定义支持 HTTP、HTTPS、SOCKS；保存后新请求生效，已缓冲的视频不会重新下载，必要时刷新播放。测试连接只使用当前草稿，不保存。直连关闭应用层代理，但不会绕过操作系统 VPN / TUN。
 
-系统模式使用 `HGHUB_PROXY` 覆盖值或平台固定代理、代理环境变量；Android 读取系统 HTTP 代理属性，Linux 另支持 GNOME 手动代理。PAC 自动配置脚本不在当前支持范围。代理选择仍保留目标地址与重定向检查。
+系统模式使用 `HGHUB_PROXY` 覆盖值或平台固定代理、代理环境变量；Android 读取系统 HTTP 代理属性，Linux 另支持 GNOME 手动代理，iOS 读取系统代理设置（`SCDynamicStoreCopyProxies` 的 HTTP/SOCKS 固定代理）。PAC 自动配置脚本不在当前支持范围。代理选择仍保留目标地址与重定向检查。
 
 Android 的封面和媒体通过应用内 HTTP 回环服务提供。`scripts/sync-android-network.mjs` 在构建前将受版本管理的网络配置同步到生成工程，只允许 `127.0.0.1` 和 `localhost` 明文连接。重新执行 Android init 后也需同步；验收 release 时检查 APK 内的 manifest 与 XML，不能仅凭 debug 可播放判断 release 正常。
 

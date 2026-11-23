@@ -9,6 +9,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+#[cfg(target_os = "ios")]
+use core_foundation::{base::CFType, dictionary::CFDictionary, number::CFNumber, string::CFString};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mode {
     System,
@@ -156,6 +159,45 @@ pub fn get() -> Value {
     json!({"mode":config.mode.as_str(),"url":config.url})
 }
 
+/// 从系统代理设置解析出的固定代理（只取 `SCDynamicStoreCopyProxies`
+/// 字典里的 HTTP/SOCKS 项；PAC 只记存在与否，本版不求值）。
+#[cfg(any(test, target_os = "ios"))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SystemProxies {
+    http_enabled: bool,
+    http_host: String,
+    http_port: u16,
+    socks_enabled: bool,
+    socks_host: String,
+    socks_port: u16,
+    pac_enabled: bool,
+}
+
+#[cfg(any(test, target_os = "ios"))]
+fn bracket_ipv6(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// 系统固定代理 → reqwest 用的代理地址（纯函数，宿主可单测）。
+/// HTTP 优先于 SOCKS；两者都没启用（含只有 PAC 的情况）返回 None——
+/// PAC 求值不在本版范围。最后过一遍 `normalize_proxy`：系统字典里的
+/// 异常值导致地址无效时退回直连，不让一次坏配置拖垮全部宿主网络。
+#[cfg(any(test, target_os = "ios"))]
+fn system_proxy_url(p: &SystemProxies) -> Option<String> {
+    let candidate = if p.http_enabled && !p.http_host.is_empty() && p.http_port > 0 {
+        format!("http://{}:{}", bracket_ipv6(&p.http_host), p.http_port)
+    } else if p.socks_enabled && !p.socks_host.is_empty() && p.socks_port > 0 {
+        format!("socks5h://{}:{}", bracket_ipv6(&p.socks_host), p.socks_port)
+    } else {
+        return None;
+    };
+    normalize_proxy(&candidate).ok()
+}
+
 /// Construct a route per request so changes apply to existing provider instances.
 /// Reqwest handles Windows/macOS fixed proxies, environment variables and NO_PROXY.
 pub(crate) fn configure(builder: reqwest::ClientBuilder, config: &Config) -> Result<reqwest::ClientBuilder, String> {
@@ -214,7 +256,52 @@ fn platform_proxy() -> Option<String> {
     None
 }
 
-#[cfg(not(any(target_os = "android", target_os = "linux")))]
+#[cfg(target_os = "ios")]
+fn platform_proxy() -> Option<String> {
+    // iOS 系统代理设置（Wi-Fi 手动代理 / VPN 配置下发的代理），经
+    // SCDynamicStoreCopyProxies 读。之前这里返回 None，“跟随系统”在
+    // iOS 上实际等于直连；Safari 走系统代理能通的站，宿主网络直连失败。
+    // PAC 只读存在与否，不求值（见 system_proxy_url）。
+    use system_configuration::dynamic_store::SCDynamicStoreBuilder;
+    let store = SCDynamicStoreBuilder::new("HGhub").build()?;
+    let proxies = store.get_proxies()?;
+    system_proxy_url(&read_system_proxies(&proxies))
+}
+
+#[cfg(target_os = "ios")]
+fn read_system_proxies(dict: &CFDictionary<CFString, CFType>) -> SystemProxies {
+    fn flag(dict: &CFDictionary<CFString, CFType>, key: &str) -> bool {
+        // Apple 文档里 *Enable 是 CFNumber（0/1）。
+        dict.find(&CFString::new(key))
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|n| n.to_i64())
+            .is_some_and(|v| v != 0)
+    }
+    fn text(dict: &CFDictionary<CFString, CFType>, key: &str) -> String {
+        dict.find(&CFString::new(key))
+            .and_then(|value| value.downcast::<CFString>())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    }
+    fn port(dict: &CFDictionary<CFString, CFType>, key: &str) -> u16 {
+        dict.find(&CFString::new(key))
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|n| n.to_i64())
+            .filter(|p| (1..=u16::MAX as i64).contains(p))
+            .unwrap_or(0) as u16
+    }
+    SystemProxies {
+        http_enabled: flag(dict, "HTTPEnable"),
+        http_host: text(dict, "HTTPProxy"),
+        http_port: port(dict, "HTTPPort"),
+        socks_enabled: flag(dict, "SOCKSEnable"),
+        socks_host: text(dict, "SOCKSProxy"),
+        socks_port: port(dict, "SOCKSPort"),
+        pac_enabled: flag(dict, "ProxyAutoConfigEnable"),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux", target_os = "ios")))]
 fn platform_proxy() -> Option<String> { None }
 
 pub(crate) fn connection_error(error: &reqwest::Error) -> &'static str {
@@ -386,6 +473,81 @@ mod tests {
             std::env::temp_dir().join(format!("hghubx-proxy-{}-{unique}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn system_proxy_url_prefers_http_then_socks_and_ignores_pac_only() {
+        let http = SystemProxies {
+            http_enabled: true,
+            http_host: "127.0.0.1".into(),
+            http_port: 7890,
+            ..Default::default()
+        };
+        assert_eq!(
+            system_proxy_url(&http),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+        // HTTP 与 SOCKS 都启用时取 HTTP；HTTP 缺 host/port 时落到 SOCKS。
+        let both = SystemProxies {
+            http_enabled: true,
+            http_host: "127.0.0.1".into(),
+            http_port: 7890,
+            socks_enabled: true,
+            socks_host: "127.0.0.1".into(),
+            socks_port: 1080,
+            ..Default::default()
+        };
+        assert_eq!(
+            system_proxy_url(&both),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+        let http_broken = SystemProxies {
+            http_enabled: true,
+            http_port: 7890,
+            socks_enabled: true,
+            socks_host: "127.0.0.1".into(),
+            socks_port: 1080,
+            ..Default::default()
+        };
+        assert_eq!(
+            system_proxy_url(&http_broken),
+            Some("socks5h://127.0.0.1:1080".to_string())
+        );
+        // 只有 SOCKS、只有 PAC、什么都没有、IPv6 host。
+        let socks = SystemProxies {
+            socks_enabled: true,
+            socks_host: "127.0.0.1".into(),
+            socks_port: 1080,
+            ..Default::default()
+        };
+        assert_eq!(
+            system_proxy_url(&socks),
+            Some("socks5h://127.0.0.1:1080".to_string())
+        );
+        let pac_only = SystemProxies {
+            pac_enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(system_proxy_url(&pac_only), None);
+        assert_eq!(system_proxy_url(&SystemProxies::default()), None);
+        let v6 = SystemProxies {
+            http_enabled: true,
+            http_host: "::1".into(),
+            http_port: 7890,
+            ..Default::default()
+        };
+        assert_eq!(
+            system_proxy_url(&v6),
+            Some("http://[::1]:7890".to_string())
+        );
+        // 系统字典里的异常值不生成代理地址，退回直连。
+        let bad_host = SystemProxies {
+            http_enabled: true,
+            http_host: "exa mple.com".into(),
+            http_port: 7890,
+            ..Default::default()
+        };
+        assert_eq!(system_proxy_url(&bad_host), None);
     }
 
     #[test]
