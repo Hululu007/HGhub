@@ -18,6 +18,8 @@ fn main() {
     link_ios_native_plugins();
     // iOS 上 Rust 链接期找 Python.framework（见 link_python_framework）。
     link_python_framework();
+    // iOS 上 SystemConfiguration.framework（见 link_system_configuration）。
+    link_system_configuration();
 }
 
 /// iOS 上 Rust 链接期找 Python.framework。
@@ -47,6 +49,23 @@ fn link_python_framework() {
         framework_dir.display()
     );
     println!("cargo:rerun-if-changed=gen/apple/Python.xcframework");
+}
+
+/// iOS 上链接 SystemConfiguration.framework。
+///
+/// `proxy.rs` 的 iOS 分支用 system-configuration crate 调
+/// SCDynamicStoreCopyProxies 读系统代理；该 crate 只给链接器符号引用，
+/// 不给 framework 链接参数，Xcode 的 app 链接也不会自动补上，v0.0.62
+/// 在此挂掉（`Undefined symbols _SCDynamicStoreCopyProxies ...`）。
+/// 这里在 iOS target 时显式链接该 framework；与 link_python_framework
+/// 同款做法（只看 TARGET，不加 target_os cfg，让 Linux 上的 cargo
+/// check 也能验证它）。
+fn link_system_configuration() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target != "aarch64-apple-ios" && target != "aarch64-apple-ios-sim" {
+        return;
+    }
+    println!("cargo:rustc-link-lib=framework=SystemConfiguration");
 }
 
 /// 把 src-tauri/ios/ 的 Swift 插件包（NativePlugins）编成静态库链进 Rust。
