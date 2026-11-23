@@ -420,13 +420,15 @@ impl Network {
             _ = cancel.cancelled() => return Err(PluginError::cancelled()),
             value = network_policy::resolve_target(target, strict) => value.map_err(|e| PluginError::new("NETWORK", e))?,
         };
-        // Chrome 149 指纹模拟（TLS/HTTP2/请求头顺序）：Cloudflare 只认
-        // 浏览器指纹，v0.0.67 只换 TLS 后端仍被拦。emulation 必须在
-        // user_agent 之前调——emulation 的默认头含 Chrome UA，之后调
-        // user_agent 才能把默认 UA 恢复成 HGhub/HPP-dev（任务约束：不改
-        // 默认 UA；页面自带的 UA 是请求级头，不受这里影响）。
+        // Node 式极简画像（v0.0.69）：插件 net 请求不用浏览器指纹模拟。
+        // v0.0.68 的 Chrome 149 模拟 + 页面裸 "Mozilla/5.0" UA 是自相
+        // 矛盾的组合，Cloudflare 照拦；Arcane 的 Node 18 https（HTTP/1.1、
+        // 无 sec-ch-ua、无浏览器头、裸 UA 原样）同一台手机能过。画像只
+        // 作用于插件 net 请求这一路；媒体裸客户端、下载、代理测试、边车
+        // 仍用各自的客户端（Chrome 149 模拟保留）。默认 UA 仍是
+        // HGhub/HPP-dev；页面自带的 UA 是请求级头，不受这里影响。
         let builder = wreq::Client::builder()
-            .emulation(wreq_util::Profile::Chrome149)
+            .http1_only()
             .redirect(wreq::redirect::Policy::none())
             .referer(false)
             .connect_timeout(Duration::from_secs(10))

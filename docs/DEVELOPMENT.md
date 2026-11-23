@@ -11,7 +11,7 @@
 | 应用框架 | Rust、Tauri 2 |
 | 界面 | React、TypeScript、Vite、Tailwind CSS |
 | 播放组件 | hls.js |
-| 网络 | wreq（BoringSSL，Chrome 149 浏览器指纹模拟；全平台同一套客户端）|
+| 网络 | wreq（BoringSSL；插件 net 请求为 Node 式极简画像 HTTP/1.1、无浏览器头，代理按用户设置；媒体/下载/代理测试/边车客户端仍用 Chrome 149 指纹模拟）|
 
 ```text
 src/                    界面、交互、状态管理与组件

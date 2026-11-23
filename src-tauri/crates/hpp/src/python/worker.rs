@@ -52,7 +52,11 @@ impl PythonBootstrap for UnavailablePython {
 #[derive(Clone)]
 pub struct PyWorker {
     plugin_id: String,
-    client: Arc<SidecarClient>,
+    /// 边车客户端可换：边车监听在自愈重启后可能换端口，调用时连不上
+    /// 就重探地址换一个（见 call_with_refresh）。
+    client: Arc<Mutex<Arc<SidecarClient>>>,
+    /// 重探边车地址的引导（重读 info 文件 + 健康检查）。
+    bootstrap: Arc<dyn PythonBootstrap>,
     methods: Vec<String>,
     /// 边车探测到的蜘蛛方法名（TVBox 名字），供调用时选来源方法。
     spider_methods: Vec<String>,
@@ -93,7 +97,8 @@ impl PyWorker {
         Ok((
             Self {
                 plugin_id,
-                client,
+                client: Arc::new(Mutex::new(client)),
+                bootstrap: bootstrap.clone(),
                 methods,
                 spider_methods: loaded.methods,
                 media,
@@ -131,10 +136,83 @@ impl PyWorker {
     pub async fn stop_and_wait(&self) -> Result<()> {
         self.stop();
         // 尽力卸载边车里的蜘蛛：失败不报错，/load 同 key 会覆盖。
-        self.client
+        self.current_client()
             .unload(&self.plugin_id, Duration::from_secs(1))
             .await;
         Ok(())
+    }
+
+    fn current_client(&self) -> Arc<SidecarClient> {
+        self.client.lock().unwrap().clone()
+    }
+
+    /// 边车连不上（Connect 被拒）时返回 true：回环上只有“边车没在听”
+    /// 这一种传输失败；/call 500 等蜘蛛错误走别的文案，不触发刷新。
+    fn is_sidecar_connect(e: &PluginError) -> bool {
+        e.code == "INTERNAL" && e.message.contains("边车连接失败")
+    }
+
+    /// 记一次调用故障：连不上说明解释器已死或地址已换，下次调用重新
+    /// 初始化；超时只换文案，不记故障。
+    fn note_call_error(&self, mut e: PluginError) -> PluginError {
+        if Self::is_sidecar_connect(&e) {
+            *self.fault.lock().unwrap() = Some(e.clone());
+        }
+        if e.code == "TIMEOUT" {
+            e = PluginError::timeout();
+        }
+        e
+    }
+
+    /// 重新探测边车地址并换一个客户端（用调用预算兜底，超时就失败，
+    /// 调用方报原来的错）。
+    async fn refresh_client(&self, budget: Duration) -> Result<()> {
+        let info = tokio::time::timeout(budget, self.bootstrap.ensure_started())
+            .await
+            .map_err(|_| PluginError::timeout())??;
+        let fresh = SidecarClient::new(info.api_base)?;
+        *self.client.lock().unwrap() = Arc::new(fresh);
+        Ok(())
+    }
+
+    /// 调一次边车；连不上时重新探测地址并重试一次。
+    ///
+    /// 边车监听在自愈重启后可能换端口（main.py 重绑时 55001 被占就落
+    /// 临时端口，info 文件会更新），而 worker 手里是旧地址的客户端，
+    /// 直接重试只会再撞旧端口。刷新走 bootstrap.ensure_started（重读
+    /// info 文件 + 健康检查）。请求从未到过边车（TCP 都没连上），方法
+    /// 没有进入蜘蛛，重试不会重放已执行的方法。
+    async fn call_with_refresh(
+        &self,
+        key: &str,
+        method_name: &str,
+        args: Vec<Value>,
+        budget: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Value> {
+        let first = {
+            let client = self.current_client();
+            tokio::select! {
+                _ = cancel.cancelled() => Err(PluginError::cancelled()),
+                r = client.call(key, method_name, args.clone(), budget) => r,
+            }
+        };
+        match first {
+            Ok(v) => Ok(v),
+            Err(e) if Self::is_sidecar_connect(&e) => {
+                if self.refresh_client(budget).await.is_ok() {
+                    let client = self.current_client();
+                    let retry = tokio::select! {
+                        _ = cancel.cancelled() => Err(PluginError::cancelled()),
+                        r = client.call(key, method_name, args, budget) => r,
+                    };
+                    retry.map_err(|e| self.note_call_error(e))
+                } else {
+                    Err(self.note_call_error(e))
+                }
+            }
+            Err(e) => Err(self.note_call_error(e)),
+        }
     }
 
     pub fn cancel(&self, id: &str) {
@@ -189,26 +267,15 @@ impl PyWorker {
             }
             tokens.insert(id.clone(), cancel.clone());
         }
-        let client = self.client.clone();
         let key = self.plugin_id.clone();
         let method_name = spider_method.to_string();
-        let result = tokio::select! {
-            _ = cancel.cancelled() => Err(PluginError::cancelled()),
-            r = client.call(&key, &method_name, spider_args, budget) => r,
-        };
+        let result = self
+            .call_with_refresh(&key, &method_name, spider_args, budget, &cancel)
+            .await;
         self.tokens.lock().unwrap().remove(&id);
         let raw = match result {
             Ok(v) => v,
-            Err(mut e) => {
-                // 边车连不上说明解释器已死：记一次故障，下次调用重新初始化。
-                if e.code == "INTERNAL" && e.message.contains("边车连接失败") {
-                    *self.fault.lock().unwrap() = Some(e.clone());
-                }
-                if e.code == "TIMEOUT" {
-                    e = PluginError::timeout();
-                }
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
         let converted = if let Some((section_id, layout)) = home_section {
             convert::sections(&raw, section_id, layout)?

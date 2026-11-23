@@ -47,6 +47,8 @@ enum Behavior {
 
 struct MockSidecar {
     behavior: Behavior,
+    /// /call 被调次数（按边车实例计）：断言重试确实换了边车。
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl MockSidecar {
@@ -81,6 +83,8 @@ impl MockSidecar {
     }
 
     fn call(&self, method: &str) -> Result<Value, (u16, Value)> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match self.behavior {
             Behavior::SpiderError => {
                 return Err((
@@ -153,7 +157,42 @@ impl PythonBootstrap for MockBootstrap {
 }
 
 async fn start_mock(behavior: Behavior) -> (String, Arc<MockSidecar>) {
-    let state = Arc::new(MockSidecar { behavior });
+    let (base, state, _server) = start_mock_handle(behavior).await;
+    (base, state)
+}
+
+/// 可停的 mock 边车。shutdown 用优雅关闭：停监听的同时关掉已建立
+/// 的 keep-alive 连接，模拟边车进程退出。只 abort 任务不够——
+/// axum 给每个已建立连接单开任务，abort 监听任务后池里的旧连接照
+/// 常用，客户端根本不会触发刷新，测不到换端口重试。
+struct MockServer {
+    notify: std::sync::Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl MockServer {
+    async fn shutdown(self) {
+        self.notify.notify_waiters();
+        let mut task = self.task;
+        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut task)
+            .await
+            .is_err()
+        {
+            // 优雅关闭超时（不应发生）：强杀兜底。
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+/// 带服务句柄的 mock 边车：调用方可以停掉它，模拟边车重启换端口。
+async fn start_mock_handle(
+    behavior: Behavior,
+) -> (String, Arc<MockSidecar>, MockServer) {
+    let state = Arc::new(MockSidecar {
+        behavior,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
     let health_state = state.clone();
     let load_state = state.clone();
     let call_state = state.clone();
@@ -200,10 +239,39 @@ async fn start_mock(behavior: Behavior) -> (String, Arc<MockSidecar>) {
         .route("/unload", post(|Json(_body): Json<Value>| async { Json(json!({"ok": true})) }));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = notify.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { signal.notified().await })
+            .await
+            .unwrap();
     });
-    (base, state)
+    (base, state, MockServer { notify, task: server })
+}
+
+/// 每次 ensure_started 返回下一个地址（用完后固定在最后一个）：模拟
+/// 边车重启后换了端口，info 文件已更新、旧客户端地址已失效。
+struct SwitchingBootstrap {
+    bases: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+}
+
+impl PythonBootstrap for SwitchingBootstrap {
+    fn ensure_started(&self) -> BoxFuture<'static, hghub_hpp::Result<SidecarInfo>> {
+        let bases = self.bases.clone();
+        Box::pin(async move {
+            let mut guard = bases.lock().unwrap();
+            let api_base = if guard.len() > 1 {
+                guard.pop_front().unwrap()
+            } else {
+                guard.front().unwrap().clone()
+            };
+            Ok(SidecarInfo {
+                api_base: api_base.clone(),
+                proxy_base: format!("{api_base}/proxy"),
+            })
+        })
+    }
 }
 
 struct Documents(HashMap<String, Vec<u8>>);
@@ -545,4 +613,76 @@ async fn python_import_rejects_non_spider_and_prefers_js() {
     assert!(!hghub_hpp::python::is_python(js_like));
     assert!(!hghub_hpp::python::is_python("<!doctype html><html><body>hi</body></html>"));
     assert!(hghub_hpp::python::is_python(DEMO));
+}
+
+#[tokio::test]
+async fn python_sidecar_restart_on_new_port_retries_call() {
+    // 边车重启换端口：旧客户端地址已死，调用应重探 bootstrap 拿到新
+    // 地址并重试一次，而不是把 Connect 失败直接抛给分类页。模拟
+    // v0.0.68 真机那次“Python 边车连接失败”——边车自愈重绑后 info
+    // 文件已更新、Rust 侧旧客户端仍指旧端口。
+    let (base_a, state_a, server_a) = start_mock_handle(Behavior::Normal).await;
+    let (base_b, state_b, server_b) = start_mock_handle(Behavior::Normal).await;
+    let dir = tempfile::tempdir().unwrap();
+    let bootstrap = SwitchingBootstrap {
+        bases: Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::from([base_a.clone(), base_b.clone()]),
+        )),
+    };
+    let manager = Arc::new(
+        PluginManager::with_mode(dir.path().into(), Some(false))
+            .unwrap()
+            .with_python_bootstrap(Arc::new(bootstrap))
+            .with_document_reader(Arc::new(Documents(HashMap::from([(
+                "content://documents/demo-spider.py".to_string(),
+                DEMO.as_bytes().to_vec(),
+            )])))),
+    );
+    MediaSessions::start(&manager).await.unwrap();
+    import_demo(&manager).await;
+
+    // 第一调走 A。
+    let cats = manager
+        .call("py.demo-spider", "catalog.getCategories", json!({}), "t1".into())
+        .await
+        .unwrap();
+    assert_eq!(cats.as_array().unwrap().len(), 2);
+    assert!(
+        state_a
+            .calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1,
+        "第一调没落在边车 A 上，重试断言会空过"
+    );
+
+    // 停掉 A，等到 TCP 彻底连不上（确定性：轮询而不是睡固定时长）。
+    server_a.shutdown().await;
+    let port_a: u16 = base_a.rsplit(':').next().unwrap().parse().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port_a)).is_err() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mock A 未在 3 秒内停下"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // 第二调：旧地址已死，应重探到 B 并重试成功。
+    let cats = manager
+        .call("py.demo-spider", "catalog.getCategories", json!({}), "t2".into())
+        .await
+        .unwrap();
+    assert_eq!(cats.as_array().unwrap().len(), 2);
+    assert_eq!(cats[0]["id"], json!("movie"));
+    assert!(
+        state_b
+            .calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1,
+        "重试没落在边车 B 上"
+    );
+    server_b.shutdown().await;
 }

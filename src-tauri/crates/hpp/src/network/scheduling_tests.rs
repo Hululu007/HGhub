@@ -442,3 +442,54 @@ fn webhome_plugin_target_allows_http_plain_plugin_rejects() {
     assert_eq!(err.code, "INVALID_ARGUMENT");
     assert!(network.target("https://example.com/list").is_ok());
 }
+
+#[tokio::test]
+async fn plugin_requests_use_plain_node_like_profile() {
+    // Node 式极简画像：页面给的 UA 原样发出（哪怕是裸 "Mozilla/5.0"），
+    // 缺失时补默认 HGhub/HPP-dev；不发 sec-ch-ua 等浏览器头（Chrome
+    // 149 模拟 + 裸 UA 的自相矛盾组合在 v0.0.68 真机被 Cloudflare 拦）。
+    let (base, fixture, server) = fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = network(dir.path());
+    let cancel = CancellationToken::new();
+    fetch(
+        &network,
+        json!({"url": format!("{base}/immediate?case=bare"), "headers": {"user-agent": "Mozilla/5.0"}}),
+        &cancel,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    fetch(
+        &network,
+        json!({"url": format!("{base}/immediate?case=missing")}),
+        &cancel,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let full = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    fetch(
+        &network,
+        json!({"url": format!("{base}/immediate?case=full"), "headers": {"user-agent": full}}),
+        &cancel,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let seen = fixture.seen.lock().unwrap();
+    let ua = |case: &str| {
+        seen.iter()
+            .find(|(uri, _)| uri == &format!("/immediate?case={case}"))
+            .and_then(|(_, h)| h.get("user-agent"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(ua("bare"), "Mozilla/5.0");
+    assert_eq!(ua("missing"), "HGhub/HPP-dev");
+    assert_eq!(ua("full"), full);
+    // 不发任何 Chrome 专属头。
+    assert!(!seen.iter().any(|(_, h)| h.contains_key("sec-ch-ua")));
+    server.abort();
+}

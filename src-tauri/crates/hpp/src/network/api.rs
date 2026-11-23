@@ -52,6 +52,9 @@ impl Network {
                 HeaderValue::from_str(&cookie).map_err(|_| PluginError::invalid("Cookie 无效"))?,
             );
         }
+        // 页面给的 UA 原样发出（哪怕是裸 "Mozilla/5.0"）：插件 net 请求
+        // 走 Node 式极简画像（HTTP/1.1、无浏览器头），UA 与画像必须
+        // 自洽，不能一边发裸 UA 一边补 Chrome 指纹。
         headers
             .entry("user-agent")
             .or_insert(HeaderValue::from_static("HGhub/HPP-dev"));
