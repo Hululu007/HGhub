@@ -29,9 +29,10 @@ tauri-plugin-dialog = "=2.8.3"
 tauri-plugin-fs = "=2.7.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 下载命令用：直连回环播放地址取流（reqwest 与 hpp 共用 0.12，特性
-# 取交集的子集；url 用于解析清单里的相对分片地址）。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# 下载命令用：直连回环播放地址取流（reqwest 与 hpp 共用 0.12，TLS 后端
+# 按目标分开：iOS 用 native-tls，其它平台用 rustls-tls，与 hpp 保持一致，
+# 不能在同一个目标上同时开两个后端；url 用于解析清单里的相对分片地址）。
+reqwest = { version = "0.12", default-features = false }
 url = "2"
 time = { version = "0.3", features = ["formatting"] }
 hghub-hpp = { path = "crates/hpp" }
@@ -47,6 +48,11 @@ tokio-util = "0.7"
 # tokio-util 不需要：app 侧只在 android/windows 登录里用，hpp 自带一份。
 [target.'cfg(target_os = "ios")'.dependencies]
 futures-util = "0.3"
+# 与 hpp 一致：iOS 上 reqwest 用系统 TLS（native-tls）。
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wry = "0.57"

@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "io-std", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy", "socks", "gzip", "brotli", "json", "charset", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["system-proxy", "socks", "gzip", "brotli", "json", "charset", "stream"] }
 url = "2"
 base64 = "0.22"
 once_cell = "1"
@@ -46,6 +46,12 @@ rquickjs = { version = "0.12.2", features = ["bindgen"] }
 [target.'cfg(target_os = "ios")'.dependencies]
 system-configuration = "0.7"
 core-foundation = "0.9"
+# iOS 上 reqwest 用系统 TLS（native-tls → Security.framework）：rustls 的
+# TLS 指纹会被 Cloudflare 认出并返回验证页；其它平台保持 rustls。
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

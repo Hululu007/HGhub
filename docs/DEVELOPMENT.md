@@ -11,7 +11,7 @@
 | 应用框架 | Rust、Tauri 2 |
 | 界面 | React、TypeScript、Vite、Tailwind CSS |
 | 播放组件 | hls.js |
-| 网络 | reqwest、rustls |
+| 网络 | reqwest（iOS 用系统 TLS，其它平台用 rustls）|
 
 ```text
 src/                    界面、交互、状态管理与组件
