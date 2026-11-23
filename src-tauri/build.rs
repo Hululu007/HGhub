@@ -18,6 +18,8 @@ fn main() {
     link_ios_native_plugins();
     // iOS 上 Rust 链接期找 Python.framework（见 link_python_framework）。
     link_python_framework();
+    // iOS 上 Rust 链接期找 NodeMobile.framework（见 link_node_framework）。
+    link_node_framework();
     // iOS 上 SystemConfiguration.framework（见 link_system_configuration）。
     link_system_configuration();
 }
@@ -49,6 +51,33 @@ fn link_python_framework() {
         framework_dir.display()
     );
     println!("cargo:rerun-if-changed=gen/apple/Python.xcframework");
+}
+
+/// iOS 上 Rust 链接期找 NodeMobile.framework。
+///
+/// `src/node.rs` 的裸 FFI 用 `#[link(name = "NodeMobile", kind =
+/// "framework")]`，只给链接器 `-framework NodeMobile`，不给搜索路径；
+/// 与 Python 同款做法（见 link_python_framework）：iOS target 时把
+/// xcframework 对应切片目录加进 framework 搜索路径；xcframework 由
+/// sync-ios-node.mjs 在 xcodebuild 之前解包到 gen/apple。
+fn link_node_framework() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let slice = match target.as_str() {
+        "aarch64-apple-ios" => "ios-arm64",
+        "aarch64-apple-ios-sim" => "ios-arm64_x86_64-simulator",
+        _ => return,
+    };
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let framework_dir = manifest_dir
+        .join("gen")
+        .join("apple")
+        .join("NodeMobile.xcframework")
+        .join(slice);
+    println!(
+        "cargo:rustc-link-search=framework={}",
+        framework_dir.display()
+    );
+    println!("cargo:rerun-if-changed=gen/apple/NodeMobile.xcframework");
 }
 
 /// iOS 上链接 SystemConfiguration.framework。

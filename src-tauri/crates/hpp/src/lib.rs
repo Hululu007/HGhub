@@ -12,6 +12,7 @@ mod native;
 mod network;
 pub mod proxy;
 pub mod network_policy;
+pub mod node;
 pub mod python;
 mod resolver_preferences;
 mod runtime;

@@ -7,7 +7,7 @@
 | 单文件/列表/URL 导入 | 已实现 | Rust 与 Windows UI；Android 单文件实测 |
 | 订阅与自动更新 | 已实现 | 冷却、手动旁路、播放延后回归 |
 | 独立运行时与取消 | 核心已实现 | 并发/中断/共享 Promise；模块顶层检查与工厂各自 5 秒总预算、1 秒同步片段及取消初始化有真实 QuickJS 回归；内部桥不向插件暴露 |
-| HTTP/Cookie/存储 | 核心已实现 | 网络策略（含允许的 IPv4 与受限 IPv6 混合 DNS）、缓存、配额和持久化回归；未在实际 Tauri 窗口验证此网络环境。iOS 跟随系统时代理取自系统代理设置（HTTP/SOCKS 固定代理；PAC 不跟随）。插件 net 请求为 Node 式极简画像（HTTP/1.1、无浏览器头），代理路径按用户设置不动 |
+| HTTP/Cookie/存储 | 核心已实现 | 网络策略（含允许的 IPv4 与受限 IPv6 混合 DNS）、缓存、配额和持久化回归；未在实际 Tauri 窗口验证此网络环境。iOS 跟随系统时代理取自系统代理设置（HTTP/SOCKS 固定代理；PAC 不跟随）。插件 net 请求走内嵌 Node 引擎（Node.js 18.20.4，`node_start` + 回环边车；HTTP/1.1、无浏览器头），代理路径按用户设置不动；Node 18 已 EOL、体积 +25–35MB（待实际 IPA 核对） |
 | 内容能力与本地片库 | 已接入 UI | 生产界面虚构源完整集成 25 组通过 |
 | MP4/HLS/解析器 | 核心已实现 | Range、密钥、资源归属与取消回归 |
 | 连播预备与字节预取 | 已实现有限策略 | 下一集准备复用；MP4 范围与静态 HLS 起播资源缓存；取消、过期与版本变化回退测试；用户已反馈 Windows/Android 播放与连播顺畅，非全平台完整验收 |
@@ -22,7 +22,7 @@
 | 自检/日志导出/占用与清理 | 尚缺 | 日志读取可用，文件导出待接入 |
 | Android 相对列表 | 已接入目录授权，设备待验收 | 系统目录选择后按名称解析子路径；路径单测及 Rust 选装、身份、取消回归；单文件授权不扩大到兄弟文件 |
 | WebView 登录 | Windows、受支持的 Android 已接入 | 用户已在两端验证真实站点登录。Windows 可在登录后点窗口顶部的“关闭”返回插件，Android 模拟器保留数据重装后仍可显示账号昵称。两端另有原生同源隔离测试，认证表单、取消和预算暂停有离线回归覆盖 |
-| WebHome（HTML 源） | v1 已实现，未真机验收 | `meta.webhome` 声明 + 独立窗口 + `window.fm` 桥，直链播放走真实媒体会话；hpp 集成测试通过。iOS 第二个 WebView 窗口需真机验收，见 [WebHome 指南](webhome.md)。v0.0.48 支持直接导入 HTML（远程 homePage / 本地 localPage + 回环提供）与站点 JSON 识别；v0.0.66 窗口内小房子控件（切源/关闭，闲置收起）；v0.0.69 插件 net 请求改 Node 式极简画像 |
+| WebHome（HTML 源） | v1 已实现，未真机验收 | `meta.webhome` 声明 + 独立窗口 + `window.fm` 桥，直链播放走真实媒体会话；hpp 集成测试通过。iOS 第二个 WebView 窗口需真机验收，见 [WebHome 指南](webhome.md)。v0.0.48 支持直接导入 HTML（远程 homePage / 本地 localPage + 回环提供）与站点 JSON 识别；v0.0.66 窗口内小房子控件（切源/关闭，闲置收起）；v0.0.69 插件 net 请求改 Node 式极简画像；v0.0.70 插件 net 请求走内嵌 Node 引擎（假设检验，待真机验收） |
 | Python 蜘蛛（TVBox .py 源） | v1 已实现，仅 iOS，未真机验收 | CPython 3.12.16 边车（BeeWare 3.12-b13）+ `base.spider`；导入按内容识别，`py.<词干>` / 版本恒 1.0.0；映射 `catalog.getCategories` / `home.getSections` / `feed.list` / `catalog.list` / `search.search` / `media.getDetail` / `media.resolvePlayback`（见 [Python 蜘蛛指南](python-spiders.md)）。hpp 集成测试 5 项与边车全模式/v1-only 模式通过。非 iOS 目标初始化报 `UNSUPPORTED`。iOS 构建与设备播放待 CI/真机验收；`lxml` / `pyquery` / `pycryptodome` v1 不带，`liveContent` / `suggest` / `trending` / `transformResource` / `endpoints` 未映射，`meta.settings` 与持久存储未接 |
 | DASH/ASS | 可选未支持 | 不声明这些特性 |
 | 原生播放器（iOS） | 桥已搭，未验证 | AVPlayer 完整实现，MDK / KSPlayer / mpv 为 canImport 守卫；WebView 仍是默认路；未编译 iOS 原生代码、未真机验证，见 [iOS 原生播放器](native-players.md) |

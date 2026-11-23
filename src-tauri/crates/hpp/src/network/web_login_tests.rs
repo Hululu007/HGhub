@@ -7,7 +7,7 @@ fn network(dir: &std::path::Path) -> Network {
         json!({"id":"fixture.web-login","protocol":1,"name":"fixture","version":"1.0.0"}),
     )
     .unwrap();
-    Network::new(meta, dir.into(), Some(false), Default::default()).unwrap()
+    Network::new(meta, dir.into(), Some(false), Default::default(), Arc::new(crate::node::UnavailableNode)).unwrap()
 }
 fn marker(value: &str) -> Value {
     json!({"name":"session", "value":value, "domain":"example.invalid", "hostOnly":false,

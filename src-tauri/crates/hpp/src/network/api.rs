@@ -1,7 +1,8 @@
 use super::*;
+use crate::node::{NodeRequest, NodeResponse};
 use futures_util::StreamExt;
-use wreq::StatusCode;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use wreq::StatusCode;
 
 #[derive(Clone, Copy)]
 pub enum Queue {
@@ -203,6 +204,7 @@ impl Network {
         cookies: bool,
         follow: bool,
         max: usize,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Arc<BufferedResponse>> {
         let initial = target.origin();
@@ -219,7 +221,9 @@ impl Network {
                 body.clone(),
                 cookies,
             )?;
-            let response = self.shared_hop(outgoing, follow, max, cancel).await?;
+            let response = self
+                .shared_hop(outgoing, follow, max, timeout, cancel)
+                .await?;
             if let Some(next) =
                 self.redirect(&target, response.status, &response.headers, follow, hop)?
             {
@@ -231,7 +235,168 @@ impl Network {
         unreachable!("redirect rejects a sixth hop")
     }
 
+    /// 传输分发（v0.0.70）：插件 net 请求（Queue::Api）在 iOS 上走
+    /// Node 边车，其他情况走现有 wreq 路径。媒体取流不经过这里
+    /// （`Network::request` 直接调 `send()`），`send()` 本身不动。
     async fn read_hop(
+        &self,
+        outgoing: Outgoing,
+        follow: bool,
+        max: usize,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<BufferedResponse>> {
+        if self.node_transport() {
+            return self
+                .send_api_hop(outgoing, follow, max, timeout, cancel)
+                .await;
+        }
+        self.read_hop_wreq(outgoing, follow, max, cancel).await
+    }
+
+    /// Node 传输的一跳：调度（冷却/许可/限速）与 Cookie（接收、
+    /// `429/503` 冷却）与 `send()` 一致，能复用的方法都复用；
+    /// `429/503` 冷却写入是与 `send()` 对应的小段重复（读的是 Node
+    /// 返回的头，不是 wreq 响应头）。
+    ///
+    /// iOS 上不静默回落 wreq：引擎起不来、边车连不上、/request 500
+    /// 都直接报明错——v0.0.70 是假设检验，静默回落会让真机结果
+    /// 无法判断到底是哪条路过的。非 iOS 本来就没有 Node（见 read_hop）。
+    async fn send_api_hop(
+        &self,
+        outgoing: Outgoing,
+        follow: bool,
+        max: usize,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<BufferedResponse>> {
+        if cancel.is_cancelled() {
+            return Err(PluginError::cancelled());
+        }
+        let host = outgoing.target.host_str().unwrap();
+        self.check_cooldown(host)?;
+        // 许可保持到响应体读完或取消（协议 03 §3）：Node 一次返回
+        // 完整 body，许可在函数返回时释放，与 wreq 分支“先取许可、
+        // 读完再放”的效果一致。
+        let _permits = self.permits(host, cancel).await?;
+        self.rate_limit(cancel).await?;
+        self.check_cooldown(host)?;
+        let target = outgoing.target.clone();
+        // DNS 固定：每跳重新解析（wreq 路径靠 60 秒池重建，Node 路径
+        // 更及时；行为差异见 node-engine.md §7）。
+        let addrs = tokio::select! {
+            _ = cancel.cancelled() => return Err(PluginError::cancelled()),
+            value = network_policy::resolve_target(&target, self.strict()) => value.map_err(|e| PluginError::new("NETWORK", e))?,
+        };
+        let request = NodeRequest {
+            url: target.to_string(),
+            method: outgoing.method.to_string(),
+            headers: outgoing.headers.clone(),
+            body: outgoing.body.clone(),
+            timeout,
+            // 代理每跳重新解析（不缓存地址），设置改动立即生效。
+            proxy_url: crate::proxy::effective_proxy_url(&crate::proxy::snapshot()),
+            pinned_addrs: addrs.iter().map(|a| a.to_string()).collect(),
+        };
+        let response = self.node_request_with_refresh(request, cancel).await?;
+        let mut headers = response.headers;
+        let redacted = self.receive_cookies(
+            &target,
+            &mut headers,
+            outgoing.generation.as_deref(),
+            outgoing.cookies,
+        )?;
+        if matches!(response.status, 429 | 503) {
+            if let Some(sec) = headers
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                self.cooldown.lock().unwrap().insert(
+                    host.to_string(),
+                    Instant::now() + Duration::from_secs(sec.min(600)),
+                );
+            }
+        }
+        // 重定向跳不读体（与 wreq 分支一致）：body 已由 Node 取回，
+        // 这里只跳过 maxBytes 校验，buffered() 按 Location 跟进。
+        let is_redirect = follow && matches!(response.status, 301 | 302 | 303 | 307 | 308);
+        if !is_redirect && response.body.len() > max {
+            return Err(PluginError::new("UPSTREAM_ERROR", "响应体超过 maxBytes"));
+        }
+        Ok(Arc::new(BufferedResponse {
+            status: StatusCode::from_u16(response.status)
+                .map_err(|_| PluginError::new("UPSTREAM_ERROR", "上游返回无效状态码"))?,
+            url: target,
+            headers,
+            bytes: response.body,
+            redacted,
+        }))
+    }
+
+    /// 边车连不上（TCP 没连上、请求没进 Node）时返回 true：回环上
+    /// 只有“边车没在听”这一种传输失败；/request 500 等边车错误
+    /// 走别的文案，不触发刷新。
+    fn is_node_connect(e: &PluginError) -> bool {
+        e.code == "INTERNAL" && e.message.contains("Node 边车连接失败")
+    }
+
+    /// 拿缓存的 Node 客户端；没有就重探引导（重读 info 文件 +
+    /// `/health`，边车重绑换了端口时拿到新地址）。
+    async fn node_client(&self, cancel: &CancellationToken) -> Result<Arc<NodeClient>> {
+        if let Some(client) = self.node_client.lock().unwrap().clone() {
+            return Ok(client);
+        }
+        let bootstrap = self.node_bootstrap.lock().unwrap().clone();
+        let info = tokio::select! {
+            _ = cancel.cancelled() => return Err(PluginError::cancelled()),
+            info = bootstrap.ensure_started() => info?,
+        };
+        let client = Arc::new(NodeClient::new(info.api_base)?);
+        *self.node_client.lock().unwrap() = Some(client.clone());
+        Ok(client)
+    }
+
+    /// 清掉旧客户端，下次 `node_client()` 重探引导拿新地址。
+    async fn refresh_node_client(&self, cancel: &CancellationToken) -> Result<()> {
+        *self.node_client.lock().unwrap() = None;
+        self.node_client(cancel).await?;
+        Ok(())
+    }
+
+    /// 调一次 Node 边车；连不上时重新探测地址并重试一次。
+    /// 请求从未到过边车（TCP 都没连上），重试不会重放已执行的请求。
+    /// 超时不触发重探。
+    async fn node_request_with_refresh(
+        &self,
+        request: NodeRequest,
+        cancel: &CancellationToken,
+    ) -> Result<NodeResponse> {
+        let first = {
+            let client = self.node_client(cancel).await?;
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(PluginError::cancelled()),
+                r = client.request(request.clone()) => r,
+            }
+        };
+        match first {
+            Ok(v) => Ok(v),
+            Err(e) if Self::is_node_connect(&e) => {
+                if self.refresh_node_client(cancel).await.is_ok() {
+                    let client = self.node_client(cancel).await?;
+                    tokio::select! {
+                        _ = cancel.cancelled() => Err(PluginError::cancelled()),
+                        r = client.request(request) => r,
+                    }
+                } else {
+                    Err(e)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn read_hop_wreq(
         &self,
         outgoing: Outgoing,
         follow: bool,
@@ -291,6 +456,7 @@ impl Network {
         outgoing: Outgoing,
         follow: bool,
         max: usize,
+        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Arc<BufferedResponse>> {
         self.check_cooldown(outgoing.target.host_str().unwrap())?;
@@ -298,7 +464,7 @@ impl Network {
             || outgoing.headers.contains_key("authorization")
             || outgoing.headers.contains_key("cookie")
         {
-            return self.read_hop(outgoing, follow, max, cancel).await;
+            return self.read_hop(outgoing, follow, max, timeout, cancel).await;
         }
         let key = json!([
             crate::proxy::generation(),
@@ -326,7 +492,7 @@ impl Network {
                 let network = self.clone();
                 tokio::spawn(async move {
                     let cancel = CancellationToken::new();
-                    let work = network.read_hop(outgoing, follow, max, &cancel);
+                    let work = network.read_hop(outgoing, follow, max, timeout, &cancel);
                     tokio::pin!(work);
                     let result = loop {
                         tokio::select! {

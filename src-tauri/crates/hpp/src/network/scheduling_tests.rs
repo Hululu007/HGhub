@@ -63,7 +63,7 @@ async fn fixture() -> (String, Arc<Fixture>, tokio::task::JoinHandle<()>) {
 
 fn network(dir: &std::path::Path) -> Arc<Network> {
     let meta = Meta::parse(json!({"id":"fixture.scheduling","name":"Scheduling","protocol":1,"version":"1.0.0","allowInsecureHttp":true})).unwrap();
-    Arc::new(Network::new(meta, dir.into(), Some(false), Default::default()).unwrap())
+    Arc::new(Network::new(meta, dir.into(), Some(false), Default::default(), Arc::new(crate::node::UnavailableNode)).unwrap())
 }
 
 async fn until(test: impl Fn() -> bool) {
@@ -347,6 +347,7 @@ async fn cooldown_is_shared_across_plugins_and_queues_and_cancellation_removes_q
             other_dir.path().into(),
             Some(false),
             network.cooldown.clone(),
+            Arc::new(crate::node::UnavailableNode),
         )
         .unwrap(),
     );
@@ -424,7 +425,7 @@ fn webhome_plugin_target_allows_http_plain_plugin_rejects() {
     }))
     .unwrap();
     let network =
-        Network::new(webhome, dir.path().into(), Some(false), Default::default()).unwrap();
+        Network::new(webhome, dir.path().into(), Some(false), Default::default(), Arc::new(crate::node::UnavailableNode)).unwrap();
     assert!(network.target("http://example.com/list").is_ok());
     assert!(network.target("https://example.com/list").is_ok());
 
@@ -437,7 +438,7 @@ fn webhome_plugin_target_allows_http_plain_plugin_rejects() {
     }))
     .unwrap();
     let network =
-        Network::new(plain, dir.path().into(), Some(false), Default::default()).unwrap();
+        Network::new(plain, dir.path().into(), Some(false), Default::default(), Arc::new(crate::node::UnavailableNode)).unwrap();
     let err = network.target("http://example.com/list").unwrap_err();
     assert_eq!(err.code, "INVALID_ARGUMENT");
     assert!(network.target("https://example.com/list").is_ok());

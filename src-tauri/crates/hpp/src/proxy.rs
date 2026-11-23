@@ -201,15 +201,31 @@ fn system_proxy_url(p: &SystemProxies) -> Option<String> {
 /// Construct a route per request so changes apply to existing provider instances.
 /// Wreq handles Windows/macOS fixed proxies, environment variables and NO_PROXY.
 pub(crate) fn configure(builder: wreq::ClientBuilder, config: &Config) -> Result<wreq::ClientBuilder, String> {
-    let explicit = match config.mode {
-        Mode::Off => return Ok(builder.no_proxy()),
-        Mode::Custom => Some(config.url.clone()),
-        Mode::System => std::env::var("HGHUB_PROXY").ok().filter(|s| !s.trim().is_empty())
-            .or_else(platform_proxy),
-    };
-    match explicit {
-        Some(url) => Ok(builder.no_proxy().proxy(wreq::Proxy::all(url).map_err(|_| "代理配置无效")?)),
+    match effective_proxy_url(config) {
+        None if config.mode == Mode::Off => Ok(builder.no_proxy()),
         None => Ok(builder),
+        Some(url) => Ok(builder.no_proxy().proxy(wreq::Proxy::all(url).map_err(|_| "代理配置无效")?)),
+    }
+}
+
+/// 本跳生效的代理地址（与 `configure` 同一规则，Node 路径共用）：
+///
+/// | 用户设置 | 生效代理 |
+/// | --- | --- |
+/// | 直连（Off） | `None`（无 HTTP 代理；TUN 仍在 socket 层生效） |
+/// | 自定义（Custom） | 自定义地址 |
+/// | 跟随系统（System） | `HGHUB_PROXY` 环境变量（非空时优先），否则系统代理 |
+///
+/// 只有 PAC 时为 `None`（与今天一致）；系统字典异常值导致地址无效
+/// 时 `platform_proxy` 已退回直连。
+pub(crate) fn effective_proxy_url(config: &Config) -> Option<String> {
+    match config.mode {
+        Mode::Off => None,
+        Mode::Custom => Some(config.url.clone()),
+        Mode::System => std::env::var("HGHUB_PROXY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(platform_proxy),
     }
 }
 
@@ -618,6 +634,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(state.set("off", "").is_err());
         assert!(state.config == previous);
+    }
+
+    #[test]
+    fn effective_proxy_url_covers_off_custom_and_system() {
+        // Off → 直连；Custom → 自定义地址原样。
+        assert_eq!(
+            effective_proxy_url(&Config::for_test("off", "").unwrap()),
+            None
+        );
+        assert_eq!(
+            effective_proxy_url(&Config::for_test("custom", "127.0.0.1:7897").unwrap()),
+            Some("http://127.0.0.1:7897".to_string())
+        );
+        // System：HGHUB_PROXY 非空时优先于系统代理；用完恢复，避免
+        // 影响并行跑的其他测试（并行测试里没有别的用例读它）。
+        let previous = std::env::var("HGHUB_PROXY").ok();
+        std::env::set_var("HGHUB_PROXY", "http://127.0.0.1:9999");
+        assert_eq!(
+            effective_proxy_url(&Config::for_test("system", "").unwrap()),
+            Some("http://127.0.0.1:9999".to_string())
+        );
+        match previous {
+            Some(v) => std::env::set_var("HGHUB_PROXY", v),
+            None => std::env::remove_var("HGHUB_PROXY"),
+        }
     }
 
     #[test]

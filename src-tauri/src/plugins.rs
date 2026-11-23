@@ -228,9 +228,18 @@ impl PluginHost {
                         .unwrap_or_else(|_| self.dir.clone())
                         .join("python-sidecar.json")
                 };
+                // Node 边车地址文件：引导启动 Node 引擎后由 host.js 写出实际地址。
+                let node_info_path = {
+                    use tauri::Manager;
+                    app.path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| self.dir.clone())
+                        .join("node-sidecar.json")
+                };
                 let manager = PluginManager::open(self.dir.clone())?
                     .with_document_reader(Arc::new(PickedDocuments(app.clone())))
-                    .with_python_bootstrap(crate::python::python_bootstrap(info_path));
+                    .with_python_bootstrap(crate::python::python_bootstrap(info_path))
+                    .with_node_bootstrap(crate::node::node_bootstrap(node_info_path));
                 #[cfg(target_os = "windows")]
                 let manager = match crate::windows_login::WindowsLogin::detect() {
                     Some(provider) => manager.with_web_login(Arc::new(provider)),

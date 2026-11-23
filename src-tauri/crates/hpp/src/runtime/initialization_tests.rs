@@ -19,6 +19,7 @@ async fn dropping_initialization_stops_pending_and_running_factory() {
                 dir.path().into(),
                 Some(false),
                 Default::default(),
+                Arc::new(crate::node::UnavailableNode),
             )
             .unwrap(),
         );

@@ -6,6 +6,7 @@ mod native_player;
 #[cfg(target_os = "macos")]
 mod macos_titlebar;
 mod network_policy;
+mod node;
 mod plugins;
 mod python;
 mod webhome;

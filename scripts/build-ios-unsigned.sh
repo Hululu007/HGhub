@@ -52,6 +52,10 @@ node scripts/sync-ios-photo-library.mjs
 # 链接与装包分别在下面的 xcodebuild 参数与 --install-app 里。
 node scripts/sync-ios-python.mjs
 
+# Node 引擎：下载 nodejs-mobile xcframework 并暂存边车源码（gen/apple 里），
+# 链接与装包分别在下面的 xcodebuild 参数与 --install-app 里。
+node scripts/sync-ios-node.mjs
+
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.
 XCODE_TOOLCHAIN="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain"
@@ -66,8 +70,8 @@ xcodebuild build \
   -derivedDataPath "$ROOT/build_output" \
   TOOLCHAIN_DIR="$XCODE_TOOLCHAIN" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-  FRAMEWORK_SEARCH_PATHS='$(inherited) $(PROJECT_DIR) $(PROJECT_DIR)/Python.xcframework/ios-arm64' \
-  OTHER_LDFLAGS='$(inherited) -framework Python -framework SystemConfiguration'
+  FRAMEWORK_SEARCH_PATHS='$(inherited) $(PROJECT_DIR) $(PROJECT_DIR)/Python.xcframework/ios-arm64 $(PROJECT_DIR)/NodeMobile.xcframework/ios-arm64' \
+  OTHER_LDFLAGS='$(inherited) -framework Python -framework NodeMobile -framework SystemConfiguration'
 
 APP_DIR="$ROOT/build_output/Build/Products/release-iphoneos"
 # 产品名改名后 .app 文件名会跟着变（改名前是 HGhub.app），不写死名字，
@@ -92,6 +96,10 @@ fi
 # Python 运行时装包：标准库 + Python.framework + 边车源码进 .app，
 # 再打 IPA 之前完成（.app 是每次现编的，装包步骤不可省略）。
 node scripts/sync-ios-python.mjs --install-app "$APP"
+
+# Node 引擎装包：NodeMobile.framework + 边车源码进 .app，
+# 再打 IPA 之前完成。
+node scripts/sync-ios-node.mjs --install-app "$APP"
 
 PACKAGE_DIR=$(mktemp -d)
 mkdir -p "$PACKAGE_DIR/Payload"

@@ -515,6 +515,7 @@ impl PluginManager {
             self.root.join(".distribution"),
             self.strict,
             self.cooldown.clone(),
+            self.node_bootstrap.clone(),
         )
     }
     async fn load_document(&self, location: &str, cancel: &CancellationToken) -> Result<Document> {

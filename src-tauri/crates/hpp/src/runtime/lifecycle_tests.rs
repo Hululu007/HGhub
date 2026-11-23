@@ -11,7 +11,7 @@ async fn healthy_runtime_disposes_once_with_no_io_and_failed_hook_does_not_block
         let dir = tempfile::tempdir().unwrap();
         let meta = Meta::parse(json!({"id":"fixture.lifecycle","name":"Lifecycle","version":"1.0.0","protocol":1})).unwrap();
         let store = Arc::new(Store::open(dir.path().join("store.json")).unwrap());
-        let network = Arc::new(Network::new(meta.clone(), dir.path().into(), Some(false), Default::default()).unwrap());
+        let network = Arc::new(Network::new(meta.clone(), dir.path().into(), Some(false), Default::default(), Arc::new(crate::node::UnavailableNode)).unwrap());
         let logs: Logs = Default::default();
         let source = format!("export const meta={};export default hg=>({{media:{{getDetail(){{}},resolvePlayback(){{}}}},dispose(){{hg.log.info('dispose');{hook}}}}});", serde_json::to_string(&meta).unwrap());
         let worker = Worker::spawn(source, meta, json!({}), Value::Null, store.clone(), network, logs.clone(), Default::default(), None).await.unwrap();

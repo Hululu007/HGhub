@@ -1,6 +1,7 @@
 use crate::{
     model::Meta,
     network_policy,
+    node::{NodeBootstrap, NodeClient},
     store::{atomic_write, now},
     wire::Transfer,
     PluginError, Result,
@@ -71,6 +72,12 @@ pub struct Network {
     cache: Mutex<HashMap<String, CachedResponse>>,
     clients: tokio::sync::Mutex<HashMap<String, (Instant, wreq::Client)>>,
     pub cooldown: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Node 边车引导：iOS 上启动真 Node 引擎，非 iOS 用桩实现。
+    /// `PluginManager::with_node_bootstrap` 注入后会覆盖这里的默认
+    /// 桩（管理器先建、引导后注，见 `set_node_bootstrap`）。
+    node_bootstrap: Mutex<Arc<dyn NodeBootstrap>>,
+    /// 已建好的 Node 边车客户端（地址可能换端口，重探后换新）。
+    node_client: Mutex<Option<Arc<NodeClient>>>,
 }
 #[derive(Clone)]
 struct RedactedSetCookie;
@@ -86,6 +93,7 @@ impl Network {
         dir: PathBuf,
         strict: Option<bool>,
         cooldown: Arc<Mutex<HashMap<String, Instant>>>,
+        node_bootstrap: Arc<dyn NodeBootstrap>,
     ) -> Result<Self> {
         let jar_path = dir.join("cookies.json");
         let jar = if jar_path.exists() {
@@ -119,7 +127,19 @@ impl Network {
             cache: Mutex::new(HashMap::new()),
             clients: Default::default(),
             cooldown,
+            node_bootstrap: Mutex::new(node_bootstrap),
+            node_client: Default::default(),
         })
+    }
+    /// 注入 Node 边车引导（`PluginManager::with_node_bootstrap` 用）：
+    /// 换引导即换边车地址，旧客户端作废。
+    pub fn set_node_bootstrap(&self, bootstrap: Arc<dyn NodeBootstrap>) {
+        *self.node_bootstrap.lock().unwrap() = bootstrap;
+        *self.node_client.lock().unwrap() = None;
+    }
+    /// 插件 net 请求走不走 Node 传输（iOS + 引导可用才走）。
+    pub(crate) fn node_transport(&self) -> bool {
+        self.node_bootstrap.lock().unwrap().is_available()
     }
     pub fn strict(&self) -> bool {
         self.strict_override
@@ -707,6 +727,7 @@ impl Network {
                     v["credentials"] != "omit",
                     follow,
                     max,
+                    timeout,
                     &cancel,
                 )
                 .await?;
@@ -799,6 +820,8 @@ pub fn headers(v: &Value) -> Result<HeaderMap> {
     Ok(out)
 }
 
+#[cfg(test)]
+mod node_tests;
 #[cfg(test)]
 mod scheduling_tests;
 #[cfg(test)]

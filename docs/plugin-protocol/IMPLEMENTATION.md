@@ -22,7 +22,7 @@
 | 日志 | 插件日志、校验告警和运行时错误共用每分钟 240 行/最近 2000 行/每行 2 KiB UTF-8 JSON 上限；超速丢弃数量在读取日志时可见；过长 details 截断，不绕过文本限额 |
 | 数据桥 | 全量带标签的可传递值；支持 Uint8Array，不与普通对象冲突；深度、字节预算与结果校验 |
 | 持久化 | 插件 ID 隔离的键值存储，二进制、TTL、原子落盘、容量上限；Cookie 独立罐与 domain/path 匹配 |
-| HTTP | DNS/重定向检查，复用应用现有网络策略；同组 DNS 有允许的 IPv4 时忽略受限 IPv6，不连接受限地址；取消、请求/响应上限、字符集、限速、Retry-After 冷却；GET/HEAD 重试和有界匿名 GET 响应缓存；按插件、源站及代理/安全策略复用连接池，定期重新验证 DNS。插件 net 请求用 Node 式极简画像（HTTP/1.1、无浏览器头、页面 UA 原样） |
+| HTTP | DNS/重定向检查，复用应用现有网络策略；同组 DNS 有允许的 IPv4 时忽略受限 IPv6，不连接受限地址；取消、请求/响应上限、字符集、限速、Retry-After 冷却；GET/HEAD 重试和有界匿名 GET 响应缓存；按插件、源站及代理/安全策略复用连接池，定期重新验证 DNS。插件 net 请求走内嵌 Node 引擎（`node_start` + 回环边车，Node 的 `https.request` 发出；HTTP/1.1、无浏览器头、页面 UA 原样） |
 | 网络调度 | 每插件 API 并发 6、同主机 4，许可覆盖响应体；同插件匿名 GET 按每跳实际地址与有效头合并，独立超时/取消，全部等待者退出后停止上游；媒体不占 API 队列和速率额度，主机冷却跨插件/队列共享 |
 | 原生工具 | URL、URLSearchParams、编解码、摘要/HMAC、AES CBC/ECB/CTR/GCM、RSA 公钥加密（SPKI/PKCS#1，PKCS1/OAEP-SHA1/OAEP-SHA256，1024–8192 位）、随机数，原生 HTML/CSS 选择器 |
 | 媒体 | 随机端口 loopback HTTP 服务，progressive 流式代理与真实 Range/HEAD/206/416，HLS 主/子清单及 URI 属性改写 |

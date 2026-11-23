@@ -2,6 +2,7 @@ use crate::{
     model::{self, Meta},
     native::Logs,
     network::Network,
+    node::{NodeBootstrap, UnavailableNode},
     python::{PyWorker, PythonBootstrap, RuntimeWorker, UnavailablePython},
     runtime::{self, Worker},
     store::{atomic_write, Store},
@@ -73,6 +74,10 @@ pub struct PluginManager {
     /// Python 边车引导：iOS 实现启动 CPython，非 iOS 用桩实现（见
     /// `python::UnavailablePython`）。未注入时默认用桩实现。
     python_bootstrap: Arc<dyn PythonBootstrap>,
+    /// Node 边车引导：iOS 实现启动 Node 引擎，非 iOS 用桩实现（见
+    /// `node::UnavailableNode`）。未注入时默认用桩实现，插件 net
+    /// 请求走 wreq（今天的行为）。
+    node_bootstrap: Arc<dyn NodeBootstrap>,
     /// 边车代理入口的实际地址（/health 返回；9978 被占时会换临时端口），
     /// 供回环取流时识别自家代理地址用。
     py_proxy_base: Mutex<Option<String>>,
@@ -131,7 +136,7 @@ impl PluginManager {
                 Err(e) => error = Some(e),
             }
             let mut installed =
-                Self::installed(root.join(&indexed.id), entry, strict, cooldown.clone())?;
+                Self::installed(root.join(&indexed.id), entry, strict, cooldown.clone(), Arc::new(UnavailableNode))?;
             installed.error = error;
             plugins.insert(indexed.id, Arc::new(tokio::sync::Mutex::new(installed)));
         }
@@ -146,6 +151,7 @@ impl PluginManager {
             document_reader: None,
             web_login: None,
             python_bootstrap: Arc::new(UnavailablePython),
+            node_bootstrap: Arc::new(UnavailableNode),
             py_proxy_base: Default::default(),
             plugins: tokio::sync::RwLock::new(plugins),
             mutation: tokio::sync::Mutex::new(()),
@@ -167,6 +173,20 @@ impl PluginManager {
     /// Python 插件初始化报 UNSUPPORTED）。
     pub fn with_python_bootstrap(mut self, provider: Arc<dyn PythonBootstrap>) -> Self {
         self.python_bootstrap = provider;
+        self
+    }
+    /// 注入 Node 边车引导（iOS 实现启动 Node 引擎；不注入时默认桩实现，
+    /// 插件 net 请求走 wreq）。已装插件的 Network 也同步换引导——
+    /// 管理器先建、引导后注，Network 建时还拿不到它。
+    pub fn with_node_bootstrap(mut self, provider: Arc<dyn NodeBootstrap>) -> Self {
+        self.node_bootstrap = provider.clone();
+        if let Ok(plugins) = self.plugins.try_read() {
+            for p in plugins.values() {
+                if let Ok(p) = p.try_lock() {
+                    p.network.set_node_bootstrap(provider.clone());
+                }
+            }
+        }
         self
     }
     /// 记录边车代理入口的实际地址（PyWorker spawn 成功后调）。
@@ -223,6 +243,7 @@ impl PluginManager {
         entry: IndexEntry,
         strict: Option<bool>,
         cooldown: Arc<Mutex<HashMap<String, Instant>>>,
+        node_bootstrap: Arc<dyn NodeBootstrap>,
     ) -> Result<Installed> {
         std::fs::create_dir_all(&dir)?;
         Ok(Installed {
@@ -231,6 +252,7 @@ impl PluginManager {
                 dir.clone(),
                 strict,
                 cooldown,
+                node_bootstrap,
             )?),
             store: Arc::new(Store::open(dir.join("storage.json"))?),
             entry,
@@ -658,7 +680,7 @@ impl PluginManager {
                 w.stop_and_wait().await?;
             }
         }
-        let mut p = Self::installed(dir.clone(), entry, self.strict, self.cooldown.clone())?;
+        let mut p = Self::installed(dir.clone(), entry, self.strict, self.cooldown.clone(), self.node_bootstrap.clone())?;
         if let Some(old) = old_guard.as_ref() {
             p.store = old.store.clone();
         }
