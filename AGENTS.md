@@ -144,3 +144,15 @@ HGhub 同时维护 **HPP 插件协议文档及其宿主实现**，以及 **播�
 - 部署失败、权限或网络阻塞时，修复可处理的问题；仍无法完成时明确报告实际阻碍，不宣称“文档已全部同步”。本地构建成功、源码已推送、线上已发布是三个不同状态。
 - 纯播放器样式/交互修正且公开支持范围与资料均未变化，或仅修改本文件等未纳入站点的协作资料，**无需为此修改协议或发布 Pages**。交付时简要说明无公开文档影响即可。
 - Pages 发布与应用发布独立。不要为文档创建应用版本标签、触发应用 Release，或改成 push 自动部署；除非用户另有明确要求，保留现有手动文档工作流和 tag 触发应用发布方式。
+
+### 7.6 本机 Android 检查的环境（2026-11-23，v0.0.68 时确认）
+
+`cargo check --target aarch64-linux-android` 只给 `ANDROID_NDK_HOME` 会失败，完整环境如下（本机事项，不进项目配置；CI 是 macOS，不需要这些）：
+
+- `LIBCLANG_PATH=<NDK>/toolchains/llvm/prebuilt/linux-x86_64/lib`（rquickjs-sys 的 bindgen 要找 libclang）。
+- rustfmt 组件必须装好（`rustup component add rustfmt`）：bindgen 输出要过 rustfmt，`~/.cargo/bin/rustfmt` 只是 rustup 代理壳，没装组件就报错。
+- cc-rs 要找裸名 `aarch64-linux-android-clang` / `clang++` / `ar` / `ranlib`，NDK 里只有带 API 级别的 `aarch64-linux-android21-clang`。做法是在 PATH 最前面放一个包装目录：`clang`/`clang++` 用小脚本 `exec <NDK>/bin/aarch64-linux-android21-clang "$@"`（**不能用符号链接**：NDK 的 `...21-clang` 本身是脚本，按 `$0` 所在目录找 `clang`，链过去就找不到）；`ar`/`ranlib` 链到 `llvm-ar`/`llvm-ranlib` 即可。
+- `BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android -resource-dir=<NDK>/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/19"`：btls-sys 的 bindgen 不传 resource-dir 找不到 `stddef.h`（libclang 从 build script 进程里推不出自己的 resource dir）。
+- **不要设 `CC_aarch64-linux-android` 等带横杠的环境变量**：cmake crate 会把它当成 `CMAKE_C_COMPILER`，和 toolchain 文件的编译器冲突，`FindThreads` 报错，且会污染 btls-sys 的 cmake 缓存；一旦污染，删掉 `target/aarch64-linux-android/debug/build/btls-sys` 再重跑。
+- hpp 的宿主 `cargo test --lib`（在 `src-tauri/crates/hpp` 里跑，hpp 是独立包，不在 workspace 里）同样缺系统 libclang/头文件：用 `LIBCLANG_PATH` + `BINDGEN_EXTRA_CLANG_ARGS="--sysroot=<NDK sysroot> -resource-dir=<NDK>/lib/clang/19 -I<NDK sysroot>/usr/include/aarch64-linux-android"` 才能编过 btls-sys 的 bindgen。
+- 两个 cargo 进程不能同时跑：build script 产物都在 `target/debug/`，后启动的会卡在 `Blocking waiting for file lock on build directory` 直到前一个释放。

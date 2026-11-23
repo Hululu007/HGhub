@@ -1,6 +1,6 @@
 use super::*;
 use futures_util::{stream, StreamExt};
-use reqwest::{header::HeaderMap, Method};
+use wreq::{header::HeaderMap, Method};
 use std::time::Duration;
 
 impl PluginManager {

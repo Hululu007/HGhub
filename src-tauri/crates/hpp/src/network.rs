@@ -5,7 +5,7 @@ use crate::{
     wire::Transfer,
     PluginError, Result,
 };
-use reqwest::{
+use wreq::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Method, Response,
 };
@@ -69,7 +69,7 @@ pub struct Network {
     inflight: Mutex<HashMap<String, Arc<api::Flight>>>,
     rate: Mutex<(f64, Instant)>,
     cache: Mutex<HashMap<String, CachedResponse>>,
-    clients: tokio::sync::Mutex<HashMap<String, (Instant, reqwest::Client)>>,
+    clients: tokio::sync::Mutex<HashMap<String, (Instant, wreq::Client)>>,
     pub cooldown: Arc<Mutex<HashMap<String, Instant>>>,
 }
 #[derive(Clone)]
@@ -400,7 +400,7 @@ impl Network {
     }
     // A pool is bound to validated DNS answers and the effective network policy.
     // Revalidate periodically; never reuse a pool across proxy/security changes.
-    async fn client(&self, target: &Url, cancel: &CancellationToken) -> Result<reqwest::Client> {
+    async fn client(&self, target: &Url, cancel: &CancellationToken) -> Result<wreq::Client> {
         let strict = self.strict();
         let key = format!(
             "{}:{}:{}",
@@ -420,14 +420,24 @@ impl Network {
             _ = cancel.cancelled() => return Err(PluginError::cancelled()),
             value = network_policy::resolve_target(target, strict) => value.map_err(|e| PluginError::new("NETWORK", e))?,
         };
-        let builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+        // Chrome 149 指纹模拟（TLS/HTTP2/请求头顺序）：Cloudflare 只认
+        // 浏览器指纹，v0.0.67 只换 TLS 后端仍被拦。emulation 必须在
+        // user_agent 之前调——emulation 的默认头含 Chrome UA，之后调
+        // user_agent 才能把默认 UA 恢复成 HGhub/HPP-dev（任务约束：不改
+        // 默认 UA；页面自带的 UA 是请求级头，不受这里影响）。
+        let builder = wreq::Client::builder()
+            .emulation(wreq_util::Profile::Chrome149)
+            .redirect(wreq::redirect::Policy::none())
             .referer(false)
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(45))
             .pool_max_idle_per_host(6)
             .user_agent("HGhub/HPP-dev")
-            .resolve_to_addrs(target.host_str().unwrap(), &addrs);
+            // wreq 的 resolve_to_addrs 只要 SocketAddr 本身（reqwest 接受
+            // &Vec<SocketAddr>，wreq 不接受），域名还要 Into<Cow<'static, str>>
+            //（reqwest 只要 Into<String>）；addrs 之后不再用，直接移交，
+            // host_str 借来的 &str 则 to_owned 成 String 再进 Cow::Owned。
+            .resolve_to_addrs(target.host_str().unwrap().to_owned(), addrs);
         let client = crate::proxy::configure(builder, &crate::proxy::snapshot())
             .map_err(|e| PluginError::new("NETWORK", e))?
             .build()

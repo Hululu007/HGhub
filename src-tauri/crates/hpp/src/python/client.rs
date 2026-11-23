@@ -23,10 +23,12 @@ pub struct LoadInfo {
     pub style: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SidecarClient {
     base: String,
-    client: reqwest::Client,
+    // wreq::Client 没有 Debug（reqwest 有），所以 SidecarClient 不能再派生
+    // Debug；调用方只拿它当 Arc<SidecarClient> 用，不需要 Debug。
+    client: wreq::Client,
 }
 
 fn truncate_error(text: &str) -> String {
@@ -40,7 +42,9 @@ fn truncate_error(text: &str) -> String {
 
 impl SidecarClient {
     pub fn new(api_base: String) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        // 边车是回环 HTTP，模拟无实际作用；全项目统一用同一套客户端。
+        let client = wreq::Client::builder()
+            .emulation(wreq_util::Profile::Chrome149)
             .no_proxy()
             .build()
             .map_err(|e| PluginError::internal(format!("创建 Python 边车客户端失败：{e}")))?;
@@ -59,7 +63,7 @@ impl SidecarClient {
         path: &str,
         body: Value,
         timeout: Duration,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<wreq::Response> {
         let url = format!("{}{}", self.base, path);
         self.client
             .post(&url)

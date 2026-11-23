@@ -108,7 +108,7 @@ resolvePlayback({{mediaId}}){{return {{streams:[{{url:'{base}/'+mediaId,format:'
             .any(|path| path == "/warm")
     })
     .await;
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = wreq::Client::builder().no_proxy().build().unwrap();
     let mut playing = Vec::new();
     for _ in 0..7 {
         let client = client.clone();
@@ -172,11 +172,16 @@ resolvePlayback({{mediaId}}){{return {{streams:[{{url:'{base}/'+mediaId,format:'
         manager.preload_media(&warm.session_id, 0.0).await.unwrap()["bytes"],
         18
     );
-    let mut last_body = client.get(&play.url).send().await.unwrap();
-    assert_eq!(last_body.chunk().await.unwrap().unwrap(), b"first".as_slice());
+    let last_body = client.get(&play.url).send().await.unwrap();
+    // wreq 没有 Response::chunk()：转成流逐块读。
+    let mut last_stream = Box::pin(last_body.bytes_stream());
+    assert_eq!(
+        last_stream.next().await.unwrap().unwrap(),
+        b"first".as_slice()
+    );
     let weak = Arc::downgrade(&manager);
     drop(manager);
     assert!(weak.upgrade().is_none(), "streamed body must not keep the entire host alive");
-    assert!(tokio::time::timeout(Duration::from_secs(1), last_body.chunk()).await.unwrap().unwrap().is_none());
+    assert!(tokio::time::timeout(Duration::from_secs(1), last_stream.next()).await.unwrap().unwrap().is_none());
     server.abort();
 }

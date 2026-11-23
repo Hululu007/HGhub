@@ -67,7 +67,7 @@ async fn resolver_owns_transforms_headers_cookies_and_subtitles() {
         .await
         .unwrap();
     assert_eq!(prepared.provider_id, "fixture.resolver");
-    let client = reqwest::Client::new();
+    let client = wreq::Client::new();
     let playlist = client
         .get(&prepared.url)
         .send()

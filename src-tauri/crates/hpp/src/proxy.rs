@@ -182,7 +182,7 @@ fn bracket_ipv6(host: &str) -> String {
     }
 }
 
-/// 系统固定代理 → reqwest 用的代理地址（纯函数，宿主可单测）。
+/// 系统固定代理 → wreq 用的代理地址（纯函数，宿主可单测）。
 /// HTTP 优先于 SOCKS；两者都没启用（含只有 PAC 的情况）返回 None——
 /// PAC 求值不在本版范围。最后过一遍 `normalize_proxy`：系统字典里的
 /// 异常值导致地址无效时退回直连，不让一次坏配置拖垮全部宿主网络。
@@ -199,8 +199,8 @@ fn system_proxy_url(p: &SystemProxies) -> Option<String> {
 }
 
 /// Construct a route per request so changes apply to existing provider instances.
-/// Reqwest handles Windows/macOS fixed proxies, environment variables and NO_PROXY.
-pub(crate) fn configure(builder: reqwest::ClientBuilder, config: &Config) -> Result<reqwest::ClientBuilder, String> {
+/// Wreq handles Windows/macOS fixed proxies, environment variables and NO_PROXY.
+pub(crate) fn configure(builder: wreq::ClientBuilder, config: &Config) -> Result<wreq::ClientBuilder, String> {
     let explicit = match config.mode {
         Mode::Off => return Ok(builder.no_proxy()),
         Mode::Custom => Some(config.url.clone()),
@@ -208,7 +208,7 @@ pub(crate) fn configure(builder: reqwest::ClientBuilder, config: &Config) -> Res
             .or_else(platform_proxy),
     };
     match explicit {
-        Some(url) => Ok(builder.no_proxy().proxy(reqwest::Proxy::all(url).map_err(|_| "代理配置无效")?)),
+        Some(url) => Ok(builder.no_proxy().proxy(wreq::Proxy::all(url).map_err(|_| "代理配置无效")?)),
         None => Ok(builder),
     }
 }
@@ -304,7 +304,7 @@ fn read_system_proxies(dict: &CFDictionary<CFString, CFType>) -> SystemProxies {
 #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "ios")))]
 fn platform_proxy() -> Option<String> { None }
 
-pub(crate) fn connection_error(error: &reqwest::Error) -> &'static str {
+pub(crate) fn connection_error(error: &wreq::Error) -> &'static str {
     if error.is_timeout() { "连接超时，请检查代理与网络" }
     else if error.is_connect() { "无法连接代理或目标服务器，请检查地址、认证与网络" }
     else if error.is_body() || error.is_decode() { "服务器响应读取失败" }
@@ -319,10 +319,13 @@ pub async fn probe(mode: &str, url: &str, target: &str) -> Result<Value, String>
     let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
         for hop in 0..=5 {
             let addrs = crate::network_policy::resolve_target(&target, strict).await?;
-            let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(std::time::Duration::from_secs(8)).resolve_to_addrs(target.host_str().unwrap(), &addrs);
+            let builder = wreq::Client::builder()
+                .emulation(wreq_util::Profile::Chrome149)
+                .redirect(wreq::redirect::Policy::none())
+                .connect_timeout(std::time::Duration::from_secs(8)).resolve_to_addrs(target.host_str().unwrap().to_owned(), addrs);
             let client = configure(builder, &config)?.build().map_err(|_| "无法创建 HTTP 客户端")?;
-            let response = client.get(target.clone()).send().await.map_err(|e| connection_error(&e))?;
+            // wreq 的 IntoUri 不接受 url::Url，传 &str。
+            let response = client.get(target.as_str()).send().await.map_err(|e| connection_error(&e))?;
             if response.status().is_redirection() && hop < 5 {
                 if let Some(location) = response.headers().get("location").and_then(|s|s.to_str().ok()) {
                     target = crate::network_policy::redirect_target_with_mode(&target, location, strict)?;
@@ -390,7 +393,7 @@ pub fn normalize_proxy(raw: &str) -> Result<String, String> {
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
     let normalized = format!("{}://{auth}{host}{port}", parsed.scheme());
-    reqwest::Proxy::all(&normalized).map_err(|_| "代理配置无效（已隐藏原始值）")?;
+    wreq::Proxy::all(&normalized).map_err(|_| "代理配置无效（已隐藏原始值）")?;
     Ok(normalized)
 }
 
@@ -451,13 +454,13 @@ mod tests {
         }
         let (proxy_address, proxy_request) = endpoint("proxy response").await;
         let custom = Config::for_test("custom", &proxy_address).unwrap();
-        let client = configure(reqwest::Client::builder(), &custom).unwrap().build().unwrap();
+        let client = configure(wreq::Client::builder(), &custom).unwrap().build().unwrap();
         let result = client.get("http://upstream.invalid/video").timeout(std::time::Duration::from_secs(3)).send().await.unwrap();
         assert_eq!(result.text().await.unwrap(), "proxy response");
         assert!(proxy_request.await.unwrap().starts_with("GET http://upstream.invalid/video HTTP/1.1"));
 
         let (origin, origin_request) = endpoint("direct response").await;
-        let builder = reqwest::Client::builder().proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap());
+        let builder = wreq::Client::builder().proxy(wreq::Proxy::all("http://127.0.0.1:1").unwrap());
         let client = configure(builder, &Config::for_test("off", "").unwrap()).unwrap().build().unwrap();
         let result = client.get(format!("{origin}/cover")).timeout(std::time::Duration::from_secs(3)).send().await.unwrap();
         assert_eq!(result.text().await.unwrap(), "direct response");

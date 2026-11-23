@@ -96,7 +96,7 @@ async fn shared_refresh_switches_resources_atomically_and_cancels_independent_wa
         )
         .await
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = wreq::Client::new();
     let (a, b) = tokio::join!(
         m.refresh_media(&media.session_id, 0, "refresh-a".into()),
         m.refresh_media(&media.session_id, 0, "refresh-b".into())
@@ -287,7 +287,7 @@ async fn srt_tracks_use_declared_format_and_isolate_failures() {
     assert_eq!(tracks[0]["label"], "中文");
     assert_eq!(tracks[0]["default"], true);
     assert_ne!(tracks[0]["url"], tracks[1]["url"]);
-    let client = reqwest::Client::new();
+    let client = wreq::Client::new();
     let url = tracks[0]["url"].as_str().unwrap();
     let response = client.get(url).send().await.unwrap();
     assert_eq!(
@@ -480,7 +480,7 @@ async fn progressive_range_head_and_release() {
         .prepare_media("fixture.source", params(), 0, None, "prepare".into())
         .await
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = wreq::Client::new();
     let response = client
         .get(&media.url)
         .header("range", "bytes=2-5")
@@ -521,7 +521,7 @@ async fn hls_redirect_master_keys_maps_and_queries() {
         .prepare_media("fixture.source", params(), 0, None, "prepare".into())
         .await
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = wreq::Client::new();
     let master = client
         .get(&media.url)
         .send()
@@ -590,7 +590,7 @@ async fn endpoint_initialization_and_settings_revoke_media() {
     m.settings_set("fixture.source", "label".into(), json!("changed"))
         .await
         .unwrap();
-    assert_eq!(reqwest::get(media.url).await.unwrap().status(), 404);
+    assert_eq!(wreq::get(media.url).await.unwrap().status(), 404);
     let info = m.endpoint_set("fixture.source", "b").await.unwrap();
     assert_eq!(info.endpoint["id"], "b");
     task.abort();

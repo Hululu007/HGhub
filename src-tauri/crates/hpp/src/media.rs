@@ -26,6 +26,7 @@ use std::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 const MAX_RESOURCE: usize = 8 * 1024 * 1024;
 static MEDIA_TRANSFERS: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
@@ -1035,9 +1036,12 @@ async fn proxy_upstream(
         }
     }
     // 自家 Python 代理入口是回环地址，Network::target 会拦回环；但地址由
-    // 边车 /load 时登记、可信，用裸 reqwest 直取（不经过系统代理）。
+    // 边车 /load 时登记、可信，用裸 wreq 直取（不经过系统代理）。
     let upstream = if manager.is_py_proxy_url(&r.url) {
-        let plain = reqwest::Client::builder()
+        let plain = wreq::Client::builder()
+            // 回环直连，不走系统代理；但同样用 Chrome 指纹模拟——边车是
+            // 本机 HTTP，模拟无实际作用，只为全项目用同一套客户端。
+            .emulation(wreq_util::Profile::Chrome149)
             .no_proxy()
             .build()
             .map_err(|e| PluginError::internal(format!("创建取流客户端失败：{e}")))?;
@@ -1078,7 +1082,13 @@ async fn proxy_upstream(
     };
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
-    let final_url = upstream.url().clone();
+    // wreq 没有 Response::url()：从 uri() 解析；解析失败时退回请求地址
+    // （两个分支的请求地址都是 r.url；重定向由 Network 逐跳跟进过）。
+    let final_url = upstream
+        .uri()
+        .to_string()
+        .parse::<Url>()
+        .unwrap_or_else(|_| Url::parse(&r.url).expect("media request url parses"));
     if buffered && !status.is_success() {
         return Ok(Response::builder()
             .status(status)
@@ -1108,10 +1118,11 @@ async fn proxy_upstream(
         };
         return Ok(response.body(body).unwrap());
     }
-    let mut upstream = upstream;
+    // wreq 没有 Response::chunk()：先把响应体转成流再逐块读。
+    let mut stream = Box::pin(upstream.bytes_stream());
     let mut data = vec![];
     loop {
-        let chunk = tokio::select! {_=session.cancel.cancelled()=>return Err(PluginError::cancelled()),v=tokio::time::timeout(Duration::from_secs(20),upstream.chunk())=>v.map_err(|_|PluginError::timeout())?.map_err(|_|PluginError::new("NETWORK","媒体读取失败"))?};
+        let chunk = tokio::select! {_=session.cancel.cancelled()=>return Err(PluginError::cancelled()),v=tokio::time::timeout(Duration::from_secs(20),stream.next())=>v.map_err(|_|PluginError::timeout())?.transpose().map_err(|_|PluginError::new("NETWORK","媒体读取失败"))?};
         let Some(chunk) = chunk else {
             break;
         };
@@ -1188,7 +1199,7 @@ async fn proxy_upstream(
             let url = final_url
                 .join(raw)
                 .map_err(|_| PluginError::invalid("HLS 子资源 URL 无效"))?;
-            // 自家 Python 代理入口免目标校验（回环地址；取流时走裸 reqwest）。
+            // 自家 Python 代理入口免目标校验（回环地址；取流时走裸 wreq）。
             if !manager.is_py_proxy_url(url.as_str()) {
                 network.target(url.as_str())?;
             }

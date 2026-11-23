@@ -185,7 +185,7 @@ async fn local_page_served_over_loopback() {
             .unwrap(),
     );
     assert_eq!(config["url"], url);
-    let response = reqwest::get(&url).await.unwrap();
+    let response = wreq::get(&url).await.unwrap();
     assert_eq!(response.status(), 200);
     assert!(response.headers()["content-type"]
         .to_str()
@@ -199,7 +199,7 @@ async fn local_page_served_over_loopback() {
             .unwrap(),
         "https://webhome.example/"
     );
-    let missing = reqwest::get(url.replace("webhome.demo", "webhome.nope"))
+    let missing = wreq::get(url.replace("webhome.demo", "webhome.nope"))
         .await
         .unwrap();
     assert_eq!(missing.status(), 404);

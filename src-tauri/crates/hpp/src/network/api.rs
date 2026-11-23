@@ -1,5 +1,6 @@
 use super::*;
-use reqwest::StatusCode;
+use futures_util::StreamExt;
+use wreq::StatusCode;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Clone, Copy)]
@@ -124,7 +125,8 @@ impl Network {
         self.check_cooldown(host)?;
         let client = self.client(&outgoing.target, cancel).await?;
         let mut request = client
-            .request(outgoing.method, outgoing.target.clone())
+            // wreq 的 IntoUri 不接受 url::Url（只接受 Uri/str/String），传 String。
+            .request(outgoing.method, outgoing.target.to_string())
             .headers(outgoing.headers);
         if let Some(body) = outgoing.body {
             request = request.body(body);
@@ -233,22 +235,48 @@ impl Network {
         max: usize,
         cancel: &CancellationToken,
     ) -> Result<Arc<BufferedResponse>> {
+        // wreq 没有 Response::chunk()，也拿不到 response.url()：先把本跳
+        // 的目标地址记下来，再把响应体转成流逐块读（bytes_stream 会消费
+        // response，所以状态/头/标记要在转流之前快照）。重定向由调用方
+        // buffered() 按 target 逐跳跟进，这里存的 url 就是本跳的目标地址。
+        let target = outgoing.target.clone();
         let mut response = self.send(outgoing, Queue::Api, cancel).await?;
+        // wreq 的 bytes_stream 会消费 response 并丢掉 extensions 里挂的
+        // Api 并发许可；协议 03 §3 要求许可保持到响应体读完或取消，
+        // 不能在收到响应头时提前释放——所以先把许可取出来，在本函数内
+        // 保持到返回再释放（与旧 chunk() 读法保持 response 存活
+        // 到读完的效果一致）。重定向分支不读体，许可随本函数返回释放，
+        // 与旧行为一致。
+        let _permits = response.extensions_mut().remove::<Arc<Permits>>();
         let mut bytes = Vec::new();
         if !follow || !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let redacted = response
+                .extensions()
+                .get::<RedactedSetCookie>()
+                .is_some();
+            let mut stream = Box::pin(response.bytes_stream());
             while let Some(chunk) = tokio::select! {
                 _ = cancel.cancelled() => return Err(PluginError::cancelled()),
-                value = response.chunk() => value.map_err(|_| PluginError::new("NETWORK", "响应读取失败"))?,
+                value = stream.next() => value.transpose().map_err(|_| PluginError::new("NETWORK", "响应读取失败"))?,
             } {
                 if bytes.len() + chunk.len() > max {
                     return Err(PluginError::new("UPSTREAM_ERROR", "响应体超过 maxBytes"));
                 }
                 bytes.extend_from_slice(&chunk);
             }
+            return Ok(Arc::new(BufferedResponse {
+                status,
+                url: target,
+                headers,
+                bytes,
+                redacted,
+            }));
         }
         Ok(Arc::new(BufferedResponse {
             status: response.status(),
-            url: response.url().clone(),
+            url: target,
             headers: response.headers().clone(),
             bytes,
             redacted: response.extensions().get::<RedactedSetCookie>().is_some(),

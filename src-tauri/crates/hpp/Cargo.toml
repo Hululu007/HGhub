@@ -11,7 +11,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "io-std", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-reqwest = { version = "0.12", default-features = false, features = ["system-proxy", "socks", "gzip", "brotli", "json", "charset", "stream"] }
+wreq = { version = "6.0.0-rc.31", default-features = false, features = ["system-proxy", "socks", "gzip", "brotli", "json", "charset", "stream", "tokio-rt", "webpki-roots"] }
+# wreq 本身只导出模拟结果类型（Emulation 结构体）；Chrome 等预设
+# 档位在 wreq-util 的 Profile 枚举里（Profile 实现了 wreq::IntoEmulation），
+# 所以要直引 wreq-util 才能点名 Chrome149。版本须与 wreq 锁定的
+# wreq-util 3.0.0-rc.14 一致（wreq-util 依赖 wreq 6.0.0-rc）。
+wreq-util = "3.0.0-rc.14"
 url = "2"
 base64 = "0.22"
 once_cell = "1"
@@ -46,12 +51,9 @@ rquickjs = { version = "0.12.2", features = ["bindgen"] }
 [target.'cfg(target_os = "ios")'.dependencies]
 system-configuration = "0.7"
 core-foundation = "0.9"
-# iOS 上 reqwest 用系统 TLS（native-tls → Security.framework）：rustls 的
-# TLS 指纹会被 Cloudflare 认出并返回验证页；其它平台保持 rustls。
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
-
-[target.'cfg(not(target_os = "ios"))'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# iOS 系统代理设置仍由 proxy.rs 直接读 SCDynamicStoreCopyProxies；
+# TLS 后端不再分平台：wreq 全平台都用 BoringSSL 做 Chrome 指纹模拟，
+# v0.0.67 的 native-tls/rustls 分流已随 reqwest 一起去掉。
 
 [dev-dependencies]
 tempfile = "3"

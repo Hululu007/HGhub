@@ -74,7 +74,7 @@ async fn refreshed_endpoints_replace_removed_selection_and_probe_without_credent
         .await
         .unwrap();
     assert_eq!(detail["title"], second_url);
-    assert_eq!(reqwest::get(&media.url).await.unwrap().status(), 404);
+    assert_eq!(wreq::get(&media.url).await.unwrap().status(), 404);
     assert!(seen
         .lock()
         .unwrap()

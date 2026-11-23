@@ -135,7 +135,7 @@ resolvePlayback({{mediaId}}){{return {{streams:[{{url:'{base}/'+(mediaId==='hls'
         api[0].2, api[1].2,
         "sequential API requests must share a TCP connection"
     );
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = wreq::Client::builder().no_proxy().build().unwrap();
     for kind in ["movie", "hls"] {
         let media = manager
             .prepare_media(

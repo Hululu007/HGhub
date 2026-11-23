@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use reqwest::StatusCode;
+use wreq::StatusCode;
+use futures_util::stream::BoxStream;
+use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::fs::File;
@@ -71,6 +73,10 @@ struct DownloadProgress {
 /// 清单最多读 8 MiB（清单只是文本；超过即异常，不继续读）。
 const MAX_PLAYLIST_BYTES: usize = 8 * 1024 * 1024;
 
+/// wreq 响应体流（Box 起来才能在 download_inner 里先读第一块嗅探、
+/// 再传给 download_progressive / read_playlist_text）。
+type BodyStream = BoxStream<'static, wreq::Result<bytes::Bytes>>;
+
 #[tauri::command]
 pub async fn download_media(
     app: AppHandle,
@@ -91,7 +97,12 @@ async fn download_inner(
     folder: Option<&str>,
 ) -> Result<DownloadResult, String> {
     let base = Url::parse(url).map_err(|_| "播放地址无效".to_string())?;
-    let client = reqwest::Client::builder()
+    // 回环播放地址直连：不走代理（原 reqwest 无 features 即无代理功能，
+    // 这里显式 no_proxy 保持原样）；Chrome 指纹模拟对回环无实际作用，
+    // 只为全项目用同一套客户端。
+    let client = wreq::Client::builder()
+        .emulation(wreq_util::Profile::Chrome149)
+        .no_proxy()
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("无法建立下载连接：{e}"))?;
@@ -112,7 +123,7 @@ async fn download_inner(
         .await
         .map_err(|e| format!("无法创建下载目录：{e}"))?;
 
-    let mut resp = client
+    let resp = client
         .get(url)
         .send()
         .await
@@ -120,28 +131,30 @@ async fn download_inner(
     check_status(resp.status())?;
     let content_type = resp
         .headers()
-        .get(reqwest::header::CONTENT_TYPE)
+        .get(wreq::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
     let total = resp.content_length();
 
     // 先读第一块：回环服务器给清单的 Content-Type 是 mpegurl；个别
-    // 情况下类型不对时再按内容嗅探（#EXTM3U）。
-    let first = resp.chunk().await.map_err(|e| download_error(&e))?;
+    // 情况下类型不对时再按内容嗅探（#EXTM3U）。wreq 没有 Response::chunk()，
+    // 先把响应体转成流，读完第一块再把流传给后面的函数。
+    let mut stream: BodyStream = Box::pin(resp.bytes_stream());
+    let first = stream.next().await.transpose().map_err(|e| download_error(&e))?;
     let mut head: Vec<u8> = Vec::new();
     if let Some(b) = &first {
         head.extend_from_slice(b);
     }
     let is_playlist = content_type.contains("mpegurl") || head.starts_with(b"#EXTM3U");
     if is_playlist {
-        let text = read_playlist_text(resp, head).await?;
+        let text = read_playlist_text(stream, head).await?;
         return download_hls(app, &client, &base, &dir, name, download_id, &text).await;
     }
     // 直链文件：扩展名按 Content-Type 定，流式写盘。
     let ext = extension_for_content_type(&content_type);
     let (path, part) = output_paths(&dir, name, ext);
-    match download_progressive(app, resp, head, &part, download_id, total).await {
+    match download_progressive(app, stream, head, &part, download_id, total).await {
         Ok(bytes) => {
             finish_part(&part, &path).await?;
             Ok(DownloadResult {
@@ -161,7 +174,7 @@ async fn download_inner(
 /// 直链文件：把已读的第一块与剩余响应流式写盘。
 async fn download_progressive(
     app: &AppHandle,
-    mut resp: reqwest::Response,
+    mut stream: BodyStream,
     head: Vec<u8>,
     part: &PathBuf,
     download_id: &str,
@@ -178,7 +191,7 @@ async fn download_progressive(
         downloaded += head.len() as u64;
         emit_progress(app, download_id, downloaded, total, None, None);
     }
-    while let Some(chunk) = resp.chunk().await.map_err(|e| download_error(&e))? {
+    while let Some(chunk) = stream.next().await.transpose().map_err(|e| download_error(&e))? {
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("写入失败：{e}"))?;
@@ -191,11 +204,11 @@ async fn download_progressive(
 
 /// 清单只是文本：把剩余响应读进内存（有上限），转 UTF-8。
 async fn read_playlist_text(
-    mut resp: reqwest::Response,
+    mut stream: BodyStream,
     head: Vec<u8>,
 ) -> Result<String, String> {
     let mut buf = head;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| download_error(&e))? {
+    while let Some(chunk) = stream.next().await.transpose().map_err(|e| download_error(&e))? {
         if buf.len() + chunk.len() > MAX_PLAYLIST_BYTES {
             return Err("播放清单过大，暂不支持下载".to_string());
         }
@@ -357,7 +370,7 @@ fn extract_uri_attr(rest: &str) -> Option<String> {
 }
 
 /// 小文本（子清单）直接读全。
-async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
+async fn fetch_text(client: &wreq::Client, url: &str) -> Result<String, String> {
     let resp = client
         .get(url)
         .send()
@@ -376,7 +389,7 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, Strin
 
 async fn download_hls(
     app: &AppHandle,
-    client: &reqwest::Client,
+    client: &wreq::Client,
     base: &Url,
     dir: &PathBuf,
     name: &str,
@@ -490,7 +503,7 @@ fn resolve_audio_url(
 /// 分片先落在与 .part 同目录的临时文件里（内存只留一片），成败都删。
 async fn download_hls_muxed(
     app: &AppHandle,
-    client: &reqwest::Client,
+    client: &wreq::Client,
     video_base: &Url,
     video: &MediaPlaylist,
     audio_url: &Url,
@@ -511,7 +524,7 @@ async fn download_hls_muxed(
 
 async fn download_hls_muxed_inner(
     app: &AppHandle,
-    client: &reqwest::Client,
+    client: &wreq::Client,
     video_base: &Url,
     video: &MediaPlaylist,
     audio_url: &Url,
@@ -649,16 +662,18 @@ async fn copy_range(src: &PathBuf, offset: u64, len: u64, out: &mut File) -> Res
 }
 
 /// 取一个小文件（初始化段/分片）进内存；设 64 MiB 上限防异常。
-async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+async fn fetch_bytes(client: &wreq::Client, url: &str) -> Result<Vec<u8>, String> {
     const MAX_FRAGMENT_BYTES: usize = 64 * 1024 * 1024;
-    let mut resp = client
+    let resp = client
         .get(url)
         .send()
         .await
         .map_err(|e| download_error(&e))?;
     check_status(resp.status())?;
     let mut out = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| download_error(&e))? {
+    // wreq 没有 Response::chunk()：转成流逐块读。
+    let mut stream = Box::pin(resp.bytes_stream());
+    while let Some(chunk) = stream.next().await.transpose().map_err(|e| download_error(&e))? {
         if out.len() + chunk.len() > MAX_FRAGMENT_BYTES {
             return Err("分片过大，暂不支持下载".to_string());
         }
@@ -671,7 +686,7 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, Str
 /// 一次只取一个分片，让位于前台播放（协议 09 §6）。
 async fn download_hls_segments(
     app: &AppHandle,
-    client: &reqwest::Client,
+    client: &wreq::Client,
     base: &Url,
     playlist: &MediaPlaylist,
     part: &PathBuf,
@@ -707,18 +722,20 @@ async fn download_hls_segments(
 
 /// 取一个分片/初始化段并流式写盘。
 async fn fetch_into_file(
-    client: &reqwest::Client,
+    client: &wreq::Client,
     url: &str,
     file: &mut File,
 ) -> Result<u64, String> {
-    let mut resp = client
+    let resp = client
         .get(url)
         .send()
         .await
         .map_err(|e| download_error(&e))?;
     check_status(resp.status())?;
     let mut written: u64 = 0;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| download_error(&e))? {
+    // wreq 没有 Response::chunk()：转成流逐块读。
+    let mut stream = Box::pin(resp.bytes_stream());
+    while let Some(chunk) = stream.next().await.transpose().map_err(|e| download_error(&e))? {
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("写入失败：{e}"))?;
@@ -769,7 +786,7 @@ fn check_status(status: StatusCode) -> Result<(), String> {
     Ok(())
 }
 
-fn download_error(e: &reqwest::Error) -> String {
+fn download_error(e: &wreq::Error) -> String {
     if e.is_connect() {
         return "无法连接播放服务，请重试".to_string();
     }
