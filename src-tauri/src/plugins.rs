@@ -127,8 +127,16 @@ fn prune_staging(dir: &std::path::Path) {
 }
 
 fn staged_name(location: &str, index: usize, stamp: u128) -> String {
-    let last = location.rsplit('/').next().unwrap_or("").trim();
-    let last = if last.is_empty() { "plugin.js" } else { last };
+    // 选择器/Inbox 返回的最后一段常是百分号编码过的（如 %E8%A5%BF…）：
+    // 先解码再切词干/扩展名，否则 `%` 会被下面的 safe 映射换成 `_`，
+    // 中文名就不可逆地毁成 `_E8_A5_BF…`。
+    let raw = location.rsplit('/').next().unwrap_or("").trim();
+    let decoded = if raw.is_empty() {
+        "plugin.js".to_string()
+    } else {
+        percent_decode(raw)
+    };
+    let last = decoded.as_str();
     let (stem, ext) = match last.rfind('.') {
         Some(i) if i > 0 => (&last[..i], &last[i + 1..]),
         _ => (last, "js"),
@@ -144,6 +152,28 @@ fn staged_name(location: &str, index: usize, stamp: u128) -> String {
         })
         .collect();
     format!("{safe}-{stamp}-{index}.{ext}")
+}
+
+/// 百分号解码，解不出的原样保留（与 hpp distribution.rs 的同款逻辑一致）。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn read_picked(app: &tauri::AppHandle, file: &tauri_plugin_fs::FilePath) -> Result<Vec<u8>> {

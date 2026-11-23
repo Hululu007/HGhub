@@ -162,9 +162,12 @@ Python 直接导入（v0.0.53）：内容识别，不认扩展名。一段文本
 `detailContent` / `searchContent` / `playerContent`），否则报明错；执行期的真实方法面
 以边车 `/load` 返回的为准（见 [02 §11](02-runtime.md)）。导入的文件存为插件目录里的
 `plugin.py`；启动恢复时只做静态扫描，不重新派生名字与 id。`meta` 从源码派生：
-名字先取来源文件名，再取 `getName()` 的字面量返回值，都没有时用 `spider`；
-id 是 `py.<名字词干>`（只留小写字母数字与 `._-`，其余换 `-`）；版本恒为 `1.0.0`，
-`runtime` 为 `"python"`，`kind` 恒为 `source`。Python 源没有可信的版本字段，
+名字优先取 `getName()` 的字面量返回值，没有时取清洗后的来源文件词干，再没有时用
+`spider`；id 取自清洗后的文件词干，没有词干时取 `getName()`，再没有用 `spider`。
+词干清洗：百分号解码、去掉选择器暂存后缀 `-<纳秒>-<序号>`、去掉首尾多余的 `-`/`_`；
+id 后缀是词干的 slug（只留小写字母数字与 `._-`，其余换 `-`），词干 slug 后只剩回退值
+（如纯中文名）时 id 为 `py.spider-<8 位十六进制 FNV-1a 哈希>`，不同中文名得到不同 id；
+版本恒为 `1.0.0`，`runtime` 为 `"python"`，`kind` 恒为 `source`。Python 源没有可信的版本字段，
 更新靠手动重导：重复导入同一文件覆盖同一个插件。Python 蜘蛛不声明 `meta.settings`、
 不声明 WebHome 首页。
 

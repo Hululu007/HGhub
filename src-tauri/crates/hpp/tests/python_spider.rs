@@ -20,6 +20,18 @@ use tokio::net::TcpListener;
 
 const DEMO: &str = include_str!("../../../../examples/demo-spider.py");
 
+/// 没有 getName 的蜘蛛：名字取文件词干。
+const NAMELESS_SPIDER: &str = r#"
+def homeContent(filter):
+    return {"class": []}
+def categoryContent(tid, pg, filter, extend):
+    return {"list": []}
+def detailContent(ids):
+    return {"list": []}
+def playerContent(flag, id, vipFlags):
+    return {"parse": 0, "url": id, "header": {}}
+"#;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Behavior {
     Normal,
@@ -210,6 +222,20 @@ impl hghub_hpp::manager::DocumentReader for Documents {
 async fn manager_with_mock(
     behavior: Behavior,
 ) -> (Arc<PluginManager>, tempfile::TempDir) {
+    manager_with_docs(
+        behavior,
+        HashMap::from([(
+            "content://documents/demo-spider.py".to_string(),
+            DEMO.as_bytes().to_vec(),
+        )]),
+    )
+    .await
+}
+
+async fn manager_with_docs(
+    behavior: Behavior,
+    docs: HashMap<String, Vec<u8>>,
+) -> (Arc<PluginManager>, tempfile::TempDir) {
     let (base, _state) = start_mock(behavior).await;
     let dir = tempfile::tempdir().unwrap();
     let bootstrap = MockBootstrap { api_base: base };
@@ -217,10 +243,7 @@ async fn manager_with_mock(
         PluginManager::with_mode(dir.path().into(), Some(false))
             .unwrap()
             .with_python_bootstrap(Arc::new(bootstrap))
-            .with_document_reader(Arc::new(Documents(HashMap::from([(
-                "content://documents/demo-spider.py".to_string(),
-                DEMO.as_bytes().to_vec(),
-            )])))),
+            .with_document_reader(Arc::new(Documents(docs))),
     );
     MediaSessions::start(&manager).await.unwrap();
     (manager, dir)
@@ -252,7 +275,7 @@ async fn python_spider_import_and_calls() {
     let infos = manager.list().await;
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].meta.id.as_str(), "py.demo-spider");
-    assert_eq!(infos[0].meta.name.as_str(), "demo-spider");
+    assert_eq!(infos[0].meta.name.as_str(), "Python 演示源");
     assert_eq!(infos[0].meta.runtime.as_str(), "python");
     assert_eq!(infos[0].status.as_str(), "ready");
     assert!(infos[0].methods.contains(&"catalog.getCategories".to_string()));
@@ -321,6 +344,64 @@ async fn python_spider_import_and_calls() {
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0]["url"], json!("https://example.invalid/a.m3u8"));
     assert_eq!(streams[0]["format"], json!("hls"));
+}
+
+#[tokio::test]
+async fn python_import_percent_encoded_chinese_name() {
+    let location =
+        "content://documents/%E8%A5%BF%E7%93%9C%E8%A7%86%E9%A2%91-1795392251000000000-0.py";
+    let (manager, _dir) = manager_with_docs(
+        Behavior::Normal,
+        HashMap::from([(location.to_string(), NAMELESS_SPIDER.as_bytes().to_vec())]),
+    )
+    .await;
+    let preview = manager
+        .preview_import(vec![location.into()], "documents")
+        .await
+        .unwrap();
+    assert_eq!(preview.items.len(), 1);
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    assert_eq!(preview.items[0].name, "西瓜视频");
+    let id = preview.items[0].id.clone();
+    assert!(id.starts_with("py.spider-"), "unexpected id: {id}");
+    let suffix = &id["py.spider-".len()..];
+    assert_eq!(suffix.len(), 8);
+    assert!(
+        suffix.bytes().all(|b| b.is_ascii_hexdigit()),
+        "unexpected id: {id}"
+    );
+    // 再预览一次：同一个文件得到同一个 id。
+    let again = manager
+        .preview_import(vec![location.into()], "documents")
+        .await
+        .unwrap();
+    assert_eq!(again.items[0].id, id);
+    // 落盘后名字与 id 不变。
+    let keys: Vec<String> = preview.items.iter().map(|i| i.key.clone()).collect();
+    manager
+        .apply_import(&preview.token, keys, false, false, "test")
+        .await
+        .unwrap();
+    let infos = manager.list().await;
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].meta.name.as_str(), "西瓜视频");
+    assert_eq!(infos[0].meta.id.as_str(), id);
+
+    // 换一个中文名：id 必须不同。
+    let other =
+        "content://documents/%E8%8D%89%E8%8E%93%E8%A7%86%E9%A2%91-1795392251000000000-0.py";
+    let (manager, _dir) = manager_with_docs(
+        Behavior::Normal,
+        HashMap::from([(other.to_string(), NAMELESS_SPIDER.as_bytes().to_vec())]),
+    )
+    .await;
+    let preview = manager
+        .preview_import(vec![other.into()], "documents")
+        .await
+        .unwrap();
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    assert_eq!(preview.items[0].name, "草莓视频");
+    assert_ne!(preview.items[0].id, id);
 }
 
 #[tokio::test]
