@@ -6,6 +6,12 @@
 //! `int node_start(int argc, char *argv[])`，与 Python 边车调
 //! `Py_Initialize` 是同一套做法。
 //!
+//! v0.0.71：framework 不再强链接——启动时 dyld 不加载 NodeMobile，
+//! 首次插件 net 请求才 `dlopen` 包内 framework 并 `dlsym` 出
+//! `node_start` 再启动（见 `ffi::load_node_start`）。v0.0.70 强链接
+//! 时 App 在闪屏后闪退；改成懒加载后启动与 v0.0.69 一致，加载失败
+//! 只会让当次插件请求报错，不会拖垮启动。
+//!
 //! 引导只做一件事：启动一次引擎线程，跑起边车 `node-app/host.js`，
 //! 之后所有插件 net 请求都走回环 HTTP（见 hpp 的 `node::client`）。
 //!
@@ -37,21 +43,78 @@ use std::{
     time::Duration,
 };
 
-/// iOS 上 NodeMobile.framework 的 C 入口（裸 FFI）。
+/// iOS 上 NodeMobile.framework 的动态加载（裸 FFI，v0.0.71）。
 ///
-/// 框架由 Xcode 侧 Embed 进包；staticlib 里的未定义符号在 Xcode 链接
-/// `.app` 时解析（`build-ios-unsigned.sh` 传
-/// `OTHER_LDFLAGS=-framework NodeMobile`）。非 iOS 目标整个模块
-/// 不编译，不产生链接要求。
+/// 框架仍由 Xcode 侧 Embed 进包（`.app/Frameworks/NodeMobile.framework`），
+/// 但不再强链接：启动时 dyld 不碰它，首次插件 net 请求才 `dlopen`
+/// 包内 framework 并 `dlsym` 出 `node_start`。加载失败只会让当次
+/// 插件请求报错，不会拖垮启动。`dlopen`/`dlsym`/`dlerror` 是 libSystem
+/// 的导出符号，直接声明即可，不用加依赖。非 iOS 目标整个模块不编译，
+/// 不产生链接要求。
 #[cfg(target_os = "ios")]
 mod ffi {
-    use std::ffi::{c_char, c_int};
+    use std::ffi::{c_char, c_int, CStr};
+    use std::path::Path;
 
-    #[link(name = "NodeMobile", kind = "framework")]
     extern "C" {
-        /// 在调用线程上跑起 Node 事件循环并阻塞到引擎退出；
-        /// argv: ["node", "<bundle>/node-app/host.js"]。
-        pub fn node_start(argc: c_int, argv: *mut *mut c_char) -> c_int;
+        fn dlopen(path: *const c_char, mode: c_int) -> *mut std::ffi::c_void;
+        fn dlsym(handle: *mut std::ffi::c_void, symbol: *const c_char) -> *mut std::ffi::c_void;
+        fn dlerror() -> *mut c_char;
+    }
+
+    /// 立即解析全部符号（Darwin 值）：加载时就发现缺符号，而不是
+    /// 首次调用时才死。
+    const RTLD_NOW: c_int = 2;
+
+    /// `dlerror()` 的当前错误，没有就给一句通用文本。
+    fn dlerror_string() -> String {
+        let ptr = unsafe { dlerror() };
+        if ptr.is_null() {
+            return "未知动态加载错误".to_string();
+        }
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// `node_start` 的签名：在调用线程上跑起 Node 事件循环并阻塞
+    /// 到引擎退出；argv: ["node", "<bundle>/node-app/host.js"]。
+    pub type NodeStartFn = unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int;
+
+    /// 从包内 framework 里解析出 `node_start`。
+    ///
+    /// 句柄故意不保存、永不 `dlclose`：Node 同进程只允许启动一次，
+    /// 库必须常驻到进程结束；不调 `dlclose`，`dlopen` 的加载就不会
+    /// 被卸载，指针一直有效。
+    pub fn load_node_start(framework: &Path) -> Result<NodeStartFn, String> {
+        let library = framework.join("NodeMobile");
+        if !library.exists() {
+            return Err(format!(
+                "Node 引擎未打进应用包（缺 {}），请检查 iOS 构建的 Node 打包步骤",
+                library.display()
+            ));
+        }
+        let path = match std::ffi::CString::new(library.to_string_lossy().into_owned()) {
+            Ok(path) => path,
+            Err(_) => return Err("Node 引擎路径含 NUL 字节".to_string()),
+        };
+        let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW) };
+        if handle.is_null() {
+            return Err(format!("Node 引擎加载失败：{}", dlerror_string()));
+        }
+        let symbol = match std::ffi::CString::new("node_start") {
+            Ok(symbol) => symbol,
+            Err(_) => return Err("node_start 符号名含 NUL 字节".to_string()),
+        };
+        let ptr = unsafe { dlsym(handle, symbol.as_ptr()) };
+        if ptr.is_null() {
+            return Err(format!(
+                "Node 引擎里找不到 node_start：{}",
+                dlerror_string()
+            ));
+        }
+        // 函数指针可跨线程传（Send），直接转类型后交给引擎线程。
+        Ok(unsafe { std::mem::transmute::<*mut std::ffi::c_void, NodeStartFn>(ptr) })
     }
 }
 
@@ -138,7 +201,9 @@ impl NodeBootstrap for IosNodeBootstrap {
 /// 启动引擎线程：设环境变量 → `node_start` 跑边车 host.js。
 ///
 /// 启动前先校验包内布局（host.js 在不在）：路径不对时不要等引擎
-/// 启动失败，先报明错。调用线程要 2MB 栈（nodejs-mobile 官方要求
+/// 启动失败，先报明错。framework 在这里才 `dlopen`（v0.0.71），
+/// 启动时不加载；加载失败直接返回——线程不启动、started 不置位，
+/// 下次请求再试。调用线程要 2MB 栈（nodejs-mobile 官方要求
 /// 运行时 1MB、推荐 2MB）。
 #[cfg(target_os = "ios")]
 fn start_engine_thread(inner: &Arc<Inner>) -> Result<()> {
@@ -160,6 +225,9 @@ fn start_engine_thread(inner: &Arc<Inner>) -> Result<()> {
         std::fs::create_dir_all(parent)
             .map_err(|e| PluginError::internal(format!("无法创建 Node 边车地址文件目录：{e}")))?;
     }
+    // 首次使用时才加载 framework（v0.0.71）：启动时 dyld 不碰它。
+    let framework = bundle.join("Frameworks").join("NodeMobile.framework");
+    let node_start = ffi::load_node_start(&framework).map_err(PluginError::internal)?;
     let info_path = inner.info_path.clone();
     let thread_inner = inner.clone();
     std::thread::Builder::new()
@@ -180,7 +248,7 @@ fn start_engine_thread(inner: &Arc<Inner>) -> Result<()> {
             let mut argv = [argv0.as_ptr() as *mut _, argv1.as_ptr() as *mut _];
             // node_start 在调用线程上跑事件循环，正常情况下永不返回；
             // 返回即引擎已死（Node 不能二次启动，只能报错，不尝试重启）。
-            let rc = unsafe { ffi::node_start(argv.len() as _, argv.as_mut_ptr()) };
+            let rc = unsafe { node_start(argv.len() as _, argv.as_mut_ptr()) };
             *thread_inner.startup_error.lock().unwrap() = Some(format!(
                 "Node 引擎已停止（node_start 返回 {rc}），请重启应用"
             ));

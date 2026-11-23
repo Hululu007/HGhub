@@ -140,17 +140,20 @@ pub struct NodeInfo { pub api_base: String }
 
 - 持有 `info_path`（`<app_data_dir>/node-sidecar.json`）、`started` 标志、`starting` 互斥锁、`startup_error`。
 - `ensure_started()`：加锁 → 未启动则 `start_engine_thread()` → `probe()`（轮询 info 文件 + `/health`，30 秒 deadline；超时或启动错误报明错）。
-- `start_engine_thread()`：先校验包内布局（`node-app/host.js` 存在；不存在先报明错，不要等引擎启动失败），设环境变量（`HG_NODE_INFO_PATH`），用 `stack_size(2MB)` 起一个名为 `hg-node` 的线程，在线程里调 FFI：
+- `start_engine_thread()`：先校验包内布局（`node-app/host.js` 存在；不存在先报明错，不要等引擎启动失败），设环境变量（`HG_NODE_INFO_PATH`），用 `stack_size(2MB)` 起一个名为 `hg-node` 的线程，在线程里调 `node_start`。**v0.0.71：`node_start` 不再强链接**——启动引擎前先 `dlopen` 包内 framework（`.app/Frameworks/NodeMobile.framework/NodeMobile` 的绝对路径，绕开 @rpath），再 `dlsym` 出 `node_start`，函数指针传进引擎线程再调用（见 `src-tauri/src/node.rs` 的 `ffi::load_node_start`）。v0.0.70 强链接时 App 在闪屏后闪退，改成懒加载后启动时 dyld 不碰 framework，加载失败只会让当次插件请求报错（"Node 引擎加载失败：…"），不会拖垮启动；句柄故意不保存、永不 `dlclose`（Node 只允许启动一次，库必须常驻）：
 
 ```rust
 #[cfg(target_os = "ios")]
 mod ffi {
-    use std::ffi::{c_char, c_int};
-    #[link(name = "NodeMobile", kind = "framework")]
+    // dlopen / dlsym / dlerror 是 libSystem 的导出符号，直接声明，不用加依赖。
     extern "C" {
-        // argv: ["node", "<bundle>/node-app/host.js"]，C 字符串数组。
-        pub fn node_start(argc: c_int, argv: *mut *mut c_char) -> c_int;
+        fn dlopen(path: *const c_char, mode: c_int) -> *mut std::ffi::c_void;
+        fn dlsym(handle: *mut std::ffi::c_void, symbol: *const c_char) -> *mut std::ffi::c_void;
+        fn dlerror() -> *mut c_char;
     }
+    const RTLD_NOW: c_int = 2; // Darwin 值：加载时立即解析全部符号
+    pub type NodeStartFn = unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int;
+    pub fn load_node_start(framework: &Path) -> Result<NodeStartFn, String> { /* … */ }
 }
 ```
 
@@ -323,13 +326,12 @@ hpp `node/client.rs`，照抄 `python/client.rs` 的 `SidecarClient`：
 ### 9.2 `scripts/build-ios-unsigned.sh`
 
 - 准备段加 `node scripts/sync-ios-node.mjs`（Python 那行之后）。
-- xcodebuild 参数加：`FRAMEWORK_SEARCH_PATHS` 追加 `$(PROJECT_DIR)/NodeMobile.xcframework/ios-arm64`；`OTHER_LDFLAGS` 追加 `-framework NodeMobile`（Python 那两行的同款）。
+- **v0.0.71：xcodebuild 不再链接 NodeMobile**——`FRAMEWORK_SEARCH_PATHS` 里的 `$(PROJECT_DIR)/NodeMobile.xcframework/ios-arm64` 与 `OTHER_LDFLAGS` 里的 `-framework NodeMobile` 都已删掉（启动时 dyld 不加载 framework，见 §4.1）；`-framework Python -framework SystemConfiguration` 保留。
 - 装包段加 `node scripts/sync-ios-node.mjs --install-app "$APP"`（Python 那行之后、打 IPA 之前）。
 
 ### 9.3 `src-tauri/build.rs`
 
-- 新增 `link_node_framework()`（照抄 `link_python_framework()`）：iOS target 时把 `gen/apple/NodeMobile.xcframework/<slice>`（`aarch64-apple-ios` → `ios-arm64`，`aarch64-apple-ios-sim` → `ios-arm64_x86_64-simulator`）加进 `cargo:rustc-link-search=framework=…`，并 `cargo:rerun-if-changed=gen/apple/NodeMobile.xcframework`。
-- 作用：`src/node.rs` 的 `#[link(name = "NodeMobile", kind = "framework")]` 在 cargo 链接 cdylib/staticlib 时能找到 framework（v0.0.54 的 Python 教训：只给 `-framework` 不给搜索路径会在 `ld: framework not found` 挂掉）。
+- **v0.0.71 已删 `link_node_framework()`**（调用与函数都删了）：Rust 不再链接期找 NodeMobile——`src/node.rs` 不再用 `#[link(name = "NodeMobile", kind = "framework")]`，改 `dlopen` 运行时加载，不需要 `cargo:rustc-link-search=framework=…`。`link_python_framework()` 与 `link_system_configuration()` 不动。
 - **不需要 Swift 桥**（§3.2 已纠正），`link_ios_native_plugins()` 不动。
 
 ### 9.4 打包清单
@@ -351,11 +353,11 @@ hpp `node/client.rs`，照抄 `python/client.rs` 的 `SidecarClient`：
   - 重探重试测试（边车换端口后调用重探到新地址重试成功，照抄 v0.0.69 的 `python_sidecar_restart_on_new_port_retries_call`）。
 - **host.js 的测试（本机可跑）：本机有 Node v24.22.1**，host.js 只用核心模块，可直接用系统 Node 跑集成测试：对本地 HTTP/HTTPS 服务器发请求（断言只发了页面给的头、无 sec-ch-ua、HTTP/1.1）；对本地 mock 代理发 CONNECT 与 SOCKS5/SOCKS4 握手（断言握手字节与隧道建立）；自定义 `lookup` 返回固定 IP 时断言 SNI/Host 仍是 hostname。注意：本机 Node 是 v24，目标是 Node 18.20.4——所用核心 API（`http`/`https`/`net`/`tls`、自定义 agent、`lookup`）在 18→24 间稳定，仍要在真机上以 Node 18 复核。
 - 前端 `tsc` + `vite`（两份 tsc + vite build）、`docs:build` + `docs:test`（`PYTHON=python3`）。
-- 验包脚本：沿用 `verify-0.0.69.py` 的模板改 `verify-0.0.70.py`（推送后由交付流程跑；本阶段不跑 CI 验包，但实现时要留出可验证的标记：`NodeMobile` framework、`.app/node-app/host.js`、`process.version`、Rust 侧新标记 `is_node_transport` / `send_api_hop` / `node_start` 等）。
+- 验包脚本：沿用 `verify-0.0.69.py` 的模板改 `verify-0.0.70.py`（推送后由交付流程跑；本阶段不跑 CI 验包，但实现时要留出可验证的标记：`NodeMobile` framework、`.app/node-app/host.js`、`process.version`、Rust 侧新标记 `is_node_transport` / `send_api_hop` / `node_start`（v0.0.71 起是 `dlsym` 的符号名字符串，不再是链接符号）/ `dlopen` 等）。
 
 ### 10.2 只有 CI / 真机能验证的
 
-- iOS 构建：`node_start` 的链接、framework 的 Embed 与签名、Swift 不参与——只在 macOS CI（release.yml，tag 触发）上验证。本机 Linux 编不出 iOS 包，**不要把本机检查说成 iOS 验证通过**。
+- iOS 构建：framework 的 Embed（仍由 `sync-ios-node.mjs --install-app` 拷进 `.app/Frameworks/`）与签名、Swift 不参与——只在 macOS CI（release.yml，tag 触发）上验证。**v0.0.71 起不再有链接期依赖**：主二进制里不应再有 `LC_LOAD_DYLIB … NodeMobile`（`dlopen` 是运行时加载，验包时核对）；`dlopen` 的路径与 `node_start` 解析只能在真机（或 CI 产出的包）上验证。本机 Linux 编不出 iOS 包，**不要把本机检查说成 iOS 验证通过**。
 - 真机验收（用户做）：打开 WebHome 玩偶站，分类与海报能加载、不再报“分类失败：响应被拦截”；代理测试仍连接正常；py 源能播；跟随系统与直连两种模式各测一次；`fm.req("https://api.ipify.org")` 看 Node 实际出口 IP（§6.5）。
 
 ### 10.3 如果 Node 也被拦
