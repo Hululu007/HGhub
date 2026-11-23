@@ -12,6 +12,7 @@ import ApplicationSettings from "./plugins/ApplicationSettings";
 import SectionPage from "./plugins/SectionPage";
 import LivePage from "./plugins/LivePage";
 import WebHomeHost from "./plugins/WebHomeHost";
+import WebHomeSources from "./pages/WebHomeSources";
 import ArticlePage, { ArticleList } from "./plugins/ArticlePage";
 import FeedPage from "./plugins/FeedPage";
 import type { SourceStart } from "./plugins/sourceMatching";
@@ -37,7 +38,7 @@ function Application() {
     if(e.defaultPrevented||document.querySelector("dialog[open]")||target.closest("input,textarea,select,[contenteditable=true],[role=dialog]"))return;
     if(e.key==="Escape"){if(runBack(10)){e.preventDefault();return;}if(app.fs){e.preventDefault();app.setFs(false);return;}if(document.fullscreenElement){e.preventDefault();void document.exitFullscreen();return;}if(runBack()){e.preventDefault();return;}app.pop();}
     else if(e.key==="/"){e.preventDefault();app.setTab("search");}
-    else if(!e.repeat&&["1","2","3","4"].includes(e.key))app.setTab((["home","search","category","profile"] as Tab[])[Number(e.key)-1]);
+    else if(!e.repeat&&["1","2","3","4","5"].includes(e.key))app.setTab((["home","search","category","webhome","profile"] as Tab[])[Number(e.key)-1]);
   };window.addEventListener("keydown",fn);return()=>window.removeEventListener("keydown",fn);},[app.pop,app.setTab,app.fs]);
   return <div className={`absolute inset-0 flex flex-col bg-canvas win-root plat-${app.platform}`}>
     {!isMobile&&!app.watching&&<DesktopTitleBar collapsed={collapsed} onToggle={()=>setCollapsed(v=>!v)}/>}
@@ -45,7 +46,7 @@ function Application() {
       <div className="absolute inset-0" inert={app.tab!=="home"||!!top} hidden={app.tab!=="home"||!!top} style={{bottom:isMobile&&!top&&!app.fs&&!app.clean&&!app.watching?"calc(40px + var(--sab, 0px))":0}}>
         <ImmersiveHome active={app.tab==="home"&&!top} open={open} manage={manage} settings={()=>app.push({kind:"settings"})}/>
       </div>
-      <div className="absolute inset-0" inert={!!top} hidden={app.tab==="home"} style={{bottom:isMobile&&!top?"calc(40px + var(--sab, 0px))":0}}>{app.tab!=="home"&&(!top||top.kind==="media")&&(app.tab==="category"?<PluginCategory open={open} manage={manage} openContent={(kind,pluginId)=>app.push({kind,pluginId})}/>:app.tab==="search"?<PluginSearch open={open} manage={manage}/>:<LibraryPage open={open} manage={manage} settings={()=>app.push({kind:"settings"})}/>)}</div>
+      <div className="absolute inset-0" inert={!!top} hidden={app.tab==="home"} style={{bottom:isMobile&&!top?"calc(40px + var(--sab, 0px))":0}}>{app.tab!=="home"&&(!top||top.kind==="media")&&(app.tab==="category"?<PluginCategory open={open} manage={manage} openContent={(kind,pluginId)=>app.push({kind,pluginId})}/>:app.tab==="search"?<PluginSearch open={open} manage={manage}/>:app.tab==="webhome"?<WebHomeSources manage={manage}/>:<LibraryPage open={open} manage={manage} settings={()=>app.push({kind:"settings"})}/>)}</div>
       {app.stack.map((page,i)=><div key={page.key} className={`absolute inset-0 ${page.kind==="media"?"":"bg-bg"} ${i===app.stack.length-1?"z-30":i===app.stack.length-2&&top?.kind==="media"&&!app.watching?"pointer-events-none":"invisible pointer-events-none"}`}>
         {page.kind==="plugins"?<Plugins onBack={app.pop} focusId={page.focusId}/>:page.kind==="settings"?<ApplicationSettings onBack={app.pop}/>:page.kind==="section"?<SectionRoute {...page} open={open} onBack={app.pop}/>:page.kind==="media"?<MediaPage pluginId={page.pluginId} mediaId={page.mediaId} start={page.start} onBack={app.pop} manage={manage} active={i===app.stack.length-1} onSwitch={(pluginId,mediaId,start)=>app.replace({kind:"media",pluginId,mediaId,start})}/>:<ContentRoute page={page} active={i===app.stack.length-1}/>}
       </div>)}
@@ -82,6 +83,7 @@ function TabBar() {
     { k: "home", label: "首页" },
     { k: "search", label: "搜索" },
     { k: "category", label: "分类" },
+    { k: "webhome", label: "Webhome" },
     { k: "profile", label: "我的" },
   ];
   /* 细瘦纯文字分栏：只有选中项高亮，没有指示点。
@@ -104,7 +106,7 @@ function TabBar() {
           const on = tab === k;
           return (
             <button key={k} onClick={() => setTab(k)} className="flex-1 h-full flex items-center justify-center pressable">
-              <span className="text-[12.5px] leading-none transition-colors duration-200"
+              <span className="text-[12.5px] leading-none whitespace-nowrap transition-colors duration-200"
                 style={{
                   fontWeight: on ? 700 : 400,
                   color: lightBar

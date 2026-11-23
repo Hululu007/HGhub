@@ -10,7 +10,7 @@ import { DEFAULT_PLAYBACK_ENGINE, isPlaybackEngine } from "./plugins/playbackEng
 export type PictureMode = "fit" | "stretch" | "fill" | "16:9" | "4:3";
 export function isPictureMode(v: string): v is PictureMode { return ["fit", "stretch", "fill", "16:9", "4:3"].includes(v); }
 import type { SourceStart } from "./plugins/sourceMatching";
-export type Tab = "home" | "category" | "search" | "profile";
+export type Tab = "home" | "category" | "search" | "webhome" | "profile";
 export type Theme = "dark" | "light";
 export type PageInput = { kind: "plugins"; focusId?: string } | { kind: "settings" } | { kind: "media"; pluginId: string; mediaId: string; start?: SourceStart } | { kind: "section"; pluginId: string; sectionId: string; title?: string } | { kind: "live"; pluginId: string } | { kind: "articles"; pluginId: string } | { kind: "article"; pluginId: string; articleId: string } | { kind: "feed"; pluginId: string } | { kind: "recommendations"; pluginId: string };
 export type Page = PageInput & { key: string };
