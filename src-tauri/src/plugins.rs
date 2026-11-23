@@ -141,13 +141,17 @@ fn staged_name(location: &str, index: usize, stamp: u128) -> String {
         Some(i) if i > 0 => (&last[..i], &last[i + 1..]),
         _ => (last, "js"),
     };
+    // 只换路径非法字符：中文、标点、emoji 都原样保留，否则文件名
+    // “西瓜视频🍉”在暂存一步就被毁成“西瓜视频_”。
     let safe: String = stem
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                || c.is_control()
+            {
                 '_'
+            } else {
+                c
             }
         })
         .collect();

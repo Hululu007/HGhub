@@ -275,7 +275,7 @@ async fn python_spider_import_and_calls() {
     let infos = manager.list().await;
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].meta.id.as_str(), "py.demo-spider");
-    assert_eq!(infos[0].meta.name.as_str(), "Python 演示源");
+    assert_eq!(infos[0].meta.name.as_str(), "demo-spider");
     assert_eq!(infos[0].meta.runtime.as_str(), "python");
     assert_eq!(infos[0].status.as_str(), "ready");
     assert!(infos[0].methods.contains(&"catalog.getCategories".to_string()));
@@ -349,7 +349,7 @@ async fn python_spider_import_and_calls() {
 #[tokio::test]
 async fn python_import_percent_encoded_chinese_name() {
     let location =
-        "content://documents/%E8%A5%BF%E7%93%9C%E8%A7%86%E9%A2%91-1795392251000000000-0.py";
+        "content://documents/%E8%A5%BF%E7%93%9C%E8%A7%86%E9%A2%91%F0%9F%8D%89-1795392251000000000-0.py";
     let (manager, _dir) = manager_with_docs(
         Behavior::Normal,
         HashMap::from([(location.to_string(), NAMELESS_SPIDER.as_bytes().to_vec())]),
@@ -361,7 +361,7 @@ async fn python_import_percent_encoded_chinese_name() {
         .unwrap();
     assert_eq!(preview.items.len(), 1);
     assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
-    assert_eq!(preview.items[0].name, "西瓜视频");
+    assert_eq!(preview.items[0].name, "西瓜视频🍉");
     let id = preview.items[0].id.clone();
     assert!(id.starts_with("py.spider-"), "unexpected id: {id}");
     let suffix = &id["py.spider-".len()..];
@@ -384,7 +384,7 @@ async fn python_import_percent_encoded_chinese_name() {
         .unwrap();
     let infos = manager.list().await;
     assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].meta.name.as_str(), "西瓜视频");
+    assert_eq!(infos[0].meta.name.as_str(), "西瓜视频🍉");
     assert_eq!(infos[0].meta.id.as_str(), id);
 
     // 换一个中文名：id 必须不同。
@@ -402,6 +402,27 @@ async fn python_import_percent_encoded_chinese_name() {
     assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
     assert_eq!(preview.items[0].name, "草莓视频");
     assert_ne!(preview.items[0].id, id);
+}
+
+#[tokio::test]
+async fn python_import_filename_beats_get_name() {
+    // 演示源 getName() 声明的是“Python 演示源”，但文件名赢：名字按源文件
+    // 自己的名字原样显示，含标点/emoji。
+    let location =
+        "content://documents/%E8%A5%BF%E7%93%9C%E8%A7%86%E9%A2%91%F0%9F%8D%89-1795392251000000000-0.py";
+    let (manager, _dir) = manager_with_docs(
+        Behavior::Normal,
+        HashMap::from([(location.to_string(), DEMO.as_bytes().to_vec())]),
+    )
+    .await;
+    let preview = manager
+        .preview_import(vec![location.into()], "documents")
+        .await
+        .unwrap();
+    assert_eq!(preview.items.len(), 1);
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    assert_eq!(preview.items[0].name, "西瓜视频🍉");
+    assert!(preview.items[0].id.starts_with("py.spider-"));
 }
 
 #[tokio::test]

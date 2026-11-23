@@ -67,7 +67,7 @@ fn module_def_re() -> &'static Regex {
 fn get_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"(?m)^[ \t]*def[ \t]+getName[ \t]*\([^)]*\)[^:]*:[ \t]*\n(?:[ \t]*#[^\n]*\n|[ \t]*\n)*[ \t]*return[ \t]+["']([^"']+)["']"#)
+        Regex::new(r#"(?m)^[ \t]*def[ \t]+getName[ \t]*\([^)]*\)[^:]*:[ \t]*\n(?:[ \t]*#[^\n]*\n|[ \t]*\n)*[ \t]*return[ \t]+(?:"([^"]+)"|'([^']+)')"#)
             .unwrap()
     })
 }
@@ -103,11 +103,12 @@ fn module_methods(code: &str) -> Vec<String> {
     found
 }
 
-/// `getName()` 方法里 `return "..."` 的字面量（静态命名用，不执行代码）。
+/// `getName()` 方法里 `return "..."` / `return '...'` 的字面量（静态命名用，不执行代码）。
+/// 双引号串与单引号串分开匹配，异种引号可出现在串内（如 `"it's"`）。
 pub fn static_get_name(code: &str) -> Option<String> {
     get_name_re()
         .captures(code)
-        .and_then(|cap| cap.get(1))
+        .and_then(|cap| cap.get(1).or_else(|| cap.get(2)))
         .map(|m| m.as_str().trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -261,6 +262,20 @@ def playerContent(flag, id, vipFlags):
         assert!(face.methods.contains(&"homeContent".to_string()));
         assert!(face.methods.contains(&"playerContent".to_string()));
         assert_eq!(static_get_name(CLASS_SPIDER).as_deref(), Some("dnyy"));
+    }
+
+    #[test]
+    fn get_name_keeps_other_quote_inside() {
+        let double_quoted = "class Spider:\n    def getName(self):\n        return \"it's\"\n    def homeContent(self, f):\n        return {}\n";
+        assert_eq!(
+            static_get_name(double_quoted).as_deref(),
+            Some("it's")
+        );
+        let single_quoted = "class Spider:\n    def getName(self):\n        return 'say \"hi\"'\n    def homeContent(self, f):\n        return {}\n";
+        assert_eq!(
+            static_get_name(single_quoted).as_deref(),
+            Some("say \"hi\"")
+        );
     }
 
     #[test]

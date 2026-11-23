@@ -603,28 +603,31 @@ impl PluginManager {
             .map_err(|_| PluginError::internal("插件检查失败"))?
     }
 
-    /// 从 .py 源码派生 meta：名字优先取 `getName()` 字面量，没有时取清洗后
-    /// 的来源文件词干，再没有用 "spider"；id 取自清洗后的文件词干，没有词干
-    /// 时取 `getName()`，再没有用 "spider"。词干清洗：百分号解码、去暂存后缀
-    /// `-<纳秒>-<序号>`、去首尾 `-`/`_`。词干 slug 后只剩回退值（如纯中文名）
-    /// 时，id 加确定性 FNV-1a 哈希后缀，避免两个中文源撞 id。
+    /// 从 .py 源码派生 meta：名字就是来源文件自己的名字，取清洗后的
+    /// 来源文件词干原样显示（含标点/emoji），没有来源文件名时取
+    /// `getName()` 的字面量返回值，再没有用 "spider"；id 取自清洗后的
+    /// 文件词干，没有词干时取 `getName()`，再没有用 "spider"。词干清洗：
+    /// 百分号解码、去暂存后缀 `-<纳秒>-<序号>`，只去首尾空白，标点与
+    /// emoji 原样保留。词干 slug 后只剩回退值（如纯中文名）时，id 加
+    /// 确定性 FNV-1a 哈希后缀，避免两个中文源撞 id。
     /// 版本恒为 1.0.0——Python 源没有可信的版本字段，更新靠手动重导（见 02 §7）。
     fn inspect_python(code: &str, location: Option<&str>) -> Result<Meta> {
         let _face = crate::python::scan_source(code)?;
         // 干净词干：选择器暂存地址的最后一段常是百分号编码过的，
-        // 先解码，再去暂存后缀，最后去首尾多余的 -/_。
+        // 先解码，再去暂存后缀，最后只去首尾空白——标点/emoji 是名字
+        // 的一部分，不能像 v0.0.57 那样把首尾的 -/_ 也去掉。
         let stem = location
             .and_then(crate::python::scan::location_stem)
             .map(|s| {
                 let decoded = percent_decode(&s);
                 let stripped = strip_stage_suffix(&decoded);
-                stripped.trim_matches(|c| c == '-' || c == '_').to_string()
+                stripped.trim().to_string()
             })
             .filter(|s| !s.is_empty());
         let declared = crate::python::scan::static_get_name(code);
-        let name = declared
+        let name = stem
             .clone()
-            .or_else(|| stem.clone())
+            .or_else(|| declared.clone())
             .unwrap_or_else(|| "spider".to_string());
         let name: String = name.chars().take(60).collect();
         // id 仍从词干派生（没有词干时才取声明名），保持重导稳定；
