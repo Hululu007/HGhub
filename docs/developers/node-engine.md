@@ -298,7 +298,7 @@ hpp `node/client.rs`，照抄 `python/client.rs` 的 `SidecarClient`：
 协议 03 §2 要求"通过检查的解析结果直接用于连接，不在检查后重新解析"。Node 路径保留这条规则：
 
 - Rust 侧在每跳发 Node 请求前调 `network_policy::resolve_target(target, strict)`（与今天 `Network::client()` 里同一调用）：校验（内网/保留地址拒绝、FakeIP 198.18.0.0/15 放行、混合答案只留允许的地址）+ IPv6 优先排序，得到 pinned 地址列表。
-- 把列表（`"ip:port"` 字符串数组）随请求发给 Node；Node 的 `https.request` 用自定义 `lookup(hostname, opts, cb)` 返回该列表（`all: true`，保留 `autoSelectFamily` 默认的 Happy Eyeballs 行为，让 Node 在首个地址失败时试下一个）。
+- 把列表（`"ip:port"` 字符串数组）随请求发给 Node；Node 的 `https.request` 用自定义 `lookup(hostname, opts, cb)` 返回该列表。**lookup 必须按 `opts.all` 回值**：`all: true` 时回 `[{address, family}]` 数组，`all: false` 时回首个地址字符串 + family。**v0.0.73 的教训**：旧代码无条件回数组；本机 Node 24 上 `autoSelectFamily` 默认开（lookup 以 `all:true` 被调用），测试全过；真机 Node 18.20.4 上 `autoSelectFamily` 默认关（lookup 以 `all:false` 被调用），Node 把数组当成单个 IP，直接抛 `Invalid IP address: [ [Object], ... ]`（个数即 pinned 个数）。所以 `doFetch` 里显式传 `autoSelectFamily: true`（Node 18 也走 Happy Eyeballs，逐个试 pinned 列表，不只试首个），同时 `makeLookup` 按 `all` 回值——两处缺一不可，缺前者 Node 18 只试首个地址，缺后者违反 lookup 契约。
 - `servername`（SNI）与 `Host` 仍取目标 hostname（Node 用自定义 `lookup` 时的默认行为，实现时必须显式确认并加测试断言；不要让 Node 把 IP 当成 SNI 发出去）。
 - 与 wreq 路径的差异：wreq 路径靠 60 秒池重建重新解析 DNS；Node 路径每跳都重新解析（走系统解析器缓存，开销可接受，且更及时）。行为差异如实记录，不掩饰。
 
@@ -351,7 +351,7 @@ hpp `node/client.rs`，照抄 `python/client.rs` 的 `SidecarClient`：
   - `effective_proxy_url` 的三档模式测试（Off/Custom/System，含 HGHUB_PROXY 优先）。
   - Node 传输选择的测试（Queue::Api 走 Node、Queue::Media 走 wreq；非 iOS 走 wreq）。
   - 重探重试测试（边车换端口后调用重探到新地址重试成功，照抄 v0.0.69 的 `python_sidecar_restart_on_new_port_retries_call`）。
-- **host.js 的测试（本机可跑）：本机有 Node v24.22.1**，host.js 只用核心模块，可直接用系统 Node 跑集成测试：对本地 HTTP/HTTPS 服务器发请求（断言只发了页面给的头、无 sec-ch-ua、HTTP/1.1）；对本地 mock 代理发 CONNECT 与 SOCKS5/SOCKS4 握手（断言握手字节与隧道建立）；自定义 `lookup` 返回固定 IP 时断言 SNI/Host 仍是 hostname。注意：本机 Node 是 v24，目标是 Node 18.20.4——所用核心 API（`http`/`https`/`net`/`tls`、自定义 agent、`lookup`）在 18→24 间稳定，仍要在真机上以 Node 18 复核。
+- **host.js 的测试（本机可跑）：本机有 Node v24.22.1**，host.js 只用核心模块，可直接用系统 Node 跑集成测试：对本地 HTTP/HTTPS 服务器发请求（断言只发了页面给的头、无 sec-ch-ua、HTTP/1.1）；对本地 mock 代理发 CONNECT 与 SOCKS5/SOCKS4 握手（断言握手字节与隧道建立）；自定义 `lookup` 返回固定 IP 时断言 SNI/Host 仍是 hostname；**lookup 契约测试**（`all:true` 回数组、`all:false` 回单个地址字符串 + family，用真机上出现过的 pinned 列表形态：24 个 IPv4 与单个 IPv4/IPv6）与 **pinned 首个地址不通时试下一个**（`autoSelectFamily:true` 下首个死地址后回落到第二个）。注意：本机 Node 是 v24，目标是 Node 18.20.4——所用核心 API（`http`/`https`/`net`/`tls`、自定义 agent、`lookup`）在 18→24 间稳定，仍要在真机上以 Node 18 复核。**但 `autoSelectFamily` 的默认值 18 与 24 不同（18 默认关、24 默认开）**：`all:false` 的 lookup 路径端到端测不到，只能把 `makeLookup` 导出后用子进程单独调（见测试文件）；不要只凭本机端到端通过就认定 Node 18 没问题——v0.0.72 就是这么漏过去的。
 - 前端 `tsc` + `vite`（两份 tsc + vite build）、`docs:build` + `docs:test`（`PYTHON=python3`）。
 - 验包脚本：沿用 `verify-0.0.69.py` 的模板改 `verify-0.0.70.py`（推送后由交付流程跑；本阶段不跑 CI 验包，但实现时要留出可验证的标记：`NodeMobile` framework、`.app/node-app/host.js`、`process.version`、Rust 侧新标记 `is_node_transport` / `send_api_hop` / `node_start`（v0.0.71 起是 `dlsym` 的符号名字符串，不再是链接符号）/ `dlopen` 等）。
 

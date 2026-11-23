@@ -86,7 +86,16 @@ function makeLookup(pinnedAddrs) {
   if (!pinnedAddrs || pinnedAddrs.length === 0) return undefined;
   const addrs = pinnedAddrs.map(parsePinnedAddr).filter(Boolean);
   if (addrs.length === 0) return undefined;
-  return (_hostname, _opts, cb) => cb(null, addrs);
+  // Node 的 lookup 契约：opts.all 为 true 时回 [{address, family}] 数组，
+  // 为 false 时回单个地址字符串 + family。Node 18 上 autoSelectFamily
+  // 默认关闭，lookup 以 all:false 被调用；无条件回数组会让 Node 18 把
+  // 数组当成单个 IP，抛 Invalid IP address（本机 Node 24 默认 all:true，
+  // 所以旧代码在本机测试里一直通过，真机才炸——v0.0.72 的教训）。
+  return (_hostname, opts, cb) => {
+    if (opts && opts.all) return cb(null, addrs);
+    const first = addrs[0];
+    return cb(null, first.address, first.family);
+  };
 }
 
 function bracket(host) {
@@ -474,6 +483,10 @@ function doFetch(body) {
         headers,
         agent,
         servername: targetHost,
+        // 显式开 Happy Eyeballs：Node 18 默认 autoSelectFamily 为 false，
+        // 不写这里 lookup 只拿到首个地址（首个不通就直接失败）；写死 true
+        // 后 lookup 以 all:true 被调用，返回完整 pinned 列表，Node 逐个试。
+        autoSelectFamily: true,
         ...(lookup ? { lookup } : {}),
       },
       (res) => {
@@ -612,3 +625,8 @@ process.on('unhandledRejection', (reason) => {
 
 log(`Node sidecar starting (node ${process.version}, cwd ${process.cwd()})`);
 startServer(DEFAULT_PORT);
+
+// 供集成测试直接覆盖 lookup 契约（见 tests/test_host.mjs）：本机 Node 24
+// 默认 autoSelectFamily 为 true，端到端测不到 Node 18 的 all:false 路径，
+// 只能把 makeLookup 导出后单独调。入口运行时无影响。
+module.exports = { makeLookup, parsePinnedAddr };

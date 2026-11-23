@@ -4,6 +4,9 @@
 // 注意：本机 Node 是 v24，目标引擎是 Node 18.20.4——所用核心 API
 // （http/https/net/tls、自定义 agent、lookup）在 18→24 间稳定，
 // 仍要在真机上以 Node 18 复核（见 node-engine.md §10.1）。
+// 但有一个地方 18 与 24 默认行为不同：autoSelectFamily 在 18 上默认关、
+// 24 上默认开——lookup 的 all:false 路径端到端测不到（见下面
+// 'lookup 按 Node 契约回地址' 用例，只能把 makeLookup 导出后单独调）。
 //
 // 跑：node --test src-tauri/node-sidecar/tests/test_host.mjs
 import { test, before, after } from 'node:test';
@@ -237,6 +240,77 @@ test('lookup 固定 IP 时 SNI 与 Host 仍是 hostname', { timeout: 20000 }, as
     assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'secure-ok');
     assert.equal(seen.servername, 'myhost.test');
     assert.equal(seen.host, `myhost.test:${port}`);
+  } finally {
+    stopHost(child);
+    server.close();
+  }
+});
+
+test('lookup 按 Node 契约回地址：all:true 回数组、all:false 回单个地址', { timeout: 20000 }, async () => {
+  // 回归测试（v0.0.73）：真机上出现过的 pinned 列表形态——玩偶站域名
+  // 解析出 24 个 IPv4，蜡笔/木偶/臻选各 1 个。旧代码无条件回数组，
+  // Node 18（autoSelectFamily 默认关，lookup 以 all:false 调用）把它
+  // 当成单个 IP，抛 Invalid IP address: [ [Object], ... ]（个数即
+  // pinned 个数）；本机 Node 24 默认 all:true，端到端测不到这条路，
+  // 只能把 makeLookup 导出后单独调。
+  const script = `
+    const { makeLookup } = require(${JSON.stringify(HOST)});
+    const many = Array.from({ length: 24 }, (_, i) => '93.184.216.' + (i + 1) + ':443');
+    const lk = makeLookup(many);
+    lk('example.com', { all: true }, (err, addrs) => {
+      console.log('ALL_TRUE ' + JSON.stringify(addrs));
+    });
+    lk('example.com', {}, (err, addr, family) => {
+      console.log('ALL_FALSE ' + JSON.stringify(addr) + ' ' + family);
+    });
+    const one = makeLookup(['93.184.216.34:443']);
+    one('example.com', { all: false }, (err, addr, family) => {
+      console.log('ONE_FALSE ' + JSON.stringify(addr) + ' ' + family);
+    });
+    const v6 = makeLookup(['[2606:4700:4700::1111]:443']);
+    v6('example.com', {}, (err, addr, family) => {
+      console.log('V6_FALSE ' + JSON.stringify(addr) + ' ' + family);
+    });
+    process.exit(0);
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  const lines = out.trim().split('\n');
+  const line = (prefix) => lines.find((l) => l.startsWith(prefix)).slice(prefix.length);
+  const allTrue = JSON.parse(line('ALL_TRUE '));
+  assert.equal(allTrue.length, 24);
+  assert.equal(allTrue[0].address, '93.184.216.1');
+  assert.equal(allTrue[0].family, 4);
+  assert.equal(allTrue[23].address, '93.184.216.24');
+  assert.equal(allTrue[23].family, 4);
+  // all:false 时必须回字符串 + family，绝不能回数组（旧代码在这里
+  // 回数组，Node 18 直接抛 Invalid IP address）。
+  assert.equal(line('ALL_FALSE '), '"93.184.216.1" 4');
+  assert.equal(line('ONE_FALSE '), '"93.184.216.34" 4');
+  assert.equal(line('V6_FALSE '), '"2606:4700:4700::1111" 6');
+});
+
+test('pinned 首个地址不通时试下一个（autoSelectFamily）', { timeout: 20000 }, async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('fallback-ok');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const { child, base } = await startHost();
+  try {
+    // 首个 pinned 地址 127.0.0.2 上没人在听（ECONNREFUSED），第二个
+    // 才是活的服务器；doFetch 显式 autoSelectFamily:true，Node 18
+    // 也会逐个试 pinned 列表（不写这行，Node 18 只试首个）。
+    const result = await postRequest(base, {
+      url: `http://myhost.test:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [`127.0.0.2:${port}`, `127.0.0.1:${port}`],
+    });
+    assert.equal(result.status, 200);
+    assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'fallback-ok');
   } finally {
     stopHost(child);
     server.close();
