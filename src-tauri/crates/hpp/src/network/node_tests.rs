@@ -283,6 +283,51 @@ async fn node_error_carries_resolved_addresses() {
 }
 
 #[tokio::test]
+async fn node_tried_suffix_passes_through_with_resolved_count() {
+    // v0.0.79：Node 侧直连轮换的已试后缀（已试: …；共 n 个地址／仅 1
+    // 个地址，无处可换）由 Rust 原样透传，Rust 再 append 自己的
+    // （解析: …；共 n 个地址）——直连与跟随系统两种模式都要能从
+    // 这条报错里直接读出“解析回了几个地址、轮换试了几个”。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    *node.direct_error.lock().unwrap() = Some(
+        "Client network socket disconnected before secure TLS connection was established（已试: 127.0.0.2；仅 1 个地址，无处可换）"
+            .to_string(),
+    );
+    let err = network
+        .fetch(
+            Transfer::from_json(json!({"url": format!("{upstream}/x"), "responseType": "text"})),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "NETWORK");
+    // Node 的后缀原样在前，Rust 的后缀 append 在后。
+    let node_suffix = err
+        .message
+        .find("（已试: 127.0.0.2；仅 1 个地址，无处可换）")
+        .expect("Node 的已试后缀应原样透传");
+    let rust_suffix = err
+        .message
+        .find("（解析: 127.0.0.1:")
+        .expect("Rust 的解析后缀应 append 在后");
+    assert!(
+        node_suffix < rust_suffix,
+        "Node 后缀应在 Rust 后缀之前：{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("共 1 个地址）"),
+        "Rust 后缀应带解析总数：{}",
+        err.message
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
 async fn media_request_stays_on_wreq() {
     let (node_base, node, node_server) = start_mock_node().await;
     let (upstream, upstream_state, upstream_server) = start_mock_upstream().await;

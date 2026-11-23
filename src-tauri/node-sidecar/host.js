@@ -14,7 +14,9 @@
 //   代理地址由 Rust 每跳传来；回环目标不经过这里。
 // - DNS：v0.0.76 起 Rust 不再把解析结果钉给 Node（pinnedAddrs 为
 //   空），Node 用默认 lookup（与 Arcane 完全一致）；Rust 侧的解析只
-//   做预检与诊断。SNI 与 Host 仍是目标 hostname，绝不把 IP 当 SNI 发出去。
+//   做预检与诊断。v0.0.79：直连时 doFetch 自己拿系统顺序的地址列表
+//   逐个试（TLS 被断换地址重试）；SNI 与 Host 仍是目标 hostname，绝不
+//   把 IP 当 SNI 发出去。
 // - 顶层捕获异常、绝不调 process.exit()：引擎 fatal 会杀掉整个 App。
 // - process.cwd() 是 `/`，这里不依赖相对路径。
 'use strict';
@@ -23,6 +25,7 @@ const http = require('http');
 const https = require('https');
 const net = require('net');
 const tls = require('tls');
+const dns = require('dns');
 const fs = require('fs');
 
 const DEFAULT_PORT = 55101;
@@ -73,9 +76,11 @@ function classifyError(e) {
 
 // ---------------------------------------------------------------------------
 // DNS 固定：pinnedAddrs 是 "ip:port" 字符串数组（Rust 已校验）。
-// lookup 必须返回 all:true 的完整列表，让 Node 在首个地址 TCP 接通失败
-// 时试下一个。但注意：TCP 接通后 TLS 被断不会回落——那一层由 doFetch
-// 的显式重试负责（见 tests/test_host.mjs 的 TLS 回落用例）。
+// lookup 必须按 opts.all 回值（见 makeLookup 注释，v0.0.73 的教训）。
+// v0.0.79：直连时 doFetch 不用 pinnedAddrs（Rust 自 v0.0.76 起传空），
+// 而是自己 dns.lookup 拿系统顺序地址列表、每次只钉一个地址逐个试
+// （TLS 被断换地址重试；TCP 接通后 TLS 被断 Node 自己不会回落——
+// Happy Eyeballs 只管 TCP 接通失败）。
 // ---------------------------------------------------------------------------
 function parsePinnedAddr(s) {
   const m = s.match(/^\[([^\]]+)\]:(\d+)$/) || s.match(/^([^:]+):(\d+)$/);
@@ -457,8 +462,162 @@ function socksTarget(proxy, pinnedAddrs, targetHost, targetPort) {
 // v0.0.75 的 doFetch 重试循环随 pinning 一起撤掉（没有 pinned 列表
 // 就无地址可换）；诊断改由 Rust 层做（报错末尾的（解析: …），见
 // hpp network/api.rs with_resolved_addrs）。
+// v0.0.79：直连 TLS 被断换地址重试又回来了——但不用 pinning：doFetch
+// 自己拿系统顺序的地址列表逐个试（调用方给了 pinnedAddrs 就用它，
+// 否则 dns.lookup；生产上 Rust 自 v0.0.76 起传空，走 dns.lookup）；
+// TLS 被断排除该地址再试下一个。背景：v0.0.75 撤掉重试后，直连下第一次出现 TLS
+// 被断（2026-11-24 06:25，玩偶 臻选，解析 198.20.0.19:443；直连与
+// 跟随系统失败完全一致、解析地址也相同，代理彻底洗清；Arcane 同一
+// 时刻能出）。重试第一次有机会真正起作用。代理路径不动
+// （CONNECT/SOCKS 由代理自己解析域名，轮换不适用）；v0.0.78 的窄
+// 回落不动（仍只管 5xx 与代理握手失败）。
 // ---------------------------------------------------------------------------
-function requestOptions(body, timeoutMs) {
+// 系统顺序的地址列表（dns.lookup，all:true，verbatim:true——不做
+// IPv6 优先重排，与 v0.0.74 的结论一致）。解析失败时回 []：doFetch
+// 退回 Node 默认 lookup 的单次尝试（与 v0.0.76–78 的行为一致）；
+// Rust 侧的预检已先挡过 DNS 失败，这里只是 TOCTOU 窗口里的兜底。
+function resolveAddrs(hostname) {
+  return new Promise((resolve) => {
+    dns.lookup(hostname, { all: true, verbatim: true }, (err, addrs) => {
+      if (err || !addrs || addrs.length === 0) return resolve([]);
+      resolve(addrs.map((a) => ({ address: a.address, family: a.family })));
+    });
+  });
+}
+
+// 直连时：首个地址 TCP 接通后 TLS 被断，Node 不会试下一个
+// （握手失败不是 Happy Eyeballs 的回落条件——v0.0.74 的真机报错与之
+// 一字不差，见 tests/test_host.mjs 的 TLS 回落用例）。所以这里显式
+// 按地址重试：每次排除掉失败的那个地址，直到列表试完或预算耗尽。
+// 只在“请求字节还没发出去”时重试：TCP 没接通（没发），或已接通但
+// TLS 没完成（https 的请求字节在握手之后发）；已收到响应、超时、
+// 握手已完成都不重试——请求字节已发出，重发不安全。http 没有 TLS：
+// 接通后被断说明请求字节已发，不轮换；TCP 没接通时可以轮换（没发）。
+// 代理路径不走重试：HTTP CONNECT 由代理自己解析域名，SOCKS 只用首个
+// pinned 地址且失败的那个地址从 socket 上认不出来。
+async function doFetch(body) {
+  const timeoutMs = Math.min(30000, Math.max(1000, Number(body.timeoutMs) || 15000));
+  const deadline = Date.now() + timeoutMs;
+  const direct = !body.proxyUrl;
+  const url = new URL(body.url);
+  const secure = url.protocol === 'https:';
+  // 轮换的地址列表：调用方给了 pinnedAddrs（测试、或将来恢复固定）
+  // 就用它；否则自己 dns.lookup（生产路径，Rust 自 v0.0.76 起传空）。
+  // 两个来源都是系统顺序，不重排。
+  const pinned = (body.pinnedAddrs || []).map(parsePinnedAddr).filter(Boolean);
+  const addrs = direct
+    ? (pinned.length > 0 ? pinned : await resolveAddrs(url.hostname))
+    : [];
+  const excluded = new Set();
+  const tried = [];
+  let firstError = null;
+  for (;;) {
+    const remaining = addrs.filter((a) => !excluded.has(a.address));
+    const budget = deadline - Date.now();
+    if (budget <= 0) {
+      throw upstreamError('TIMEOUT', '请求超时');
+    }
+    const attempt = remaining.length > 0 ? [remaining[0]] : [];
+    try {
+      return await fetchOnce(body, attempt, Math.max(1, budget));
+    } catch (e) {
+      if (!firstError) firstError = e;
+      const attempted = attempt.length > 0 ? attempt[0].address : null;
+      if (attempted && !tried.includes(attempted)) tried.push(attempted);
+      const noBytesSent = !e._connected || (secure && !e._handshakeDone);
+      const retryable = direct
+        && e && e.code === 'NETWORK'
+        && !e._responded
+        && noBytesSent
+        && attempted
+        && remaining.length > 1;
+      if (!retryable) {
+        // 报错里带上已试地址与解析总数，下次真机测试能区分“一个坏
+        // 边缘”与“全部都坏”；只回一个地址时直接说明无处可换；没接
+        // 通过任何地址时列出全部解析地址（v0.0.75 同款规则）。
+        // Rust 层还会再 append（解析: …）——那是预检的答案，与这里
+        // Node 自己解析的答案互相印证（DNS 轮换时两者可能不同）。
+        if (direct && addrs.length > 0 && firstError && firstError.code === 'NETWORK') {
+          const list = (tried.length > 0 ? tried : addrs.map((a) => a.address)).join(', ');
+          const count = addrs.length === 1
+            ? '仅 1 个地址，无处可换'
+            : `共 ${addrs.length} 个地址`;
+          firstError.message = `${firstError.message}（已试: ${list}；${count}）`;
+        }
+        throw firstError;
+      }
+      excluded.add(attempted);
+    }
+  }
+}
+
+function fetchOnce(body, attemptAddrs, timeoutMs) {
+  const { secure, requestBody, ...reqOpts } = requestOptions(body, timeoutMs, attemptAddrs);
+  const lib = secure ? https : http;
+  return new Promise((resolve, reject) => {
+    // 诊断用：记下这次尝试是否接通、TLS 是否完成、是否收到响应。
+    // 只有“请求字节还没发出去”才是可重试的失败（见 doFetch）。
+    let connected = false;
+    let handshakeDone = false;
+    let responded = false;
+    const fail = (e) => {
+      const err = classifyError(e);
+      err._connected = connected;
+      err._handshakeDone = handshakeDone;
+      err._responded = responded;
+      reject(err);
+    };
+    const req = lib.request(
+      reqOpts,
+      (res) => {
+        responded = true;
+        const chunks = [];
+        let size = 0;
+        let tooBig = false;
+        res.on('data', (chunk) => {
+          size += chunk.length;
+          if (size > MAX_RESPONSE_BYTES) {
+            tooBig = true;
+            req.destroy();
+          } else {
+            chunks.push(chunk);
+          }
+        });
+        res.on('end', () => {
+          if (tooBig) {
+            reject(upstreamError('UPSTREAM_ERROR', '响应体超过 8 MiB'));
+            return;
+          }
+          // res.headers 原样：set-cookie 保持数组，其余已合并成字符串。
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            bodyBase64: Buffer.concat(chunks).toString('base64'),
+          });
+        });
+        res.on('error', (e) => fail(e));
+      },
+    );
+    req.on('socket', (socket) => {
+      // keepAlive:false，每次都是新 socket，'socket' 事件在接通前触发；
+      // 万一已接通（复用），直接记下。
+      if (socket.connecting) {
+        socket.once('connect', () => { connected = true; });
+      } else {
+        connected = true;
+      }
+      socket.once('secureConnect', () => { handshakeDone = true; });
+    });
+    const timeoutError = new Error('请求超时');
+    timeoutError.code = 'NODE_REQUEST_TIMEOUT';
+    req.setTimeout(timeoutMs, () => req.destroy(timeoutError));
+    req.on('error', (e) => fail(e));
+    if (requestBody) req.end(requestBody);
+    else req.end();
+  });
+}
+
+function requestOptions(body, timeoutMs, addrs) {
   const url = new URL(body.url);
   const method = String(body.method || 'GET').toUpperCase();
   const secure = url.protocol === 'https:';
@@ -471,10 +630,14 @@ function requestOptions(body, timeoutMs) {
     // Rust 侧已把 Content-Length 过滤掉；有 body 时由这里现算。
     headers['content-length'] = String(requestBody.length);
   }
-  // pinnedAddrs 为空时 makeLookup 回 undefined，Node 用默认 lookup；
-  // 非空时仍走自定义 lookup（测试与将来恢复固定时用）。绝不显式传
-  // autoSelectFamily（见上面）：Node 18 默认关，与 Arcane 一致。
-  const lookup = makeLookup(body.pinnedAddrs || []);
+  // addrs：doFetch 直连轮换时传入的本次地址（[{address, family}]，
+  // 通常 1 个）；未传时沿用 body.pinnedAddrs（测试与将来恢复固定时
+  // 用）。绝不显式传 autoSelectFamily（见下面）：Node 18 默认关，
+  // 与 Arcane 一致；轮换是 doFetch 手动的，自动 Happy Eyeballs 会
+  // 把“哪个地址失败”藏起来。
+  const lookup = addrs && addrs.length > 0
+    ? makeLookup(addrs.map((a) => `${bracket(a.address)}:${targetPort}`))
+    : makeLookup(body.pinnedAddrs || []);
   let agent;
   let path = url.pathname + url.search;
   if (!body.proxyUrl) {
@@ -505,51 +668,6 @@ function requestOptions(body, timeoutMs) {
     servername: targetHost,
     ...(lookup ? { lookup } : {}),
   };
-}
-
-async function doFetch(body) {
-  const timeoutMs = Math.min(30000, Math.max(1000, Number(body.timeoutMs) || 15000));
-  const { secure, requestBody, ...reqOpts } = requestOptions(body, timeoutMs);
-  const lib = secure ? https : http;
-  return new Promise((resolve, reject) => {
-    const fail = (e) => reject(classifyError(e));
-    const req = lib.request(
-      reqOpts,
-      (res) => {
-        const chunks = [];
-        let size = 0;
-        let tooBig = false;
-        res.on('data', (chunk) => {
-          size += chunk.length;
-          if (size > MAX_RESPONSE_BYTES) {
-            tooBig = true;
-            req.destroy();
-          } else {
-            chunks.push(chunk);
-          }
-        });
-        res.on('end', () => {
-          if (tooBig) {
-            reject(upstreamError('UPSTREAM_ERROR', '响应体超过 8 MiB'));
-            return;
-          }
-          // res.headers 原样：set-cookie 保持数组，其余已合并成字符串。
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            bodyBase64: Buffer.concat(chunks).toString('base64'),
-          });
-        });
-        res.on('error', (e) => fail(e));
-      },
-    );
-    const timeoutError = new Error('请求超时');
-    timeoutError.code = 'NODE_REQUEST_TIMEOUT';
-    req.setTimeout(timeoutMs, () => req.destroy(timeoutError));
-    req.on('error', (e) => fail(e));
-    if (requestBody) req.end(requestBody);
-    else req.end();
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -656,5 +774,8 @@ startServer(DEFAULT_PORT);
 // 默认 autoSelectFamily 为 true，端到端测不到 Node 18 的 all:false 路径，
 // 只能把 makeLookup 导出后单独调。requestOptions 也导出：v0.0.76 的
 // “无自定义 lookup、不设 autoSelectFamily”契约要能被测试直接断言。
+// resolveAddrs 也导出：v0.0.79 的轮换地址列表（系统顺序）要能被测试
+// 直接断言（本机 localhost 回 2 个地址；顺序以系统解析器为准，测试
+// 里不硬编码顺序）。
 // 入口运行时无影响。
-module.exports = { makeLookup, parsePinnedAddr, requestOptions };
+module.exports = { makeLookup, parsePinnedAddr, requestOptions, resolveAddrs };

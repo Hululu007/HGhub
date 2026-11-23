@@ -10,6 +10,12 @@
 // v0.0.76 起 host.js 不再显式设 autoSelectFamily（与 Arcane 一致，
 // Node 18 只试首个地址）；这个“不设”本身也要用 requestOptions 的
 // 入参断言钉住，端到端测不到。
+// v0.0.79：直连 TLS 被断换地址重试回来了（不用 pinning）：doFetch
+// 自己拿系统顺序地址列表逐个试。轮换的端到端测试用 localhost——
+// 本机解析回 2 个地址（::1 与 127.0.0.1，顺序以系统为准，测试里
+// 先解析再按顺序布坏/好端点，不硬编码顺序）；证书 SAN 因此同时
+// 含 myhost.test 与 localhost。IP 字面量 URL 只回 1 个地址，
+// 测“仅 1 个地址，无处可换”的诊断。
 //
 // 跑：node --test src-tauri/node-sidecar/tests/test_host.mjs
 import { test, before, after } from 'node:test';
@@ -18,6 +24,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
+import dns from 'node:dns';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -92,6 +99,17 @@ function makeReader(socket) {
   };
 }
 
+// localhost 的系统解析结果（顺序以系统为准）：本机回 [::1, 127.0.0.1]。
+// 轮换测试先解析再按顺序布坏/好端点，不硬编码顺序。
+function resolveLocalhost() {
+  return new Promise((resolve, reject) => {
+    dns.lookup('localhost', { all: true, verbatim: true }, (err, addrs) => {
+      if (err) return reject(err);
+      resolve(addrs);
+    });
+  });
+}
+
 function waitFor(predicate, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -135,7 +153,7 @@ before(() => {
   );
   fs.writeFileSync(
     path.join(dir, 'server.cnf'),
-    '[req]\ndistinguished_name=dn\n[dn]\n[v3]\nsubjectAltName=DNS:myhost.test\n',
+    '[req]\ndistinguished_name=dn\n[dn]\n[v3]\nsubjectAltName=DNS:myhost.test,DNS:localhost\n',
   );
   const run = (args) => execFileSync('openssl', args, { cwd: dir, stdio: 'pipe' });
   run(['req', '-x509', '-newkey', 'rsa:2048', '-keyout', 'ca-key.pem', '-out', 'ca.pem', '-days', '2', '-nodes', '-subj', '/CN=TestCA', '-config', 'ca.cnf']);
@@ -323,6 +341,18 @@ test('requestOptions：无 pinned 时不用自定义 lookup、不设 autoSelectF
     const pinned = requestOptions({ url: 'https://example.com/x', method: 'GET', headers: {}, pinnedAddrs: ['93.184.216.34:443'], proxyUrl: null }, 10000);
     console.log('PINNED_LOOKUP ' + (typeof pinned.lookup));
     console.log('PINNED_AUTO ' + ('autoSelectFamily' in pinned));
+    // v0.0.79：doFetch 轮换时传入本次地址（单地址 lookup，all:false
+    // 回字符串 + family，all:true 回 1 元素数组——v0.0.73 的契约），
+    // 仍不设 autoSelectFamily。
+    const addrs = requestOptions({ url: 'https://example.com:8443/x', method: 'GET', headers: {}, pinnedAddrs: [], proxyUrl: null }, 10000, [{ address: '93.184.216.34', family: 4 }]);
+    console.log('ADDRS_LOOKUP ' + (typeof addrs.lookup));
+    console.log('ADDRS_AUTO ' + ('autoSelectFamily' in addrs));
+    addrs.lookup('example.com', { all: false }, (err, addr, family) => {
+      console.log('ADDRS_ONE ' + JSON.stringify({ err: err && err.code, addr, family }));
+    });
+    addrs.lookup('example.com', { all: true }, (err, list) => {
+      console.log('ADDRS_ALL ' + JSON.stringify({ err: err && err.code, list }));
+    });
     process.exit(0);
   `;
   const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
@@ -332,10 +362,16 @@ test('requestOptions：无 pinned 时不用自定义 lookup、不设 autoSelectF
   assert.equal(line('EMPTY_AUTO '), 'false');
   assert.equal(line('PINNED_LOOKUP '), 'function');
   assert.equal(line('PINNED_AUTO '), 'false');
+  assert.equal(line('ADDRS_LOOKUP '), 'function');
+  assert.equal(line('ADDRS_AUTO '), 'false');
+  assert.deepEqual(JSON.parse(line('ADDRS_ONE ')), { err: null, addr: '93.184.216.34', family: 4 });
+  assert.deepEqual(JSON.parse(line('ADDRS_ALL ')), { err: null, list: [{ address: '93.184.216.34', family: 4 }] });
 });
 
 test('无 pinned 地址时走 Node 默认 lookup（localhost 能通）', { timeout: 20000 }, async () => {
   // v0.0.76：Rust 不再传 pinnedAddrs，Node 用默认 lookup 解析。
+  // v0.0.79：localhost 解析出 [::1, 127.0.0.1]，首个地址 TCP 被拒
+  // 后轮换到第二个——本测试同时覆盖 http 的 TCP 失败轮换。
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('default-lookup-ok');
@@ -360,10 +396,11 @@ test('无 pinned 地址时走 Node 默认 lookup（localhost 能通）', { timeo
   }
 });
 
-test('TLS 握手被断时只试一次、不重试（v0.0.76）', { timeout: 20000 }, async () => {
-  // v0.0.76：重试循环随 pinning 一起撤掉——没有 pinned 列表就无地址
-  // 可换；坏端点只应被试一次（clientHellos === 1），而不是像 v0.0.75
-  // 那样换地址重试。直连/代理都一样：失败就是失败，诊断在 Rust 层。
+test('TLS 握手被断时只试一次：单个地址无处可换（v0.0.79）', { timeout: 20000 }, async () => {
+  // v0.0.79：IP 字面量 URL 只解析出 1 个地址，轮换无处可换——坏端点
+  // 只应被试一次（clientHellos === 1），报错直接说明这一点（已试
+  // 地址 + 仅 1 个地址）。直连/代理都一样：失败就是失败，诊断在
+  // 报错里（Rust 层还会再 append 解析总数）。
   const { server: bad, hits } = await startBadTlsServer('127.0.0.2', 0);
   const port = bad.address().port;
   const { child, base } = await startHost();
@@ -378,11 +415,212 @@ test('TLS 握手被断时只试一次、不重试（v0.0.76）', { timeout: 2000
     });
     assert.equal(result.code, 'NETWORK');
     assert.match(result.error, /Client network socket disconnected before secure TLS connection was established/);
-    assert.equal(hits.clientHellos, 1, '坏端点只应被试一次，不重试');
+    assert.equal(hits.clientHellos, 1, '单个地址无处可换，坏端点只应被试一次');
+    assert.match(result.error, /已试: 127\.0\.0\.2；仅 1 个地址，无处可换/);
   } finally {
     stopHost(child);
     bad.close();
   }
+});
+
+test('TLS 握手被断时换下一个地址重试（v0.0.79）', { timeout: 20000 }, async () => {
+  // v0.0.79 回归：真机上玩偶/木偶站报的 TLS 断开。首个地址 TCP 接通、
+  // TLS 握手被断时，Node 的 Happy Eyeballs 不会试下一个（只在 TCP
+  // 接通失败时回落）；doFetch 必须显式排除掉 TLS 失败的地址再试
+  // 下一个。localhost 解析出 2 个地址：坏端点放第一个、好端点放
+  // 第二个（同一端口），请求最终应成功，且坏端点确实被试过。
+  const addrs = await resolveLocalhost();
+  assert.ok(addrs.length >= 2, `localhost 应至少解析出 2 个地址，实际：${JSON.stringify(addrs)}`);
+  const { server: bad, hits } = await startBadTlsServer(addrs[0].address, 0);
+  const port = bad.address().port;
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('secure-ok');
+  });
+  await new Promise((resolve) => good.listen(port, addrs[1].address, resolve));
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca });
+  try {
+    const result = await postRequest(base, {
+      url: `https://localhost:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [],
+    });
+    assert.equal(result.status, 200);
+    assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'secure-ok');
+    assert.ok(hits.clientHellos >= 1, '坏端点应先被试过（TLS 失败）再轮换到好端点');
+  } finally {
+    stopHost(child);
+    bad.close();
+    good.close();
+  }
+});
+
+test('TLS 握手被断时换下一个 pinned 地址重试（v0.0.79）', { timeout: 20000 }, async () => {
+  // pinnedAddrs 非空时轮换用它当地址列表（测试、或将来恢复固定时用；
+  // 生产上 Rust 自 v0.0.76 起传空，走 dns.lookup）。首个 pinned 地址
+  // TLS 被断 → 换第二个。
+  const { server: bad, hits } = await startBadTlsServer('127.0.0.2', 0);
+  const port = bad.address().port;
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('secure-ok');
+  });
+  await new Promise((resolve) => good.listen(port, '127.0.0.1', resolve));
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca });
+  try {
+    const result = await postRequest(base, {
+      url: `https://myhost.test:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [`127.0.0.2:${port}`, `127.0.0.1:${port}`],
+    });
+    assert.equal(result.status, 200);
+    assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'secure-ok');
+    assert.ok(hits.clientHellos >= 1, '坏端点应先被试过（TLS 失败）再轮换');
+  } finally {
+    stopHost(child);
+    bad.close();
+    good.close();
+  }
+});
+
+test('全部地址都 TLS 失败时报错带已试地址与总数（v0.0.79）', { timeout: 20000 }, async () => {
+  // 两个地址都断：报错应是首个错误（与轮换前一致），附上全部已试
+  // 地址与解析总数，让真机测试能区分“一个坏边缘”与“全部都坏”。
+  const addrs = await resolveLocalhost();
+  assert.ok(addrs.length >= 2, `localhost 应至少解析出 2 个地址，实际：${JSON.stringify(addrs)}`);
+  const { server: bad1, hits: hits1 } = await startBadTlsServer(addrs[0].address, 0);
+  const port = bad1.address().port;
+  const { server: bad2, hits: hits2 } = await startBadTlsServer(addrs[1].address, port);
+  const { child, base } = await startHost();
+  try {
+    const result = await postRequest(base, {
+      url: `https://localhost:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [],
+    });
+    assert.equal(result.code, 'NETWORK');
+    assert.match(result.error, /Client network socket disconnected before secure TLS connection was established/);
+    assert.ok(
+      result.error.includes(`（已试: ${addrs[0].address}, ${addrs[1].address}；共 2 个地址）`),
+      `报错应带全部已试地址与解析总数：${result.error}`,
+    );
+    assert.ok(hits1.clientHellos >= 1, '第一个坏端点应被试过');
+    assert.ok(hits2.clientHellos >= 1, '第二个坏端点也应被试过');
+  } finally {
+    stopHost(child);
+    bad1.close();
+    bad2.close();
+  }
+});
+
+test('超时不轮换（v0.0.79）', { timeout: 20000 }, async () => {
+  // 黑洞端点：接通后不响应，烧满超时——超时不是可重试的失败，
+  // 好端点一次都不应被试（轮换不会把单次请求拖得比超时更长）。
+  const addrs = await resolveLocalhost();
+  assert.ok(addrs.length >= 2, `localhost 应至少解析出 2 个地址，实际：${JSON.stringify(addrs)}`);
+  const sockets = new Set();
+  const blackhole = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise((resolve) => blackhole.listen(0, addrs[0].address, resolve));
+  const port = blackhole.address().port;
+  let goodConnections = 0;
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('secure-ok');
+  });
+  good.on('connection', () => { goodConnections += 1; });
+  await new Promise((resolve) => good.listen(port, addrs[1].address, resolve));
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca });
+  try {
+    const result = await postRequest(base, {
+      url: `https://localhost:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 2000,
+      proxyUrl: null,
+      pinnedAddrs: [],
+    });
+    assert.equal(result.code, 'TIMEOUT');
+    assert.equal(goodConnections, 0, '超时不应轮换，好端点一次都不应被试');
+  } finally {
+    stopHost(child);
+    for (const s of sockets) s.destroy();
+    blackhole.close();
+    good.close();
+  }
+});
+
+test('已收到响应后不轮换（v0.0.79）', { timeout: 20000 }, async () => {
+  // 首个地址 TLS 建好、响应头发了一半就断开——请求字节已发出，
+  // 重发不安全，好端点一次都不应被试。
+  const addrs = await resolveLocalhost();
+  assert.ok(addrs.length >= 2, `localhost 应至少解析出 2 个地址，实际：${JSON.stringify(addrs)}`);
+  const partial = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': '100' });
+    res.write('partial', () => req.socket.destroy());
+  });
+  await new Promise((resolve) => partial.listen(0, addrs[0].address, resolve));
+  const port = partial.address().port;
+  let goodConnections = 0;
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('secure-ok');
+  });
+  good.on('connection', () => { goodConnections += 1; });
+  await new Promise((resolve) => good.listen(port, addrs[1].address, resolve));
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca });
+  try {
+    const result = await postRequest(base, {
+      url: `https://localhost:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [],
+    });
+    assert.equal(result.code, 'NETWORK');
+    assert.equal(goodConnections, 0, '已收到响应后不应轮换，好端点一次都不应被试');
+  } finally {
+    stopHost(child);
+    partial.close();
+    good.close();
+  }
+});
+
+test('resolveAddrs：系统顺序、不重排、解析失败回空列表（v0.0.79）', { timeout: 20000 }, async () => {
+  const script = `
+    const { resolveAddrs } = require(${JSON.stringify(HOST)});
+    (async () => {
+      const local = await resolveAddrs('localhost');
+      console.log('LOCAL ' + JSON.stringify(local));
+      const ip = await resolveAddrs('127.0.0.2');
+      console.log('IP ' + JSON.stringify(ip));
+      const bad = await resolveAddrs('not a host');
+      console.log('BAD ' + JSON.stringify(bad));
+      process.exit(0);
+    })();
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  const lines = out.trim().split('\n');
+  const line = (prefix) => lines.find((l) => l.startsWith(prefix)).slice(prefix.length);
+  const local = JSON.parse(line('LOCAL '));
+  assert.ok(local.length >= 2, 'localhost 应至少解析出 2 个地址');
+  assert.ok(local.some((a) => a.address === '127.0.0.1' && a.family === 4));
+  assert.ok(local.some((a) => a.address === '::1' && a.family === 6));
+  // 顺序以系统为准，不硬编码；但两个族都要在，不应被重排丢掉。
+  assert.deepEqual(JSON.parse(line('IP ')), [{ address: '127.0.0.2', family: 4 }]);
+  assert.deepEqual(JSON.parse(line('BAD ')), []);
 });
 
 test('CONNECT 代理握手：请求行、认证、200 后发 TLS ClientHello', { timeout: 20000 }, async () => {

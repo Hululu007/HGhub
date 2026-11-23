@@ -851,11 +851,16 @@ fn upstream_5xx_error(
 }
 
 /// Node 请求失败时，把 Rust 侧预检解析到的地址附在报错末尾
-/// （`（解析: <ip1>, <ip2>）`），让真机测试在所有失败路径
+/// （`（解析: <ip1>, <ip2>；共 <n> 个地址）`），让真机测试在所有失败路径
 /// （直连/代理、NETWORK/TIMEOUT/INTERNAL）上都能看到实际解析到了
 /// 什么地址——v0.0.75 的 `pinned:` 只在直连 NETWORK 错误上出现，
 /// 且拦截页是 HTTP 200、没有宿主错误，本来就带不上任何诊断。
 /// 取消不附加（不是失败）。
+/// v0.0.79：带上解析总数——直连与跟随系统两种模式都要能从这个诊断
+/// 里直接读出结论（2026-11-24 06:25/06:33 两次真机报错都只有 1 个
+/// 地址 198.20.0.19:443；后缀列的是全部解析地址，不只第一个——见
+/// network_policy.rs resolve_target_ordered 全量 collect——所以 1
+/// 个就是只回了 1 个，轮换无处可换；不写总数，用户数不出这个结论）。
 fn with_resolved_addrs(mut e: PluginError, addrs: &[std::net::SocketAddr]) -> PluginError {
     if addrs.is_empty() || e.code == "CANCELLED" {
         return e;
@@ -865,7 +870,7 @@ fn with_resolved_addrs(mut e: PluginError, addrs: &[std::net::SocketAddr]) -> Pl
         .map(|a| a.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    e.message = format!("{}（解析: {list}）", e.message);
+    e.message = format!("{}（解析: {list}；共 {} 个地址）", e.message, addrs.len());
     e
 }
 
@@ -883,7 +888,7 @@ mod tests {
         let e = with_resolved_addrs(PluginError::new("NETWORK", "上游失败"), &addrs);
         assert_eq!(
             e.message,
-            "上游失败（解析: 104.18.32.0:443, 198.18.0.71:443）"
+            "上游失败（解析: 104.18.32.0:443, 198.18.0.71:443；共 2 个地址）"
         );
         assert_eq!(e.code, "NETWORK");
         // 空列表不附加；取消不附加。
