@@ -1,11 +1,12 @@
 //! WebHome 宿主面（08 §10）：为声明了 meta.webhome 的插件开一个独立 WebView
 //! 窗口，加载其首页并注入 window.fm 桥（见 webhome_sdk.js）。窗口一次只开
-//! 一个，绑定一个插件；页面只能操作绑定它的那个插件。
+//! 一个，绑定一个插件；页面只能操作绑定它的那个插件。窗口常驻不销毁：
+//! × 只是隐藏，重开直接显示，换源时导航——iOS 上窗口销毁后从窗口表注销
+//! 的时机由系统把握，关了重建会撞 label 已存在。
 use crate::plugins::PluginHost;
 use hghub_hpp::webhome::{self, Outcome};
 use serde_json::{json, Value};
 use std::sync::Mutex;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const LABEL: &str = "webhome";
@@ -15,8 +16,8 @@ pub struct WebHomeState {
     session: Mutex<Option<WebHomeSession>>,
     /// 主窗口推送的直链播放状态，供 player.status 读取。
     player_state: Mutex<Value>,
-    /// open_webhome 串行化：窗口 close() 是异步的，两次打开并发会
-    /// 在旧窗还没从窗口表注销时建新窗，撞上 label 已存在。
+    /// open_webhome 串行化：两次打开不能交错（建窗与导航、写 session
+    /// 之间不能插进另一次打开），否则窗口与 session 会对不上。
     open_lock: tokio::sync::Mutex<()>,
 }
 
@@ -49,8 +50,8 @@ pub async fn open_webhome(
     state: State<'_, WebHomeState>,
     plugin_id: String,
 ) -> Result<Value, String> {
-    // 整个打开过程串行化：第二下必须等第一下建完窗、写完 session
-    // 再看窗口与 session，否则两下都以为窗口不存在或对不上。
+    // 整个打开过程串行化：两次打开不能交错（建窗与导航、写 session
+    // 之间不能插进另一次打开），否则窗口与 session 会对不上。
     let _open_guard = state.open_lock.lock().await;
     let manager = host.manager(&app).await.map_err(err)?;
     let meta = manager.meta(&plugin_id).await.map_err(err)?;
@@ -66,37 +67,29 @@ pub async fn open_webhome(
             .as_ref()
             .is_some_and(|s| s.plugin_id == plugin_id);
         if same {
+            // 窗口一直活着（× 只是隐藏）：直接显示，页面状态保留。
+            window.show().map_err(err)?;
             window.set_focus().map_err(err)?;
             return Ok(json!({ "url": home_page }));
         }
-        window.close().map_err(err)?;
-        // close() 只是发了关闭请求：窗口要等主线程跑完才从窗口表
-        // 里注销，立刻建同 label 的新窗会报 already exists；等它
-        // 消失再建，最多等约 2 秒。
-        for _ in 0..100 {
-            if app.get_webview_window(LABEL).is_none() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // 换源：让活着的 webview 导航到新首页，桥在导航后重新注入
+        //（wry 把初始化脚本挂成 AtDocumentStart 的 WKUserScript，每
+        // 次加载都跑），再把 session 更新成新插件。
+        window
+            .navigate(home_page.parse().map_err(err)?)
+            .map_err(err)?;
+        *state.session.lock().map_err(err)? = Some(WebHomeSession { plugin_id });
+        window.show().map_err(err)?;
+        window.set_focus().map_err(err)?;
+        return Ok(json!({ "url": home_page }));
     }
-    let window = match WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::External(home_page.parse().map_err(err)?))
+    // 窗口不存在才建新窗。建窗仍撞 label 说明有窗口存在但前面没认
+    // 出来，聚焦它只会重现“打开了却什么都没出现”的静默失败；直接报出来。
+    let window = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::External(home_page.parse().map_err(err)?))
         .title(meta.name.clone())
         .initialization_script(SDK)
         .build()
-    {
-        Ok(window) => window,
-        Err(e) if e.to_string().contains("already exists") => {
-            // 旧窗注销后仍撞 label：窗口开着就是用户要的结果，聚
-            // 焦它并返回成功，不把报错抛给前端。
-            if let Some(window) = app.get_webview_window(LABEL) {
-                window.set_focus().map_err(err)?;
-                return Ok(json!({ "url": home_page }));
-            }
-            return Err(err(e));
-        }
-        Err(e) => return Err(err(e)),
-    };
+        .map_err(err)?;
     // 页面按 fmpause/fmresume 感知前后台（04 §14）。
     let focused_window = window.clone();
     window.on_window_event(move |event| {
@@ -114,14 +107,15 @@ pub async fn open_webhome(
 }
 
 #[tauri::command]
-pub async fn webhome_close(
-    app: AppHandle,
-    state: State<'_, WebHomeState>,
-) -> Result<(), String> {
+pub async fn webhome_close(app: AppHandle) -> Result<(), String> {
+    // × 只是隐藏窗口，不销毁：iOS 上窗口销毁后从窗口表注销的时机由
+    // 系统把握，关了重建会撞 label 已存在。session 保留（窗口还绑
+    // 着这个插件，hide 后 webhome_call 还要用它）。hide 不一定触发
+    // Focused(false)，顺手补发 fmpause；eval 失败不影响关闭。
     if let Some(window) = app.get_webview_window(LABEL) {
-        window.close().map_err(err)?;
+        window.hide().map_err(err)?;
+        let _ = window.eval("window.dispatchEvent(new Event('fmpause'))");
     }
-    *state.session.lock().map_err(err)? = None;
     Ok(())
 }
 
