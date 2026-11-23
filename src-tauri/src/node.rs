@@ -204,11 +204,11 @@ impl NodeBootstrap for IosNodeBootstrap {
 /// 启动失败，先报明错。framework 在这里才 `dlopen`（v0.0.71），
 /// 启动时不加载；加载失败直接返回——线程不启动、started 不置位，
 /// 下次请求再试。调用线程要 2MB 栈（nodejs-mobile 官方要求
-/// 运行时 1MB、推荐 2MB）。
+/// 运行时 1MB、推荐 2MB）。传给 `node_start` 的 argv 必须是一段
+/// 连续内存（v0.0.72，libuv 要求）：单个缓冲区里按顺序写 `node\0`
+/// 再写 host.js 路径 + `\0`，两个指针都指向该缓冲区。
 #[cfg(target_os = "ios")]
 fn start_engine_thread(inner: &Arc<Inner>) -> Result<()> {
-    use std::ffi::CString;
-
     let exe = std::env::current_exe()
         .map_err(|e| PluginError::internal(format!("无法定位应用包路径：{e}")))?;
     let bundle = exe
@@ -228,6 +228,13 @@ fn start_engine_thread(inner: &Arc<Inner>) -> Result<()> {
     // 首次使用时才加载 framework（v0.0.71）：启动时 dyld 不碰它。
     let framework = bundle.join("Frameworks").join("NodeMobile.framework");
     let node_start = ffi::load_node_start(&framework).map_err(PluginError::internal)?;
+    let host_js_str = host_js.to_string_lossy().into_owned();
+    if host_js_str.contains('\0') {
+        // 路径含 NUL 时不启动线程：记启动错误并直接返回（与旧行为
+        // 在线程里记错一致，只是提前到启动前）。
+        *inner.startup_error.lock().unwrap() = Some("边车路径含 NUL 字节".to_string());
+        return Err(PluginError::internal("边车路径含 NUL 字节"));
+    }
     let info_path = inner.info_path.clone();
     let thread_inner = inner.clone();
     std::thread::Builder::new()
@@ -236,16 +243,17 @@ fn start_engine_thread(inner: &Arc<Inner>) -> Result<()> {
         .spawn(move || {
             // 环境变量必须在 node_start 之前设；只在首次启动时设一次。
             std::env::set_var("HG_NODE_INFO_PATH", &info_path);
-            let argv0 = CString::new("node").unwrap();
-            let argv1 = match CString::new(host_js.to_string_lossy().into_owned()) {
-                Ok(path) => path,
-                Err(_) => {
-                    *thread_inner.startup_error.lock().unwrap() =
-                        Some("边车路径含 NUL 字节".to_string());
-                    return;
-                }
-            };
-            let mut argv = [argv0.as_ptr() as *mut _, argv1.as_ptr() as *mut _];
+            // argv 字符串必须落在一段连续内存里按顺序排列（libuv 要求，
+            // v0.0.72）：单个缓冲区，先写 "node\0" 再写 host.js 路径 +
+            // "\0"，两个指针都指向本缓冲区；缓冲区活到 node_start 调用
+            // 结束（正常永不返回），调用期间绝不能释放或移动。
+            let mut buf: Vec<u8> = Vec::with_capacity(5 + host_js_str.len() + 1);
+            buf.extend_from_slice(b"node\0");
+            buf.extend_from_slice(host_js_str.as_bytes());
+            buf.push(0);
+            let base = buf.as_ptr() as *mut std::ffi::c_char;
+            // SAFETY: 两个指针都在仍存活的 buf 内，node_start 调用期间 buf 不动。
+            let mut argv = [base, unsafe { base.add(5) }];
             // node_start 在调用线程上跑事件循环，正常情况下永不返回；
             // 返回即引擎已死（Node 不能二次启动，只能报错，不尝试重启）。
             let rc = unsafe { node_start(argv.len() as _, argv.as_mut_ptr()) };

@@ -140,7 +140,7 @@ pub struct NodeInfo { pub api_base: String }
 
 - 持有 `info_path`（`<app_data_dir>/node-sidecar.json`）、`started` 标志、`starting` 互斥锁、`startup_error`。
 - `ensure_started()`：加锁 → 未启动则 `start_engine_thread()` → `probe()`（轮询 info 文件 + `/health`，30 秒 deadline；超时或启动错误报明错）。
-- `start_engine_thread()`：先校验包内布局（`node-app/host.js` 存在；不存在先报明错，不要等引擎启动失败），设环境变量（`HG_NODE_INFO_PATH`），用 `stack_size(2MB)` 起一个名为 `hg-node` 的线程，在线程里调 `node_start`。**v0.0.71：`node_start` 不再强链接**——启动引擎前先 `dlopen` 包内 framework（`.app/Frameworks/NodeMobile.framework/NodeMobile` 的绝对路径，绕开 @rpath），再 `dlsym` 出 `node_start`，函数指针传进引擎线程再调用（见 `src-tauri/src/node.rs` 的 `ffi::load_node_start`）。v0.0.70 强链接时 App 在闪屏后闪退，改成懒加载后启动时 dyld 不碰 framework，加载失败只会让当次插件请求报错（"Node 引擎加载失败：…"），不会拖垮启动；句柄故意不保存、永不 `dlclose`（Node 只允许启动一次，库必须常驻）：
+- `start_engine_thread()`：先校验包内布局（`node-app/host.js` 存在；不存在先报明错，不要等引擎启动失败），设环境变量（`HG_NODE_INFO_PATH`），用 `stack_size(2MB)` 起一个名为 `hg-node` 的线程，在线程里调 `node_start`。传给 `node_start` 的 argv 必须是一段连续内存（v0.0.72，libuv 要求）：单个 `Vec<u8>` 缓冲区先写 `node\0` 再写 host.js 路径 + `\0`，两个指针都指向该缓冲区——之前两个独立 `CString` 是两次堆分配，字符串不相邻，是潜伏的崩溃点。**v0.0.71：`node_start` 不再强链接**——启动引擎前先 `dlopen` 包内 framework（`.app/Frameworks/NodeMobile.framework/NodeMobile` 的绝对路径，绕开 @rpath），再 `dlsym` 出 `node_start`，函数指针传进引擎线程再调用（见 `src-tauri/src/node.rs` 的 `ffi::load_node_start`）。v0.0.70 强链接时 App 在闪屏后闪退，改成懒加载后启动时 dyld 不碰 framework，加载失败只会让当次插件请求报错（"Node 引擎加载失败：…"），不会拖垮启动；句柄故意不保存、永不 `dlclose`（Node 只允许启动一次，库必须常驻）：
 
 ```rust
 #[cfg(target_os = "ios")]
