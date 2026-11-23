@@ -7,6 +7,9 @@
 // 但有一个地方 18 与 24 默认行为不同：autoSelectFamily 在 18 上默认关、
 // 24 上默认开——lookup 的 all:false 路径端到端测不到（见下面
 // 'lookup 按 Node 契约回地址' 用例，只能把 makeLookup 导出后单独调）。
+// v0.0.76 起 host.js 不再显式设 autoSelectFamily（与 Arcane 一致，
+// Node 18 只试首个地址）；这个“不设”本身也要用 requestOptions 的
+// 入参断言钉住，端到端测不到。
 //
 // 跑：node --test src-tauri/node-sidecar/tests/test_host.mjs
 import { test, before, after } from 'node:test';
@@ -306,90 +309,79 @@ test('lookup 按 Node 契约回地址：all:true 回数组、all:false 回单个
   assert.equal(line('V6_FALSE '), '"2606:4700:4700::1111" 6');
 });
 
-test('pinned 首个地址不通时试下一个（autoSelectFamily）', { timeout: 20000 }, async () => {
+test('requestOptions：无 pinned 时不用自定义 lookup、不设 autoSelectFamily', { timeout: 20000 }, async () => {
+  // 契约测试（v0.0.76）：与 Arcane 完全一致——Node 用默认 lookup，
+  // 不传自定义 lookup、不显式设 autoSelectFamily。Node 18.20.4 的
+  // autoSelectFamily 会在首个地址 250ms 未接通时并行试下一个地址，
+  // 请求可能落到直连边缘而不是首个地址；不设它，Node 18 只试首个
+  // 地址（本机 Node 24 默认开，端到端测不到，只能直接断言入参）。
+  const script = `
+    const { requestOptions } = require(${JSON.stringify(HOST)});
+    const empty = requestOptions({ url: 'https://example.com/x', method: 'GET', headers: {}, pinnedAddrs: [], proxyUrl: null }, 10000);
+    console.log('EMPTY_LOOKUP ' + ('lookup' in empty));
+    console.log('EMPTY_AUTO ' + ('autoSelectFamily' in empty));
+    const pinned = requestOptions({ url: 'https://example.com/x', method: 'GET', headers: {}, pinnedAddrs: ['93.184.216.34:443'], proxyUrl: null }, 10000);
+    console.log('PINNED_LOOKUP ' + (typeof pinned.lookup));
+    console.log('PINNED_AUTO ' + ('autoSelectFamily' in pinned));
+    process.exit(0);
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  const lines = out.trim().split('\n');
+  const line = (prefix) => lines.find((l) => l.startsWith(prefix)).slice(prefix.length);
+  assert.equal(line('EMPTY_LOOKUP '), 'false');
+  assert.equal(line('EMPTY_AUTO '), 'false');
+  assert.equal(line('PINNED_LOOKUP '), 'function');
+  assert.equal(line('PINNED_AUTO '), 'false');
+});
+
+test('无 pinned 地址时走 Node 默认 lookup（localhost 能通）', { timeout: 20000 }, async () => {
+  // v0.0.76：Rust 不再传 pinnedAddrs，Node 用默认 lookup 解析。
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' });
-    res.end('fallback-ok');
+    res.end('default-lookup-ok');
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
   const { child, base } = await startHost();
   try {
-    // 首个 pinned 地址 127.0.0.2 上没人在听（ECONNREFUSED），第二个
-    // 才是活的服务器；doFetch 显式 autoSelectFamily:true，Node 18
-    // 也会逐个试 pinned 列表（不写这行，Node 18 只试首个）。
     const result = await postRequest(base, {
-      url: `http://myhost.test:${port}/x`,
+      url: `http://localhost:${port}/x`,
       method: 'GET',
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeoutMs: 10000,
       proxyUrl: null,
-      pinnedAddrs: [`127.0.0.2:${port}`, `127.0.0.1:${port}`],
+      pinnedAddrs: [],
     });
     assert.equal(result.status, 200);
-    assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'fallback-ok');
+    assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'default-lookup-ok');
   } finally {
     stopHost(child);
     server.close();
   }
 });
 
-test('TLS 握手被断时试下一个 pinned 地址（v0.0.75 回归）', { timeout: 20000 }, async () => {
-  // 回归测试（v0.0.75）：真机上玩偶/木偶站报的 TLS 断开。首个 pinned
-  // 地址 TCP 接通、TLS 握手被断时，Node 的 Happy Eyeballs 不会试下一个
-  // （只在 TCP 接通失败时回落）；doFetch 必须显式排除掉 TLS 失败的
-  // 那个地址再试一次。重试是 doFetch 自己的循环，不依赖 autoSelectFamily，
-  // 所以 Node 18 与 24 行为一致。
-  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
-    res.writeHead(200, { 'content-type': 'text/plain' });
-    res.end('fallback-ok');
-  });
-  await new Promise((resolve) => good.listen(0, '127.0.0.1', resolve));
-  const port = good.address().port;
-  const { server: bad, hits } = await startBadTlsServer('127.0.0.2', port);
-  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca });
-  try {
-    const result = await postRequest(base, {
-      url: `https://myhost.test:${port}/x`,
-      method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeoutMs: 10000,
-      proxyUrl: null,
-      pinnedAddrs: [`127.0.0.2:${port}`, `127.0.0.1:${port}`],
-    });
-    assert.equal(result.status, 200);
-    assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'fallback-ok');
-    assert.ok(hits.clientHellos >= 1, '坏端点应先被试过（TLS 失败）再回落');
-  } finally {
-    stopHost(child);
-    good.close();
-    bad.close();
-  }
-});
-
-test('全部 pinned 地址都 TLS 失败时报错带上已试地址', { timeout: 20000 }, async () => {
-  const { server: bad1, hits: hits1 } = await startBadTlsServer('127.0.0.2', 0);
-  const port = bad1.address().port;
-  const { server: bad2, hits: hits2 } = await startBadTlsServer('127.0.0.3', port);
+test('TLS 握手被断时只试一次、不重试（v0.0.76）', { timeout: 20000 }, async () => {
+  // v0.0.76：重试循环随 pinning 一起撤掉——没有 pinned 列表就无地址
+  // 可换；坏端点只应被试一次（clientHellos === 1），而不是像 v0.0.75
+  // 那样换地址重试。直连/代理都一样：失败就是失败，诊断在 Rust 层。
+  const { server: bad, hits } = await startBadTlsServer('127.0.0.2', 0);
+  const port = bad.address().port;
   const { child, base } = await startHost();
   try {
     const result = await postRequest(base, {
-      url: `https://myhost.test:${port}/x`,
+      url: `https://127.0.0.2:${port}/x`,
       method: 'GET',
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeoutMs: 10000,
       proxyUrl: null,
-      pinnedAddrs: [`127.0.0.2:${port}`, `127.0.0.3:${port}`],
+      pinnedAddrs: [],
     });
     assert.equal(result.code, 'NETWORK');
     assert.match(result.error, /Client network socket disconnected before secure TLS connection was established/);
-    assert.match(result.error, /pinned: 127\.0\.0\.2, 127\.0\.0\.3/);
-    assert.ok(hits1.clientHellos >= 1, '第一个坏端点应被试过');
-    assert.ok(hits2.clientHellos >= 1, '第二个坏端点也应被试过');
+    assert.equal(hits.clientHellos, 1, '坏端点只应被试一次，不重试');
   } finally {
     stopHost(child);
-    bad1.close();
-    bad2.close();
+    bad.close();
   }
 });
 

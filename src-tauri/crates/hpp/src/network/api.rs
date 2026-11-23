@@ -282,13 +282,19 @@ impl Network {
         self.rate_limit(cancel).await?;
         self.check_cooldown(host)?;
         let target = outgoing.target.clone();
-        // DNS 固定：每跳重新解析（wreq 路径靠 60 秒池重建，Node 路径
-        // 更及时；行为差异见 node-engine.md §7）。
-        // v0.0.74：Node 路径用系统解析器原顺序（resolve_target_keep_order），
-        // 不做 IPv6 优先重排——Arcane 的 Node 默认 lookup 就是系统顺序；
-        // 重排会把直连 IPv6 边缘排到 FakeIP 前面，Node 先连直连 IPv6 而
-        // 被拦截，系统顺序下首个是 FakeIP（经 TUN 走美国节点）。固定
-        // 本身不变（仍只连校验过的地址，协议 03 §2）。
+        // v0.0.76：决定性实验——不再把解析结果钉给 Node，与 Arcane
+        // 完全一致（Node 默认 lookup + Node 18 默认 autoSelectFamily）。
+        // Rust 侧的解析只保留两件事：① 预检——DNS 失败/不合规地址仍
+        // 在这里快速失败（协议 03 §2 的校验意图）；② 诊断——解析到的
+        // 地址附在 Node 报错末尾（见 with_resolved_addrs），让真机测试
+        // 在所有失败路径上都能看到实际解析到了什么。
+        // 代价是 TOCTOU 缺口：Node 在连接时重新解析，校验与连接之间
+        // DNS 答案再变就拦不住——Arcane 同样有这个缺口（它根本不校验）；
+        // 若实验证明 pinning 不是原因、要恢复固定，再把列表传回去。
+        // 查到的证据（见 node-engine.md §7）：tokio 的 lookup_host 走
+        // std getaddrinfo（系统解析器），并没有绕过 Karing 自建 DNS；
+        // 真机 pinned 列表曾是 24 个 IPv4（v0.0.72 的 [Object] 个数），
+        // 不是单个 FakeIP——说明当时系统解析器回的就是真实边缘地址。
         let addrs = tokio::select! {
             _ = cancel.cancelled() => return Err(PluginError::cancelled()),
             value = network_policy::resolve_target_keep_order(&target, self.strict()) => value.map_err(|e| PluginError::new("NETWORK", e))?,
@@ -301,9 +307,12 @@ impl Network {
             timeout,
             // 代理每跳重新解析（不缓存地址），设置改动立即生效。
             proxy_url: crate::proxy::effective_proxy_url(&crate::proxy::snapshot()),
-            pinned_addrs: addrs.iter().map(|a| a.to_string()).collect(),
+            pinned_addrs: vec![],
         };
-        let response = self.node_request_with_refresh(request, cancel).await?;
+        let response = self
+            .node_request_with_refresh(request, cancel)
+            .await
+            .map_err(|e| with_resolved_addrs(e, &addrs))?;
         let mut headers = response.headers;
         let redacted = self.receive_cookies(
             &target,
@@ -539,5 +548,49 @@ impl Network {
                 changed = receiver.changed() => changed.map_err(|_| PluginError::internal("网络合并请求缺少结果"))?,
             }
         }
+    }
+}
+
+/// Node 请求失败时，把 Rust 侧预检解析到的地址附在报错末尾
+/// （`（解析: <ip1>, <ip2>）`），让真机测试在所有失败路径
+/// （直连/代理、NETWORK/TIMEOUT/INTERNAL）上都能看到实际解析到了
+/// 什么地址——v0.0.75 的 `pinned:` 只在直连 NETWORK 错误上出现，
+/// 且拦截页是 HTTP 200、没有宿主错误，本来就带不上任何诊断。
+/// 取消不附加（不是失败）。
+fn with_resolved_addrs(mut e: PluginError, addrs: &[std::net::SocketAddr]) -> PluginError {
+    if addrs.is_empty() || e.code == "CANCELLED" {
+        return e;
+    }
+    let list = addrs
+        .iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    e.message = format!("{}（解析: {list}）", e.message);
+    e
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_addrs_suffix_goes_on_all_node_errors_except_cancelled() {
+        // v0.0.76：Node 请求失败时报错末尾带上预检解析到的地址。
+        let addrs: Vec<std::net::SocketAddr> = vec![
+            "104.18.32.0:443".parse().unwrap(),
+            "198.18.0.71:443".parse().unwrap(),
+        ];
+        let e = with_resolved_addrs(PluginError::new("NETWORK", "上游失败"), &addrs);
+        assert_eq!(
+            e.message,
+            "上游失败（解析: 104.18.32.0:443, 198.18.0.71:443）"
+        );
+        assert_eq!(e.code, "NETWORK");
+        // 空列表不附加；取消不附加。
+        let e = with_resolved_addrs(PluginError::new("TIMEOUT", "超时"), &[]);
+        assert_eq!(e.message, "超时");
+        let e = with_resolved_addrs(PluginError::cancelled(), &addrs);
+        assert_eq!(e.message, "调用已取消");
     }
 }

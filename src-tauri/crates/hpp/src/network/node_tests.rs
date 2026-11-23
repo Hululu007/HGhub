@@ -12,12 +12,14 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::future::BoxFuture;
 use std::{
     collections::VecDeque,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 struct MockNode {
     calls: AtomicUsize,
     last: Mutex<Option<Value>>,
+    /// 置 true 时 /request 回 500（v0.0.76：测 Node 报错的诊断后缀）。
+    fail: AtomicBool,
 }
 
 struct MockUpstream {
@@ -51,6 +53,7 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
     let state = Arc::new(MockNode {
         calls: AtomicUsize::new(0),
         last: Mutex::new(None),
+        fail: AtomicBool::new(false),
     });
     let health = state.clone();
     let request = state.clone();
@@ -69,11 +72,20 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
                 async move {
                     state.calls.fetch_add(1, Ordering::Relaxed);
                     *state.last.lock().unwrap() = Some(body);
-                    Json(json!({
-                        "status": 200,
-                        "headers": {"content-type": "text/plain", "x-node": "1"},
-                        "bodyBase64": BASE64.encode("node-body"),
-                    }))
+                    if state.fail.load(Ordering::Relaxed) {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "mock node down", "code": "NETWORK"})),
+                        );
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({
+                            "status": 200,
+                            "headers": {"content-type": "text/plain", "x-node": "1"},
+                            "bodyBase64": BASE64.encode("node-body"),
+                        })),
+                    )
                 }
             }),
         );
@@ -160,7 +172,7 @@ fn node_network(dir: &std::path::Path, bootstrap: Arc<dyn NodeBootstrap>) -> Arc
 }
 
 #[tokio::test]
-async fn api_fetch_goes_through_node_with_pinned_addrs_and_no_proxy() {
+async fn api_fetch_goes_through_node_with_empty_pinned_addrs_and_no_proxy() {
     let (node_base, node, node_server) = start_mock_node().await;
     let (upstream, upstream_state, upstream_server) = start_mock_upstream().await;
     let dir = tempfile::tempdir().unwrap();
@@ -175,8 +187,10 @@ async fn api_fetch_goes_through_node_with_pinned_addrs_and_no_proxy() {
     assert_eq!(result.json()["data"], json!("node-body"));
     assert_eq!(node.calls.load(Ordering::Relaxed), 1);
     assert_eq!(upstream_state.hits.load(Ordering::Relaxed), 0);
-    // Node 收到的是 Rust 已过滤的头 + 固定地址 + 本跳代理（默认跟随
-    // 系统，本机无代理 → null 直连）。
+    // Node 收到的是 Rust 已过滤的头 + 本跳代理（默认跟随
+    // 系统，本机无代理 → null 直连）；v0.0.76 决定性实验：
+    // pinnedAddrs 为空，Node 用默认 lookup（与 Arcane 完全一致），
+    // Rust 侧的解析只做预检与诊断，不再钉地址。
     let last = node.last.lock().unwrap().clone().unwrap();
     assert_eq!(last["url"], json!(format!("{upstream}/x")));
     assert_eq!(last["method"], json!("GET"));
@@ -187,10 +201,36 @@ async fn api_fetch_goes_through_node_with_pinned_addrs_and_no_proxy() {
         "默认 UA 由 Rust 的 outgoing() 补，Node 不自己加头"
     );
     let pinned = last["pinnedAddrs"].as_array().unwrap();
-    assert_eq!(pinned.len(), 1);
     assert!(
-        pinned[0].as_str().unwrap().starts_with("127.0.0.1:"),
-        "pinnedAddrs 应为上游解析出的固定地址：{pinned:?}"
+        pinned.is_empty(),
+        "v0.0.76：pinnedAddrs 应为空，Node 用默认 lookup：{pinned:?}"
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn node_error_carries_resolved_addresses() {
+    // v0.0.76：Node 请求失败时，Rust 侧预检解析到的地址附在报错末尾
+    // （解析: …），直连/代理、NETWORK/TIMEOUT 都带；拦截页是 HTTP 200，
+    // 没有宿主错误，本来就带不上——实验本身是那一路的判据。
+    let (node_base, node, node_server) = start_mock_node().await;
+    node.fail.store(true, Ordering::Relaxed);
+    let (upstream, _upstream_state, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    let err = network
+        .fetch(
+            Transfer::from_json(json!({"url": format!("{upstream}/x"), "responseType": "text"})),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "NETWORK");
+    assert!(
+        err.message.contains("（解析: 127.0.0.1:"),
+        "Node 报错应带上预检解析到的地址：{}",
+        err.message
     );
     node_server.shutdown().await;
     upstream_server.abort();

@@ -12,8 +12,9 @@
 // - 证书校验保持开启（Node 自带 Mozilla 根证书，不许关）。
 // - 代理（CONNECT / SOCKS5/5h / SOCKS4/4a）全部手写核心模块实现，
 //   代理地址由 Rust 每跳传来；回环目标不经过这里。
-// - DNS 固定：Rust 传来的 pinnedAddrs 经自定义 lookup 返回，
-//   SNI 与 Host 仍是目标 hostname，绝不把 IP 当 SNI 发出去。
+// - DNS：v0.0.76 起 Rust 不再把解析结果钉给 Node（pinnedAddrs 为
+//   空），Node 用默认 lookup（与 Arcane 完全一致）；Rust 侧的解析只
+//   做预检与诊断。SNI 与 Host 仍是目标 hostname，绝不把 IP 当 SNI 发出去。
 // - 顶层捕获异常、绝不调 process.exit()：引擎 fatal 会杀掉整个 App。
 // - process.cwd() 是 `/`，这里不依赖相对路径。
 'use strict';
@@ -443,63 +444,23 @@ function socksTarget(proxy, pinnedAddrs, targetHost, targetPort) {
 
 // ---------------------------------------------------------------------------
 // /request：一次上游请求。
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// /request：一次上游请求。
 //
-// 直连时：首个 pinned 地址 TCP 接通后 TLS 被断，Node 不会试下一个
-// （握手失败不是 Happy Eyeballs 的回落条件——v0.0.74 的真机报错与之
-// 一字不差，见 tests/test_host.mjs 的 TLS 回落用例）。所以这里显式
-// 按地址重试：每次排除掉 TLS 失败的那个地址，直到列表试完或预算耗尽。
-// 只在“TCP 已接通、TLS 没完成、还没收到响应”时重试——这时请求字节
-// 还没发出去，换个地址重发是安全的；其它失败（超时、已收到响应、
-// 握手已完成）不重试，避免重复执行。
-// 代理路径不走重试：HTTP CONNECT 由代理自己解析域名，SOCKS 只用首个
-// pinned 地址且失败的那个地址从 socket 上认不出来。
+// v0.0.76：去掉 pinning 的决定性实验——与 Arcane 完全一致，Node 用
+// 默认 lookup，不传自定义 lookup、不显式设 autoSelectFamily。
+// 证据（见 node-engine.md §7）：① tokio 的 lookup_host 走 std
+// getaddrinfo（系统解析器），Rust 并没有绕过 Karing 自建 DNS；
+// ② 真机 pinned 列表曾是 24 个 IPv4（v0.0.72 的 [Object] 个数），
+// 不是单个 FakeIP；③ Node 18.20.4 的 autoSelectFamily 会在首个地址
+// 250ms 未接通时并行试下一个地址（lib/net.js lookupAndConnectMultiple
+// + internalConnectMultiple），请求可能落到直连边缘而不是首个地址，
+// 而 Arcane 不设它（Node 18 默认关，只试首个地址）。
+// v0.0.75 的 doFetch 重试循环随 pinning 一起撤掉（没有 pinned 列表
+// 就无地址可换）；诊断改由 Rust 层做（报错末尾的（解析: …），见
+// hpp network/api.rs with_resolved_addrs）。
 // ---------------------------------------------------------------------------
-async function doFetch(body) {
-  const timeoutMs = Math.min(30000, Math.max(1000, Number(body.timeoutMs) || 15000));
-  const deadline = Date.now() + timeoutMs;
-  const direct = !body.proxyUrl;
-  const pinned = direct ? (body.pinnedAddrs || []).map(parsePinnedAddr).filter(Boolean) : [];
-  const excluded = new Set();
-  const tried = [];
-  for (;;) {
-    const slice = pinned.filter((a) => !excluded.has(a.address));
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      throw upstreamError('TIMEOUT', '请求超时');
-    }
-    try {
-      return await fetchOnce(body, slice, Math.max(1, remaining));
-    } catch (e) {
-      const failed = e && e._triedAddr;
-      if (failed && !tried.includes(failed)) tried.push(failed);
-      const retryable = direct
-        && e && e.code === 'NETWORK'
-        && failed
-        && !e._handshakeDone
-        && !e._responded
-        && slice.some((a) => a.address === failed)
-        && slice.length > 1;
-      if (!retryable) {
-        // 报错里带上已试的 pinned 地址，下次真机测试能区分是 IP 问题
-        // 还是指纹问题；没接通过任何地址时列出全部 pinned 地址。
-        if (direct && pinned.length > 0 && e && e.code === 'NETWORK') {
-          const list = (tried.length > 0 ? tried : pinned.map((a) => a.address)).join(', ');
-          e.message = `${e.message}（pinned: ${list}）`;
-        }
-        throw e;
-      }
-      excluded.add(failed);
-    }
-  }
-}
-
-function fetchOnce(body, pinnedSlice, timeoutMs) {
+function requestOptions(body, timeoutMs) {
   const url = new URL(body.url);
   const method = String(body.method || 'GET').toUpperCase();
-  timeoutMs = Math.min(30000, Math.max(1000, Number(timeoutMs) || 15000));
   const secure = url.protocol === 'https:';
   const targetHost = url.hostname;
   const targetPort = url.port ? Number(url.port) : secure ? 443 : 80;
@@ -510,7 +471,10 @@ function fetchOnce(body, pinnedSlice, timeoutMs) {
     // Rust 侧已把 Content-Length 过滤掉；有 body 时由这里现算。
     headers['content-length'] = String(requestBody.length);
   }
-  const lookup = makeLookup(pinnedSlice.map((a) => `${bracket(a.address)}:${targetPort}`));
+  // pinnedAddrs 为空时 makeLookup 回 undefined，Node 用默认 lookup；
+  // 非空时仍走自定义 lookup（测试与将来恢复固定时用）。绝不显式传
+  // autoSelectFamily（见上面）：Node 18 默认关，与 Arcane 一致。
+  const lookup = makeLookup(body.pinnedAddrs || []);
   let agent;
   let path = url.pathname + url.search;
   if (!body.proxyUrl) {
@@ -526,39 +490,32 @@ function fetchOnce(body, pinnedSlice, timeoutMs) {
       path = body.url;
     }
   }
+  return {
+    // lib.request 的入参原样（lookup 只在 pinnedAddrs 非空时出现，
+    // autoSelectFamily 永不出现——v0.0.76 的契约，见 tests/test_host.mjs），
+    // 外加 doFetch 要用的 secure 与 requestBody。
+    secure,
+    requestBody,
+    hostname: targetHost,
+    port: targetPort,
+    path,
+    method,
+    headers,
+    agent,
+    servername: targetHost,
+    ...(lookup ? { lookup } : {}),
+  };
+}
+
+async function doFetch(body) {
+  const timeoutMs = Math.min(30000, Math.max(1000, Number(body.timeoutMs) || 15000));
+  const { secure, requestBody, ...reqOpts } = requestOptions(body, timeoutMs);
   const lib = secure ? https : http;
   return new Promise((resolve, reject) => {
-    // 诊断用：记下这次请求实际接通的地址、TLS 是否完成、是否收到响应。
-    // 只有“接通了、TLS 没完成”才是可重试的 TLS 失败（见 doFetch）。
-    let triedAddr = null;
-    let handshakeDone = false;
-    let responded = false;
-    const fail = (e) => {
-      const err = classifyError(e);
-      err._triedAddr = triedAddr;
-      err._handshakeDone = handshakeDone;
-      err._responded = responded;
-      reject(err);
-    };
+    const fail = (e) => reject(classifyError(e));
     const req = lib.request(
-      {
-        hostname: targetHost,
-        port: targetPort,
-        path,
-        method,
-        headers,
-        agent,
-        servername: targetHost,
-        // 显式开 Happy Eyeballs：Node 18 默认 autoSelectFamily 为 false，
-        // 不写这里 lookup 只拿到首个地址（首个不通就直接失败）；写死 true
-        // 后 lookup 以 all:true 被调用，返回完整 pinned 列表，Node 逐个试。
-        // 但注意：Happy Eyeballs 只在 TCP 接通失败时回落，TCP 接通后
-        // TLS 被断不会回落——那一层由 doFetch 的显式重试负责。
-        autoSelectFamily: true,
-        ...(lookup ? { lookup } : {}),
-      },
+      reqOpts,
       (res) => {
-        responded = true;
         const chunks = [];
         let size = 0;
         let tooBig = false;
@@ -586,16 +543,6 @@ function fetchOnce(body, pinnedSlice, timeoutMs) {
         res.on('error', (e) => fail(e));
       },
     );
-    req.on('socket', (socket) => {
-      // keepAlive:false，每次都是新 socket，'socket' 事件在接通前触发；
-      // 万一已接通（复用），直接读 remoteAddress。
-      if (socket.connecting) {
-        socket.once('connect', () => { triedAddr = socket.remoteAddress || triedAddr; });
-      } else {
-        triedAddr = socket.remoteAddress || triedAddr;
-      }
-      socket.once('secureConnect', () => { handshakeDone = true; });
-    });
     const timeoutError = new Error('请求超时');
     timeoutError.code = 'NODE_REQUEST_TIMEOUT';
     req.setTimeout(timeoutMs, () => req.destroy(timeoutError));
@@ -707,5 +654,7 @@ startServer(DEFAULT_PORT);
 
 // 供集成测试直接覆盖 lookup 契约（见 tests/test_host.mjs）：本机 Node 24
 // 默认 autoSelectFamily 为 true，端到端测不到 Node 18 的 all:false 路径，
-// 只能把 makeLookup 导出后单独调。入口运行时无影响。
-module.exports = { makeLookup, parsePinnedAddr };
+// 只能把 makeLookup 导出后单独调。requestOptions 也导出：v0.0.76 的
+// “无自定义 lookup、不设 autoSelectFamily”契约要能被测试直接断言。
+// 入口运行时无影响。
+module.exports = { makeLookup, parsePinnedAddr, requestOptions };
