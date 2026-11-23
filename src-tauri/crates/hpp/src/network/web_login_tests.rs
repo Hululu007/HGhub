@@ -95,6 +95,47 @@ fn only_native_requests_use_web_login_and_credentials_stay_in_scope() {
 }
 
 #[test]
+fn challenge_bot_cookie_is_not_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let net = network(dir.path());
+    let page = Url::parse(PAGE).unwrap();
+    let mut headers = HeaderMap::new();
+    headers.append(
+        "set-cookie",
+        HeaderValue::from_static("__cf_bm=stale-bot; Path=/me; Max-Age=1800; Secure; HttpOnly"),
+    );
+    headers.append(
+        "set-cookie",
+        HeaderValue::from_static("session=keep; Path=/me; Secure; HttpOnly"),
+    );
+    assert!(!net
+        .receive_cookies(&page, &mut headers, None, true)
+        .unwrap());
+    assert_eq!(net.request_cookies(&page, true).1, "session=keep");
+    let saved = std::fs::read_to_string(dir.path().join("cookies.json")).unwrap();
+    assert!(!saved.contains("__cf_bm"), "挑战页的机器人 Cookie 不应落盘");
+}
+
+#[test]
+fn existing_bot_cookie_is_purged_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("cookies.json"),
+        r#"[{"name":"__cf_bm","value":"stale","domain":"example.invalid","path":"/","hostOnly":false,"secure":true,"httpOnly":true,"expiresAt":9999999999999},{"name":"session","value":"keep","domain":"example.invalid","path":"/","hostOnly":false,"secure":false,"httpOnly":false,"expiresAt":null}]"#,
+    )
+    .unwrap();
+    let net = network(dir.path());
+    let page = Url::parse(PAGE).unwrap();
+    assert_eq!(net.request_cookies(&page, true).1, "session=keep");
+    let saved = std::fs::read_to_string(dir.path().join("cookies.json")).unwrap();
+    assert!(
+        !saved.contains("__cf_bm"),
+        "加载时应把残留的机器人 Cookie 清掉并回写"
+    );
+    assert!(saved.contains("session"));
+}
+
+#[test]
 fn rejects_cross_origin_expired_or_incomplete_snapshot_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let net = network(dir.path());

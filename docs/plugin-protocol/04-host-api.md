@@ -205,6 +205,7 @@ interface Cookie {
   `clear({ url })` 删除匹配该 URL 的 Cookie，不传 url 则清空该插件全部 Cookie。
 - `set` 省略 domain 时绑定 URL 的主机；给出 domain 时默认非 host-only，可显式设为 true 限定该主机。
 - `hg.http.fetch` 自动保存响应的 `Set-Cookie` 并在后续请求中附加，除非 `credentials: "omit"`。
+- 机器人管理 Cookie `__cf_bm` 例外：挑战页发的它只在当次挑战有效，宿主不保存、也不在后续请求中附加（存下来再发只会让上游一直重新挑战）；加载时罐子里残留的也一并清掉。
 - 会话 Cookie 在插件卸载后**保留**（插件随时可能被卸载，不能以此模拟浏览器会话结束）；
   插件登出或用户清除数据时清空。
 

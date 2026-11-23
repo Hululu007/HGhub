@@ -72,7 +72,9 @@ function classifyError(e) {
 
 // ---------------------------------------------------------------------------
 // DNS 固定：pinnedAddrs 是 "ip:port" 字符串数组（Rust 已校验）。
-// lookup 必须返回 all:true 的完整列表，让 Node 在首个地址失败时试下一个。
+// lookup 必须返回 all:true 的完整列表，让 Node 在首个地址 TCP 接通失败
+// 时试下一个。但注意：TCP 接通后 TLS 被断不会回落——那一层由 doFetch
+// 的显式重试负责（见 tests/test_host.mjs 的 TLS 回落用例）。
 // ---------------------------------------------------------------------------
 function parsePinnedAddr(s) {
   const m = s.match(/^\[([^\]]+)\]:(\d+)$/) || s.match(/^([^:]+):(\d+)$/);
@@ -442,10 +444,62 @@ function socksTarget(proxy, pinnedAddrs, targetHost, targetPort) {
 // ---------------------------------------------------------------------------
 // /request：一次上游请求。
 // ---------------------------------------------------------------------------
-function doFetch(body) {
+// ---------------------------------------------------------------------------
+// /request：一次上游请求。
+//
+// 直连时：首个 pinned 地址 TCP 接通后 TLS 被断，Node 不会试下一个
+// （握手失败不是 Happy Eyeballs 的回落条件——v0.0.74 的真机报错与之
+// 一字不差，见 tests/test_host.mjs 的 TLS 回落用例）。所以这里显式
+// 按地址重试：每次排除掉 TLS 失败的那个地址，直到列表试完或预算耗尽。
+// 只在“TCP 已接通、TLS 没完成、还没收到响应”时重试——这时请求字节
+// 还没发出去，换个地址重发是安全的；其它失败（超时、已收到响应、
+// 握手已完成）不重试，避免重复执行。
+// 代理路径不走重试：HTTP CONNECT 由代理自己解析域名，SOCKS 只用首个
+// pinned 地址且失败的那个地址从 socket 上认不出来。
+// ---------------------------------------------------------------------------
+async function doFetch(body) {
+  const timeoutMs = Math.min(30000, Math.max(1000, Number(body.timeoutMs) || 15000));
+  const deadline = Date.now() + timeoutMs;
+  const direct = !body.proxyUrl;
+  const pinned = direct ? (body.pinnedAddrs || []).map(parsePinnedAddr).filter(Boolean) : [];
+  const excluded = new Set();
+  const tried = [];
+  for (;;) {
+    const slice = pinned.filter((a) => !excluded.has(a.address));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw upstreamError('TIMEOUT', '请求超时');
+    }
+    try {
+      return await fetchOnce(body, slice, Math.max(1, remaining));
+    } catch (e) {
+      const failed = e && e._triedAddr;
+      if (failed && !tried.includes(failed)) tried.push(failed);
+      const retryable = direct
+        && e && e.code === 'NETWORK'
+        && failed
+        && !e._handshakeDone
+        && !e._responded
+        && slice.some((a) => a.address === failed)
+        && slice.length > 1;
+      if (!retryable) {
+        // 报错里带上已试的 pinned 地址，下次真机测试能区分是 IP 问题
+        // 还是指纹问题；没接通过任何地址时列出全部 pinned 地址。
+        if (direct && pinned.length > 0 && e && e.code === 'NETWORK') {
+          const list = (tried.length > 0 ? tried : pinned.map((a) => a.address)).join(', ');
+          e.message = `${e.message}（pinned: ${list}）`;
+        }
+        throw e;
+      }
+      excluded.add(failed);
+    }
+  }
+}
+
+function fetchOnce(body, pinnedSlice, timeoutMs) {
   const url = new URL(body.url);
   const method = String(body.method || 'GET').toUpperCase();
-  const timeoutMs = Math.min(30000, Math.max(1000, Number(body.timeoutMs) || 15000));
+  timeoutMs = Math.min(30000, Math.max(1000, Number(timeoutMs) || 15000));
   const secure = url.protocol === 'https:';
   const targetHost = url.hostname;
   const targetPort = url.port ? Number(url.port) : secure ? 443 : 80;
@@ -456,7 +510,7 @@ function doFetch(body) {
     // Rust 侧已把 Content-Length 过滤掉；有 body 时由这里现算。
     headers['content-length'] = String(requestBody.length);
   }
-  const lookup = makeLookup(body.pinnedAddrs);
+  const lookup = makeLookup(pinnedSlice.map((a) => `${bracket(a.address)}:${targetPort}`));
   let agent;
   let path = url.pathname + url.search;
   if (!body.proxyUrl) {
@@ -474,6 +528,18 @@ function doFetch(body) {
   }
   const lib = secure ? https : http;
   return new Promise((resolve, reject) => {
+    // 诊断用：记下这次请求实际接通的地址、TLS 是否完成、是否收到响应。
+    // 只有“接通了、TLS 没完成”才是可重试的 TLS 失败（见 doFetch）。
+    let triedAddr = null;
+    let handshakeDone = false;
+    let responded = false;
+    const fail = (e) => {
+      const err = classifyError(e);
+      err._triedAddr = triedAddr;
+      err._handshakeDone = handshakeDone;
+      err._responded = responded;
+      reject(err);
+    };
     const req = lib.request(
       {
         hostname: targetHost,
@@ -486,10 +552,13 @@ function doFetch(body) {
         // 显式开 Happy Eyeballs：Node 18 默认 autoSelectFamily 为 false，
         // 不写这里 lookup 只拿到首个地址（首个不通就直接失败）；写死 true
         // 后 lookup 以 all:true 被调用，返回完整 pinned 列表，Node 逐个试。
+        // 但注意：Happy Eyeballs 只在 TCP 接通失败时回落，TCP 接通后
+        // TLS 被断不会回落——那一层由 doFetch 的显式重试负责。
         autoSelectFamily: true,
         ...(lookup ? { lookup } : {}),
       },
       (res) => {
+        responded = true;
         const chunks = [];
         let size = 0;
         let tooBig = false;
@@ -514,13 +583,23 @@ function doFetch(body) {
             bodyBase64: Buffer.concat(chunks).toString('base64'),
           });
         });
-        res.on('error', (e) => reject(classifyError(e)));
+        res.on('error', (e) => fail(e));
       },
     );
+    req.on('socket', (socket) => {
+      // keepAlive:false，每次都是新 socket，'socket' 事件在接通前触发；
+      // 万一已接通（复用），直接读 remoteAddress。
+      if (socket.connecting) {
+        socket.once('connect', () => { triedAddr = socket.remoteAddress || triedAddr; });
+      } else {
+        triedAddr = socket.remoteAddress || triedAddr;
+      }
+      socket.once('secureConnect', () => { handshakeDone = true; });
+    });
     const timeoutError = new Error('请求超时');
     timeoutError.code = 'NODE_REQUEST_TIMEOUT';
     req.setTimeout(timeoutMs, () => req.destroy(timeoutError));
-    req.on('error', (e) => reject(classifyError(e)));
+    req.on('error', (e) => fail(e));
     if (requestBody) req.end(requestBody);
     else req.end();
   });

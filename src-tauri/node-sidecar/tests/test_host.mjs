@@ -102,6 +102,23 @@ function waitFor(predicate, timeoutMs = 5000) {
   });
 }
 
+// 模拟“TCP 接通后 TLS 被断”的坏端点：收到 ClientHello 后延迟 destroy——
+// TCP 已建立，Node 不会因此回落到下一个 pinned 地址（v0.0.74 真机报错
+// 的复现：Client network socket disconnected before secure TLS
+// connection was established）。延迟 150ms 是为了让 TCP 先算“已建立”
+// （立即 destroy 时 Node 会当成 TCP 失败而回落，测不到这条路）。
+function startBadTlsServer(host, port, delayMs = 150) {
+  const hits = { connections: 0, clientHellos: 0 };
+  const server = net.createServer((socket) => {
+    hits.connections += 1;
+    socket.once('data', () => {
+      hits.clientHellos += 1;
+      setTimeout(() => socket.destroy(), delayMs);
+    });
+  });
+  return new Promise((resolve) => server.listen(port, host, () => resolve({ server, hits })));
+}
+
 // ---------------------------------------------------------------------------
 // HTTPS 测试用的 CA 与证书（openssl 现生成，只用于本机测试）。
 // ---------------------------------------------------------------------------
@@ -314,6 +331,65 @@ test('pinned 首个地址不通时试下一个（autoSelectFamily）', { timeout
   } finally {
     stopHost(child);
     server.close();
+  }
+});
+
+test('TLS 握手被断时试下一个 pinned 地址（v0.0.75 回归）', { timeout: 20000 }, async () => {
+  // 回归测试（v0.0.75）：真机上玩偶/木偶站报的 TLS 断开。首个 pinned
+  // 地址 TCP 接通、TLS 握手被断时，Node 的 Happy Eyeballs 不会试下一个
+  // （只在 TCP 接通失败时回落）；doFetch 必须显式排除掉 TLS 失败的
+  // 那个地址再试一次。重试是 doFetch 自己的循环，不依赖 autoSelectFamily，
+  // 所以 Node 18 与 24 行为一致。
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('fallback-ok');
+  });
+  await new Promise((resolve) => good.listen(0, '127.0.0.1', resolve));
+  const port = good.address().port;
+  const { server: bad, hits } = await startBadTlsServer('127.0.0.2', port);
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca });
+  try {
+    const result = await postRequest(base, {
+      url: `https://myhost.test:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [`127.0.0.2:${port}`, `127.0.0.1:${port}`],
+    });
+    assert.equal(result.status, 200);
+    assert.equal(Buffer.from(result.bodyBase64, 'base64').toString(), 'fallback-ok');
+    assert.ok(hits.clientHellos >= 1, '坏端点应先被试过（TLS 失败）再回落');
+  } finally {
+    stopHost(child);
+    good.close();
+    bad.close();
+  }
+});
+
+test('全部 pinned 地址都 TLS 失败时报错带上已试地址', { timeout: 20000 }, async () => {
+  const { server: bad1, hits: hits1 } = await startBadTlsServer('127.0.0.2', 0);
+  const port = bad1.address().port;
+  const { server: bad2, hits: hits2 } = await startBadTlsServer('127.0.0.3', port);
+  const { child, base } = await startHost();
+  try {
+    const result = await postRequest(base, {
+      url: `https://myhost.test:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [`127.0.0.2:${port}`, `127.0.0.3:${port}`],
+    });
+    assert.equal(result.code, 'NETWORK');
+    assert.match(result.error, /Client network socket disconnected before secure TLS connection was established/);
+    assert.match(result.error, /pinned: 127\.0\.0\.2, 127\.0\.0\.3/);
+    assert.ok(hits1.clientHellos >= 1, '第一个坏端点应被试过');
+    assert.ok(hits2.clientHellos >= 1, '第二个坏端点也应被试过');
+  } finally {
+    stopHost(child);
+    bad1.close();
+    bad2.close();
   }
 });
 

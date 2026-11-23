@@ -49,6 +49,11 @@ struct CookieJars {
     web_logins: HashMap<String, WebLoginSession>,
 }
 
+/// Cloudflare 机器人管理 Cookie：挑战页发的 `__cf_bm` 只在当次挑战有效，
+/// 存下来下次再发只会让 Cloudflare 一直重新挑战，所以宿主不存、不发。
+/// （见 docs/developers/node-engine.md §7）
+const BOT_MANAGEMENT_COOKIE: &str = "__cf_bm";
+
 impl CookieJars {
     fn len(&self) -> usize {
         self.ordinary.len()
@@ -57,6 +62,18 @@ impl CookieJars {
                 .values()
                 .map(|s| s.cookies.len())
                 .sum::<usize>()
+    }
+
+    /// 清掉罐子里残留的机器人管理 Cookie，返回清掉的条数。
+    fn purge_bot_cookies(&mut self) -> usize {
+        let before = self.len();
+        self.ordinary
+            .retain(|c| !c.name.eq_ignore_ascii_case(BOT_MANAGEMENT_COOKIE));
+        for s in self.web_logins.values_mut() {
+            s.cookies
+                .retain(|c| !c.name.eq_ignore_ascii_case(BOT_MANAGEMENT_COOKIE));
+        }
+        before - self.len()
     }
 }
 
@@ -96,7 +113,7 @@ impl Network {
         node_bootstrap: Arc<dyn NodeBootstrap>,
     ) -> Result<Self> {
         let jar_path = dir.join("cookies.json");
-        let jar = if jar_path.exists() {
+        let mut jar = if jar_path.exists() {
             #[derive(Deserialize)]
             #[serde(untagged)]
             enum DiskJar {
@@ -115,7 +132,10 @@ impl Network {
         } else {
             CookieJars::default()
         };
-        Ok(Self {
+        // 挑战页发的 __cf_bm 只在当次挑战有效，存下来下次再发只会让
+        // Cloudflare 一直重新挑战：加载时把罐子里残留的清掉并回写。
+        let purged = jar.purge_bot_cookies();
+        let this = Self {
             meta,
             strict_override: strict,
             jar: Mutex::new(jar),
@@ -129,7 +149,12 @@ impl Network {
             cooldown,
             node_bootstrap: Mutex::new(node_bootstrap),
             node_client: Default::default(),
-        })
+        };
+        if purged > 0 {
+            let jars = this.jar.lock().unwrap().clone();
+            this.save_jar(&jars)?;
+        }
+        Ok(this)
     }
     /// 注入 Node 边车引导（`PluginManager::with_node_bootstrap` 用）：
     /// 换引导即换边车地址，旧客户端作废。
@@ -368,6 +393,11 @@ impl Network {
         for h in headers.get_all("set-cookie") {
             if let Ok(s) = h.to_str() {
                 if let Ok(c) = cookie::Cookie::parse(s.to_string()) {
+                    // 挑战页的机器人管理 Cookie 不存：它只在当次挑战有效，
+                    // 存下来下次再发只会让 Cloudflare 一直重新挑战。
+                    if c.name().eq_ignore_ascii_case(BOT_MANAGEMENT_COOKIE) {
+                        continue;
+                    }
                     let default_path = u
                         .path()
                         .rsplit_once('/')
