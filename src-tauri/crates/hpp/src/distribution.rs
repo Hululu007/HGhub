@@ -610,6 +610,11 @@ impl PluginManager {
     /// 百分号解码、去暂存后缀 `-<纳秒>-<序号>`，只去首尾空白，标点与
     /// emoji 原样保留。词干 slug 后只剩回退值（如纯中文名）时，id 加
     /// 确定性 FNV-1a 哈希后缀，避免两个中文源撞 id。
+    /// id 派生输入已冻结（tests/python_spider.rs 的
+    /// python_import_watermelon_id_is_frozen 锁定“西瓜视频🍉”→
+    /// py.spider-d510afb9）：改暂存名或本函数规则必须保证同一文件重导
+    /// 得到同一 id——首页片源、收藏与历史都按 id 存，id 一变已装源
+    /// 就从首页消失。
     /// 版本恒为 1.0.0——Python 源没有可信的版本字段，更新靠手动重导（见 02 §7）。
     fn inspect_python(code: &str, location: Option<&str>) -> Result<Meta> {
         let _face = crate::python::scan_source(code)?;

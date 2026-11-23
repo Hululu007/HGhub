@@ -34,7 +34,7 @@ export default function WebHomeSources({ manage }: { manage: () => void }) {
             const ready = p.enabled && p.status === "ready";
             return (
               <button key={p.meta.id} className="refined-source-row" style={{ width: "100%", textAlign: "left", opacity: ready ? undefined : 0.45 }}
-                disabled={!ready || opening === p.meta.id} onClick={() => open(p.meta.id)} aria-label={p.meta.name}>
+                disabled={!ready || opening !== ""} onClick={() => open(p.meta.id)} aria-label={p.meta.name}>
                 <span className="refined-glyph">{p.meta.name.slice(0, 1)}</span>
                 <span>
                   <strong>{p.meta.name}</strong>

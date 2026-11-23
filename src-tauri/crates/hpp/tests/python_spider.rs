@@ -405,6 +405,31 @@ async fn python_import_percent_encoded_chinese_name() {
 }
 
 #[tokio::test]
+async fn python_import_watermelon_id_is_frozen() {
+    // 锁死 v0.0.59 的 id：同一文件重导必须得到同一个 id。id 由文件名
+    // 词干“西瓜视频🍉”经 FNV-1a 派生；首页记住的片源（homeIds）、收藏
+    // 与历史都按 id 存，v0.0.57→v0.0.59 换了词干就换了 id，首页才
+    // 变空。这个值是写死的——现场算哈希锁不住规则变化；改
+    // staged_name / inspect_python 让它跑红时，说明 id 派生输入变
+    // 了，不能直接发版。
+    let location =
+        "content://documents/%E8%A5%BF%E7%93%9C%E8%A7%86%E9%A2%91%F0%9F%8D%89-1795392251000000000-0.py";
+    let (manager, _dir) = manager_with_docs(
+        Behavior::Normal,
+        HashMap::from([(location.to_string(), NAMELESS_SPIDER.as_bytes().to_vec())]),
+    )
+    .await;
+    let preview = manager
+        .preview_import(vec![location.into()], "documents")
+        .await
+        .unwrap();
+    assert_eq!(preview.items.len(), 1);
+    assert!(preview.items[0].error.is_none(), "{:?}", preview.items[0].error);
+    assert_eq!(preview.items[0].name, "西瓜视频🍉");
+    assert_eq!(preview.items[0].id, "py.spider-d510afb9");
+}
+
+#[tokio::test]
 async fn python_import_filename_beats_get_name() {
     // 演示源 getName() 声明的是“Python 演示源”，但文件名赢：名字按源文件
     // 自己的名字原样显示，含标点/emoji。
