@@ -50,3 +50,6 @@ docs/API.md
 /docs/todo.md
 /docs/plugin-protocol/HANDOFF.md
 /rules/
+
+# Python 测试产物
+__pycache__/

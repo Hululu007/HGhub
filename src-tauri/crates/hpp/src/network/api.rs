@@ -284,9 +284,14 @@ impl Network {
         let target = outgoing.target.clone();
         // DNS 固定：每跳重新解析（wreq 路径靠 60 秒池重建，Node 路径
         // 更及时；行为差异见 node-engine.md §7）。
+        // v0.0.74：Node 路径用系统解析器原顺序（resolve_target_keep_order），
+        // 不做 IPv6 优先重排——Arcane 的 Node 默认 lookup 就是系统顺序；
+        // 重排会把直连 IPv6 边缘排到 FakeIP 前面，Node 先连直连 IPv6 而
+        // 被拦截，系统顺序下首个是 FakeIP（经 TUN 走美国节点）。固定
+        // 本身不变（仍只连校验过的地址，协议 03 §2）。
         let addrs = tokio::select! {
             _ = cancel.cancelled() => return Err(PluginError::cancelled()),
-            value = network_policy::resolve_target(&target, self.strict()) => value.map_err(|e| PluginError::new("NETWORK", e))?,
+            value = network_policy::resolve_target_keep_order(&target, self.strict()) => value.map_err(|e| PluginError::new("NETWORK", e))?,
         };
         let request = NodeRequest {
             url: target.to_string(),

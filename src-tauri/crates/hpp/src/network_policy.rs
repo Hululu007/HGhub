@@ -204,13 +204,39 @@ fn validated_addresses(
 /// 与浏览器一致优先 IPv6：连接器以首个地址的协议族为首选，另一族在其失败后（Happy Eyeballs）兜底。
 /// 普通排序会把 IPv4 排在前面；共享 IPv4 出口被上游接口限流时，请求会挂起或返回 502/503，
 /// 而同一网络下浏览器走 IPv6 一切正常。
+/// v0.0.74：Node 路径不用这个重排（见 `resolve_target_keep_order`）——Arcane 的 Node
+/// 用默认 lookup（即系统解析器原顺序）；重排会把直连 IPv6 边缘排到 FakeIP 前面，Node
+/// 先连直连 IPv6 而被 Cloudflare 拦截，系统顺序下首个是 FakeIP（经 TUN 走美国节点）。
 fn sort_ipv6_first(addrs: &mut [SocketAddr]) {
     addrs.sort_unstable_by_key(|addr| (addr.is_ipv4(), *addr));
 }
 
+fn order_addresses(mut addrs: Vec<SocketAddr>, ipv6_first: bool) -> Vec<SocketAddr> {
+    if ipv6_first {
+        sort_ipv6_first(&mut addrs);
+    }
+    addrs
+}
+
 pub async fn resolve_target(url: &Url, strict: bool) -> Result<Vec<SocketAddr>, String> {
+    resolve_target_ordered(url, strict, true).await
+}
+
+/// Node 路径专用（v0.0.74）：校验+固定不变，只是不做 IPv6 优先重排，
+/// 保持系统解析器原顺序。协议 03 §2 的 DNS 固定仍成立（只连校验过
+/// 的地址，不在检查后重新解析）；变的只是列表顺序，与 Arcane 的
+/// Node 默认 lookup 一致。
+pub async fn resolve_target_keep_order(url: &Url, strict: bool) -> Result<Vec<SocketAddr>, String> {
+    resolve_target_ordered(url, strict, false).await
+}
+
+async fn resolve_target_ordered(
+    url: &Url,
+    strict: bool,
+    ipv6_first: bool,
+) -> Result<Vec<SocketAddr>, String> {
     let port = url.port_or_known_default().ok_or("目标端口无效")?;
-    let mut addrs = match url.host().ok_or("目标缺少主机名")? {
+    let addrs = match url.host().ok_or("目标缺少主机名")? {
         Host::Ipv4(ip) => vec![SocketAddr::new(ip.into(), port)],
         Host::Ipv6(ip) => vec![SocketAddr::new(ip.into(), port)],
         Host::Domain(host) => tokio::time::timeout(
@@ -222,7 +248,7 @@ pub async fn resolve_target(url: &Url, strict: bool) -> Result<Vec<SocketAddr>, 
         .map_err(|_| "DNS 解析失败")?
         .collect(),
     };
-    sort_ipv6_first(&mut addrs);
+    let mut addrs = order_addresses(addrs, ipv6_first);
     addrs.dedup();
     validated_addresses(addrs, strict)
 }
@@ -285,6 +311,25 @@ mod tests {
         assert!(addrs[..2].iter().all(SocketAddr::is_ipv6), "{addrs:?}");
         assert!(addrs[2..].iter().all(SocketAddr::is_ipv4), "{addrs:?}");
         assert_eq!(addrs[2], "18.65.214.3:443".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn keep_order_does_not_resort() {
+        // v0.0.74：Node 路径用系统解析器原顺序，不做 IPv6 优先重排。
+        let addrs: Vec<SocketAddr> = [
+            "18.65.214.45:443",
+            "[2600:9000:221c:5000:3:fdd6:fcc0:93a1]:443",
+            "18.65.214.3:443",
+            "[2600:9000:221c:4000:3:fdd6:fcc0:93a1]:443",
+        ]
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect();
+        let kept = order_addresses(addrs.clone(), false);
+        assert_eq!(kept, addrs);
+        assert!(kept[0].is_ipv4(), "{kept:?}");
+        let sorted = order_addresses(addrs, true);
+        assert!(sorted[..2].iter().all(SocketAddr::is_ipv6), "{sorted:?}");
     }
 
     #[test]

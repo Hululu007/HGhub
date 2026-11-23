@@ -297,8 +297,9 @@ hpp `node/client.rs`，照抄 `python/client.rs` 的 `SidecarClient`：
 
 协议 03 §2 要求"通过检查的解析结果直接用于连接，不在检查后重新解析"。Node 路径保留这条规则：
 
-- Rust 侧在每跳发 Node 请求前调 `network_policy::resolve_target(target, strict)`（与今天 `Network::client()` 里同一调用）：校验（内网/保留地址拒绝、FakeIP 198.18.0.0/15 放行、混合答案只留允许的地址）+ IPv6 优先排序，得到 pinned 地址列表。
+- Rust 侧在每跳发 Node 请求前调 `network_policy::resolve_target`（与今天 `Network::client()` 里同一调用）：校验（内网/保留地址拒绝、FakeIP 198.18.0.0/15 放行、混合答案只留允许的地址）+ IPv6 优先排序，得到 pinned 地址列表。
 - 把列表（`"ip:port"` 字符串数组）随请求发给 Node；Node 的 `https.request` 用自定义 `lookup(hostname, opts, cb)` 返回该列表。**lookup 必须按 `opts.all` 回值**：`all: true` 时回 `[{address, family}]` 数组，`all: false` 时回首个地址字符串 + family。**v0.0.73 的教训**：旧代码无条件回数组；本机 Node 24 上 `autoSelectFamily` 默认开（lookup 以 `all:true` 被调用），测试全过；真机 Node 18.20.4 上 `autoSelectFamily` 默认关（lookup 以 `all:false` 被调用），Node 把数组当成单个 IP，直接抛 `Invalid IP address: [ [Object], ... ]`（个数即 pinned 个数）。所以 `doFetch` 里显式传 `autoSelectFamily: true`（Node 18 也走 Happy Eyeballs，逐个试 pinned 列表，不只试首个），同时 `makeLookup` 按 `all` 回值——两处缺一不可，缺前者 Node 18 只试首个地址，缺后者违反 lookup 契约。
+- **v0.0.74：Node 路径改用系统解析器原顺序，不做 IPv6 优先重排。**v0.0.73 修好 lookup 后真机仍被拦截（“响应被拦截”回来了，`Invalid IP address` 没了）——Node 画像假说被证伪。剩下与 Arcane 的最大差别就是 DNS：我们是 Rust 解析 + IPv6 优先重排后钉死，Arcane 是 Node 默认 lookup（系统顺序）。系统顺序下首个地址是 Karing 的 FakeIP（198.18.x.x，经 TUN 走美国节点）；重排后首个变成直连 IPv6 边缘，Node 先连它而被 Cloudflare 拦截。证据链：py 边车（Python `requests`，系统顺序）能播、WKWebView（系统顺序）能打开页面、wreq 路径（同一 `resolve_target` 重排）同样被拦。改法：`send_api_hop` 改调 `resolve_target_keep_order`（校验+固定不变，只是不重排；协议 03 §2 的 DNS 固定仍成立，wreq/代理探测路径仍用 IPv6 优先）。如果 v0.0.74 真机仍被拦，说明不是顺序问题，下一跳见 §10.3。
 - `servername`（SNI）与 `Host` 仍取目标 hostname（Node 用自定义 `lookup` 时的默认行为，实现时必须显式确认并加测试断言；不要让 Node 把 IP 当成 SNI 发出去）。
 - 与 wreq 路径的差异：wreq 路径靠 60 秒池重建重新解析 DNS；Node 路径每跳都重新解析（走系统解析器缓存，开销可接受，且更及时）。行为差异如实记录，不掩饰。
 
@@ -364,9 +365,10 @@ hpp `node/client.rs`，照抄 `python/client.rs` 的 `SidecarClient`：
 
 如实回报：画像假说被证伪。下一跳候选（按顺序，不在本版做）：
 
-1. WKWebView `fetch`（页面直接用浏览器 `fetch` 发请求，走 WebKit 完整浏览器网络栈；代价是过消息通道回传、受 CORS/页面上下文限制）。
-2. 真浏览器拿 clearance cookie（复杂，Arcane 的证据表明它不是 Arcane 的做法）。
-3. 停止在 Node 上继续投入（不要换个画像再试一版 wreq）。
+1. **DNS 固定顺序（v0.0.74 已做）：**Node 路径改用系统解析器原顺序（`resolve_target_keep_order`），不做 IPv6 优先重排；固定本身不变。真机若仍被拦，说明不是顺序问题，继续往下。
+2. **持久化 Cookie 罐里的陈旧 `__cf_bm`（v0.0.74 未动，下一候选）：**Rust 的 Cookie 罐落盘保存，WebHome 的 fm.req 会带上它（`credentials` 未设为 omit）；Cloudflare 拦截页的 `Set-Cookie: __cf_bm` 会被存下来，下次请求再发过去——失效的 bot 管理 Cookie 会让 Cloudflare 一直重新挑战。Arcane 的 net.request 不带 Cookie。验证办法：清掉罐里该站的 Cookie 再测（或临时一版不带 Cookie）；若过，根因就是它。
+3. WKWebView `fetch` 拿 clearance cookie：页面直接用浏览器 `fetch` 发请求，走 WebKit 完整浏览器网络栈；通过 Cloudflare 挑战后拿到 `cf_clearance`，再让 Node 的请求带上它。先确认 WebView 本身能不能取到分类 URL（页面在 WebView 里能打开是已知事实，但要确认的是 WebView 的 `fetch` 对分类 URL 是否也通——如果 WebView 也被拦，clearance 路线也不成立，要如实回报）。代价是过消息通道回传、受 CORS/页面上下文限制。
+4. 停止在 Node 上继续投入（不要换个画像再试一版 wreq）。
 
 ## 11. 影响的文档（与实现同一提交，AGENTS.md §7.4）
 

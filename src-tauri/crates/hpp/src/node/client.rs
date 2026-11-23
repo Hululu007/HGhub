@@ -22,7 +22,8 @@ pub struct NodeRequest {
     pub timeout: Duration,
     /// 本跳生效的代理地址；None 表示直连（无 HTTP 代理）。
     pub proxy_url: Option<String>,
-    /// `resolve_target` 校验+固定后的地址列表（`"ip:port"`）。
+    /// `resolve_target` 校验+固定后的地址列表（`"ip:port"`）；Node 路径
+    /// 用系统解析器原顺序（v0.0.74，不做 IPv6 优先重排）。
     pub pinned_addrs: Vec<String>,
 }
 
