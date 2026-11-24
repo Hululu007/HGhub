@@ -13,7 +13,7 @@ use hghub_hpp::{
 };
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 const LABEL: &str = "webhome";
 const SDK: &str = include_str!("webhome_sdk.js");
@@ -320,4 +320,65 @@ pub fn webhome_player_state(
         "durationSec": duration_sec,
     });
     Ok(())
+}
+
+/// 清理 WebHome 全部数据（v0.0.83）：删页面 localStorage 里的三个域名
+/// 缓存键、全清 WebView 浏览数据、清绑定插件的 Rust 请求 Cookie 罐，
+/// 再重载 webhome 窗口。窗口不存在时返回 `WEBHOME_NOT_OPEN`，不建
+/// 窗口；会话未绑定插件时也不清（不知道清哪个插件的罐子）。删键、
+/// 取值与步骤顺序的逻辑在 hpp（`webhome_data`），这里只是窗口的薄包装。
+#[tauri::command]
+pub async fn clear_webhome_data(
+    app: AppHandle,
+    host: State<'_, PluginHost>,
+    state: State<'_, WebHomeState>,
+) -> Result<Value, String> {
+    // 窗口不存在先报 WEBHOME_NOT_OPEN（比会话未绑定更优先：刚装好、
+    // 还没打开过 WebHome 时两者都没有，用户要看的是前者）。
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return Err(hghub_hpp::webhome_data::WEBHOME_NOT_OPEN.to_string());
+    };
+    let window = WebHomeWindow(window);
+    let plugin_id = state
+        .session
+        .lock()
+        .map_err(err)?
+        .as_ref()
+        .map(|s| s.plugin_id.clone())
+        .ok_or_else(|| "WebHome 会话未绑定插件".to_string())?;
+    let manager = host.manager(&app).await.map_err(err)?;
+    let report = hghub_hpp::webhome_data::clear_webhome_data(Some(&window), || async {
+        manager
+            .clear_cookie_jar(&plugin_id)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await?;
+    Ok(json!({
+        "cleared": report.cleared,
+        "absent": report.absent,
+        "jar_cleared": report.jar_cleared,
+    }))
+}
+
+/// `WebviewWindow` 的本地包装：hpp 的 `WebHomeDataWindow` trait 与
+/// `WebviewWindow` 都不在本 crate 里，直接 impl 会撞孤儿规则（E0117），
+/// 所以包一层本地类型再实现。方法体调的都是 `WebviewWindow` 自带的
+/// inherent 方法（inherent 方法优先于 trait 方法，不会递归到自己）。
+struct WebHomeWindow(WebviewWindow);
+
+impl hghub_hpp::webhome_data::WebHomeDataWindow for WebHomeWindow {
+    fn eval_js(&self, js: String, callback: Box<dyn Fn(String) + Send>) -> Result<(), String> {
+        self.0
+            .eval_with_callback(js, callback)
+            .map_err(|e| e.to_string())
+    }
+
+    fn clear_browsing_data(&self) -> Result<(), String> {
+        self.0.clear_all_browsing_data().map_err(|e| e.to_string())
+    }
+
+    fn reload_page(&self) -> Result<(), String> {
+        self.0.eval("location.reload()").map_err(|e| e.to_string())
+    }
 }

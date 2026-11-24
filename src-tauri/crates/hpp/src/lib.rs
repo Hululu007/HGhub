@@ -19,6 +19,7 @@ mod runtime;
 mod store;
 pub mod web_login;
 pub mod webhome;
+pub mod webhome_data;
 pub mod wire;
 
 pub use error::{PluginError, Result};

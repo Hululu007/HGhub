@@ -326,6 +326,17 @@ impl Network {
         .map_err(|_| PluginError::internal("无法保存 Cookie"))?;
         atomic_write(&self.jar_path, &encoded)
     }
+
+    /// 清空请求 Cookie 罐（v0.0.83）：内存里的 ordinary + web_logins 全清，
+    /// 并把空罐子回写落盘（cookies.json），下次启动不再读回旧 Cookie。
+    /// 只动罐子本身：clearance 通行证（内存）、限速/冷却/缓存/日志面板不动。
+    pub(crate) fn clear_cookie_jar(&self) -> Result<usize> {
+        let mut jars = self.jar.lock().unwrap();
+        let count = jars.len();
+        *jars = CookieJars::default();
+        self.save_jar(&jars)?;
+        Ok(count)
+    }
     fn parse_cookie(u: &Url, v: Value) -> Result<SavedCookie> {
         let host = u
             .host_str()

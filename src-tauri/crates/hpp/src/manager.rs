@@ -989,6 +989,13 @@ impl PluginManager {
         Ok(())
     }
 
+    /// 清空某插件的请求 Cookie 罐（v0.0.83）：内存 + 落盘的 cookies.json
+    /// 一起清，返回清掉的条数。只动罐子本身。
+    pub async fn clear_cookie_jar(&self, id: &str) -> Result<usize> {
+        let network = self.network(id).await?;
+        network.clear_cookie_jar()
+    }
+
     /// 网络诊断探针（v0.0.80；v0.0.82：用对话框当前选中的模式跑）：
     /// 只读诊断，见 `Network::diagnose`。走首个已启用 WebHome 插件的
     /// Network（探针量的就是 WebHome 那条路；代理决议与 Node 边车全局

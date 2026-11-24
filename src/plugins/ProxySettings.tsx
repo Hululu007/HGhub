@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IChevR, IClose, ILink } from "../icons";
 import { pluginCommand, pluginError } from "./client";
+import { clearWebhomeData, type ClearWebhomeDataResult } from "./webhome";
 import { useHost } from "./HostContext";
 import { registerBackHandler } from "../back";
 import { APP_VERSION } from "../environment";
@@ -9,6 +10,7 @@ type Mode = "system" | "custom" | "off";
 type Config = { mode: Mode; url: string };
 type Probe = { ok: boolean; ms: number; status?: number; error?: string };
 const labels: Record<Mode, string> = { system: "跟随系统", custom: "自定义", off: "直连" };
+const clearKeyLabels: Record<string, string> = { wo_domain_cache: "本站域名缓存", wo_monitor_snapshot: "监控快照", wo_site_domains: "手动设置的域名" };
 
 export default function ProxySettings() {
   const [saved, setSaved] = useState<Config | null>(null), [open, setOpen] = useState(false);
@@ -26,6 +28,9 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
   // 不是已保存的设置；报告头带应用版本与改写状态、顶部带结论行，
   // 结果同时写入所用插件的运行日志，见 hpp net.diagnose）。
   const [report, setReport] = useState<string | null>(null);
+  // 清理 WebHome 全部数据（v0.0.83）：三个域名缓存键 + WebView 全部
+  // 浏览数据 + 绑定插件的 Rust 请求 Cookie 罐，再重载页面。
+  const [clearResult, setClearResult] = useState<ClearWebhomeDataResult | null>(null);
   const targets = sources.filter(p=>p.endpoint?.url);
   const [target, setTarget] = useState(targets[0]?.endpoint?.url || "");
   const close = () => { if(!pending.current)onClose(); };
@@ -39,6 +44,14 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
       else { const v=await pluginCommand<Config>("proxy.set",{mode,url:mode==="custom"?url:""});onSaved(v); }
     } catch(e){setError(pluginError(e));} finally {pending.current=false;setBusy("");}
   };
+  const clearCache = async () => {
+    if(pending.current)return;
+    if(!window.confirm("会把 WebHome 页面的数据全部清掉：监控快照、本站域名缓存、手动设置的域名（将恢复默认），以及 WebView 的全部浏览数据（页面缓存、Cookie、登录状态、IndexedDB 等），还有 App 这边给插件发的请求 Cookie。清理后页面会重新加载，页面里的登录要重登一次。不动的东西：App 的设置（代理模式、代理地址等）、导入的插件、下载好的视频。确定要全部清掉吗？"))return;
+    pending.current=true;setBusy("clear");setError("");setClearResult(null);
+    try { setClearResult(await clearWebhomeData()); }
+    catch(e){ const msg=pluginError(e); setError(msg==="WEBHOME_NOT_OPEN"?"请先打开一次 WebHome（任意站点），再回来清理。":msg); }
+    finally {pending.current=false;setBusy("");}
+  };
   const disabled = !ready || !!busy;
   return <dialog className="hg-proxy-dialog" ref={ref} aria-labelledby="proxy-title" onCancel={e=>{e.preventDefault();close();}} onClick={e=>{if(e.target===e.currentTarget)close();}}>
     <header><h2 id="proxy-title"><ILink size={20}/>代理访问</h2><button aria-label="关闭代理设置" disabled={!!busy} onClick={close}><IClose size={20}/></button></header>
@@ -49,8 +62,9 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
     <datalist id="proxy-test-targets">{targets.map(p=><option key={p.meta.id} value={p.endpoint!.url}>{p.meta.name}</option>)}</datalist>
     <p>测试仅检查所填地址的 HTTP 连通性，不修改已保存的代理。</p>
     {error&&<p role="alert" className="hg-proxy-error">{error}{!ready&&<button onClick={()=>void load()}>重新读取</button>}</p>}
-    <p role="status">{busy==="test"?"正在测试连接…":busy==="diagnose"?"正在诊断网络…（约半分钟）":probe?`${probe.ok?"连接正常":probe.error||"连接失败"} · ${probe.ms} ms`:"保存后，新请求立即使用所选模式。"}</p>
+    <p role="status">{busy==="clear"?"正在清理 WebHome 数据…":busy==="test"?"正在测试连接…":busy==="diagnose"?"正在诊断网络…（约半分钟）":probe?`${probe.ok?"连接正常":probe.error||"连接失败"} · ${probe.ms} ms`:"保存后，新请求立即使用所选模式。"}</p>
     {report&&<><p>按当前选中的代理模式诊断（不改已保存的设置），结果同时写入所用插件的运行日志。</p><pre className="hg-diagnose-report">{report}</pre></>}
-    <footer><button disabled={disabled||!target.trim()} onClick={()=>void run("test")}>测试连接</button><button disabled={disabled} onClick={()=>void run("diagnose")}>{busy==="diagnose"?"诊断中…":"网络诊断"}</button><button className="hg-watch-action" disabled={disabled} onClick={()=>void run("save")}>{busy==="save"?"保存中…":"保存代理"}</button></footer>
+    {clearResult&&<p role="status">已清理：{clearResult.cleared.length?clearResult.cleared.map(k=>clearKeyLabels[k]||k).join("、"):"无"}；本来就没有：{clearResult.absent.length?clearResult.absent.map(k=>clearKeyLabels[k]||k).join("、"):"无"}；请求 Cookie 清掉了 {clearResult.jar_cleared} 条；WebView 全部浏览数据已清除。页面已重新加载，登录态已掉，请重登后再打开 WebHome 点一次分类。</p>}
+    <footer><button disabled={disabled||!target.trim()} onClick={()=>void run("test")}>测试连接</button><button disabled={disabled} onClick={()=>void run("diagnose")}>{busy==="diagnose"?"诊断中…":"网络诊断"}</button><button disabled={disabled} onClick={()=>void clearCache()}>{busy==="clear"?"清理中…":"清理 WebHome 全部数据"}</button><button className="hg-watch-action" disabled={disabled} onClick={()=>void run("save")}>{busy==="save"?"保存中…":"保存代理"}</button></footer>
   </dialog>;
 }

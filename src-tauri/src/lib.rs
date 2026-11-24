@@ -125,6 +125,7 @@ pub fn run() {
             webhome::webhome_close,
             webhome::webhome_call,
             webhome::webhome_player_state,
+            webhome::clear_webhome_data,
             native_player::native_player_open,
             native_player::native_player_close,
             native_player::native_player_play,
