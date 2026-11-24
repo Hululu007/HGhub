@@ -24,4 +24,4 @@ pub mod wire;
 
 pub use error::{PluginError, Result};
 pub use manager::PluginManager;
-pub use network::{looks_like_challenge, ClearanceCookie};
+pub use network::{looks_like_challenge, ClearanceCookie, WebViewCookie};

@@ -2,7 +2,7 @@ use crate::{
     model::{self, Meta},
     native::Logs,
     network::Network,
-    network::ClearanceCookie,
+    network::{ClearanceCookie, WebViewCookie},
     node::{NodeBootstrap, UnavailableNode},
     python::{PyWorker, PythonBootstrap, RuntimeWorker, UnavailablePython},
     runtime::{self, Worker},
@@ -989,6 +989,23 @@ impl PluginManager {
     pub async fn set_clearance(&self, id: &str, cookie: ClearanceCookie) -> Result<()> {
         self.network(id).await?.set_clearance(cookie);
         Ok(())
+    }
+
+    /// WebView→引擎 Cookie 桥（v0.0.86）：把 WebHome 窗口里读到的
+    /// 目标 URL 的 Cookie 合并进该插件的普通 Cookie 罐，并把桥了几
+    /// 个、名字是什么写进 ext.log（requestId `"net"`，只报名字、
+    /// 不报值）。窗口不存在时调用方根本不调这里；插件已停用时报
+    /// `UNSUPPORTED`（与 `set_clearance` 同一条路），调用方静默回落。
+    pub async fn bridge_webview_cookies(
+        &self,
+        id: &str,
+        cookies: Vec<WebViewCookie>,
+    ) -> Result<usize> {
+        let network = self.network(id).await?;
+        let names = network.merge_webview_cookies(cookies);
+        let count = names.len();
+        network.log_cookie_bridge(&names);
+        Ok(count)
     }
 
     /// 清空某插件的请求 Cookie 罐（v0.0.83）：内存 + 落盘的 cookies.json

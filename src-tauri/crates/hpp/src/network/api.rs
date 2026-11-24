@@ -591,6 +591,27 @@ impl Network {
         );
     }
 
+    /// Cookie 桥接写进 ext.log（v0.0.86）：每次 WebHome 引擎请求前
+    /// 桥了几个 Cookie、名字是什么（只报名字，不报值）。0 个也记
+    /// 一行——桥跑了、窗口里没有该 URL 的 Cookie，与桥没跑是两回
+    /// 事，真机验收靠这行区分。没绑日志面板时（测试用的 Network）
+    /// 不记。
+    pub(crate) fn log_cookie_bridge(&self, names: &[String]) {
+        let Some(logs) = self.logs.lock().unwrap().clone() else {
+            return;
+        };
+        logs.lock().unwrap().push(
+            "info",
+            &format!(
+                "net.request Cookie 桥接：{} 个（名字：{}）",
+                names.len(),
+                names.join(", ")
+            ),
+            "net",
+            None,
+        );
+    }
+
     /// 失效镜像重定向写进 ext.log（v0.0.81）：from → to；每次改写记
     /// 一行（requestId `"net"`）。没绑日志面板时（测试用的 Network）
     /// 不记。

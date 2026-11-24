@@ -14,6 +14,7 @@ use hghub_hpp::{
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use url::Url;
 
 const LABEL: &str = "webhome";
 const SDK: &str = include_str!("webhome_sdk.js");
@@ -245,6 +246,87 @@ pub async fn webhome_call(
     }
 }
 
+/// WebView→引擎 Cookie 桥（v0.0.86）：发起 WebHome 引擎请求前，把
+/// WebHome 窗口里目标 URL 的 Cookie 读出来合并进该插件的 Rust 罐。
+/// 只做 WebView→引擎一个方向：引擎自己的 Set-Cookie 照常进罐，不
+/// 回写 WebView。窗口不存在、URL 非法、读不到 Cookie 时返回 0、
+/// 不失败请求——桥只是给引擎补它没见过的会话 Cookie，罐子本身仍
+/// 是权威；`__cf_bm` 与过期 Cookie 不进罐（hpp 的 `merge_` 侧按
+/// 与 `set_clearance` / `receive_cookies` 同一条规矩过滤）。
+/// `cookies_for_url` 是阻塞调用（等主线程回消息），放 spawn_blocking 里。
+async fn bridge_webview_cookies(
+    app: &AppHandle,
+    manager: &Arc<PluginManager>,
+    plugin_id: &str,
+    url: &str,
+) -> usize {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return 0;
+    };
+    let Ok(target) = url.parse::<Url>() else {
+        return 0;
+    };
+    let w = window.clone();
+    let u = target.clone();
+    let cookies = tokio::task::spawn_blocking(move || w.cookies_for_url(u))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    // 空列表也往下传：hpp 侧照样写一行 `Cookie 桥接：0 个`——桥跑了、
+    // 窗口里没有该 URL 的 Cookie，与桥没跑是两回事，真机验收靠这行区分。
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let host = target.host_str().unwrap_or("").to_string();
+    let bridged: Vec<hghub_hpp::WebViewCookie> = cookies
+        .into_iter()
+        .map(|c| {
+            let expires_at = c
+                .max_age()
+                .map(|age| now.saturating_add(age.whole_milliseconds() as u64))
+                .or_else(|| {
+                    c.expires_datetime()
+                        .map(|t| (t.unix_timestamp().max(0) as u64) * 1000)
+                });
+            hghub_hpp::WebViewCookie {
+                name: c.name().to_string(),
+                value: c.value().to_string(),
+                domain: c
+                    .domain()
+                    .map(|d| d.trim_start_matches('.').to_ascii_lowercase())
+                    .unwrap_or_else(|| host.clone()),
+                path: c.path().unwrap_or("/").to_string(),
+                host_only: c.domain().is_none(),
+                secure: c.secure().unwrap_or(false),
+                http_only: c.http_only().unwrap_or(false),
+                expires_at,
+            }
+        })
+        .collect();
+    manager
+        .bridge_webview_cookies(plugin_id, bridged)
+        .await
+        .unwrap_or(0)
+}
+
+/// 只对 net.request（`req` 别名同）做桥：其他方法不发任意 URL 请求。
+async fn maybe_bridge_webview_cookies(
+    app: &AppHandle,
+    manager: &Arc<PluginManager>,
+    plugin_id: &str,
+    method: &str,
+    payload: &Value,
+) {
+    if !matches!(method, "req" | "net.request") {
+        return;
+    }
+    if let Some(url) = payload["url"].as_str() {
+        bridge_webview_cookies(app, manager, plugin_id, url).await;
+    }
+}
+
 /// 分发一次 WebHome 调用；命中 Cloudflare 拦截时走一趟 WebView
 /// clearance 再重发一次（最多一趟，不循环）。触发条件只有两个——
 /// 拿到拦截页，或 TLS 握手被断开——这两种失败都说明请求根本没执行
@@ -259,6 +341,7 @@ async fn dispatch_with_clearance(
     payload: Value,
     player_state: Value,
 ) -> Result<Outcome, String> {
+    maybe_bridge_webview_cookies(app, manager, plugin_id, method, &payload).await;
     let first = webhome::dispatch(
         manager,
         plugin_id,
@@ -296,10 +379,14 @@ async fn dispatch_with_clearance(
     let _guard = state.clearance_lock.lock().await;
     match clearance::obtain(app, manager, plugin_id, url).await {
         // 通行证拿到了、页面还在：重发一次，结果原样返回（再被拦也
-        // 不再触发 clearance——一趟只做一次）。
-        Clearance::Ready => webhome::dispatch(manager, plugin_id, method, payload, player_state)
-            .await
-            .map_err(err),
+        // 不再触发 clearance——一趟只做一次）。重发前再桥一次：
+        // clearance 导航可能在 WebView 里落了新的站点 Cookie。
+        Clearance::Ready => {
+            maybe_bridge_webview_cookies(app, manager, plugin_id, method, &payload).await;
+            webhome::dispatch(manager, plugin_id, method, payload, player_state)
+                .await
+                .map_err(err)
+        }
         // 没拿到，或页面已被挑战页顶离（已导航回首页）：原结果原样
         // 返回，不掩盖原始报错；用户再点一次即带通行证。
         _ => first.map_err(err),

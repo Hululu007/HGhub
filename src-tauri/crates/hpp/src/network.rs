@@ -72,6 +72,24 @@ pub struct ClearanceCookie {
     pub expires_at: Option<u64>,
 }
 
+/// WebView 里读到的 Cookie（v0.0.86 Cookie 桥）：WebHome 窗口的
+/// Cookie 存储里目标 URL 的 Cookie，发起引擎请求前合并进本插件的
+/// 普通 Cookie 罐——与引擎收到的 Set-Cookie 同等待遇（落盘、按
+/// 域名/路径/Secure/过期匹配）。只做 WebView→引擎一个方向，不回
+/// 写 WebView。`domain` 是调用方按目标 URL 算好的（无 domain 时
+/// 填目标 host、此时 `host_only` 为真）。
+#[derive(Clone, Debug)]
+pub struct WebViewCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub host_only: bool,
+    pub secure: bool,
+    pub http_only: bool,
+    pub expires_at: Option<u64>,
+}
+
 /// 响应体是不是 Cloudflare 拦截页：页面 `_getInner` 用的同一组标记
 /// （`just a moment` / `cf-browser` / `access denied`），另加拦截页
 /// 常见的 `attention required` 与挑战表单标记 `cf_chl`。只做子串匹配，
@@ -261,6 +279,50 @@ impl Network {
             expires_at: cookie.expires_at,
         };
         Self::upsert(&mut self.clearance.lock().unwrap(), c);
+    }
+    /// 把 WebView 里的 Cookie 合并进本插件的普通 Cookie 罐（v0.0.86）：
+    /// `__cf_bm` 不收（挑战页的机器人管理 Cookie 只在当次挑战有效，
+    /// 见 `BOT_MANAGEMENT_COOKIE`）；空名/空值/空域名/已过期不收；
+    /// 同名同域同路径覆盖旧值。落盘（cookies.json），与引擎收到的
+    /// Set-Cookie 同等待遇。返回实际收进的 Cookie 名字（只报名字，
+    /// 不报值）。落盘失败时不报错：内存里的罐子已更新、当次请求照
+    /// 常用，落盘只是跨启动的缓存——桥绝不能因此失败请求。
+    pub fn merge_webview_cookies(&self, cookies: Vec<WebViewCookie>) -> Vec<String> {
+        let mut guard = self.jar.lock().unwrap();
+        let mut next = guard.clone();
+        let mut merged = Vec::new();
+        for c in cookies {
+            if c.name.is_empty() || c.value.is_empty() || c.domain.is_empty() {
+                continue;
+            }
+            if c.name.eq_ignore_ascii_case(BOT_MANAGEMENT_COOKIE) {
+                continue;
+            }
+            if c.expires_at.is_some_and(|t| t <= now()) {
+                continue;
+            }
+            let name = c.name.clone();
+            let saved = SavedCookie {
+                name,
+                value: c.value,
+                domain: c.domain,
+                path: if c.path.is_empty() {
+                    "/".into()
+                } else {
+                    c.path
+                },
+                host_only: c.host_only,
+                secure: c.secure,
+                http_only: c.http_only,
+                expires_at: c.expires_at,
+            };
+            Self::upsert(&mut next.ordinary, saved);
+            merged.push(c.name);
+        }
+        // 落盘失败不报错（见上）；内存已更新。
+        let _ = self.save_jar(&next);
+        *guard = next;
+        merged
     }
     /// 匹配目标 URL 的通行证（`name=value` 串，已按路径长度排过序）：
     /// 请求头里已有同名 Cookie 的不重复带；`__cf_bm` 永不从这里出去。
@@ -1012,6 +1074,8 @@ pub fn headers(v: &Value) -> Result<HeaderMap> {
     Ok(out)
 }
 
+#[cfg(test)]
+mod bridge_tests;
 #[cfg(test)]
 mod clear_tests;
 #[cfg(test)]
