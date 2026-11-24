@@ -416,10 +416,17 @@ pub(crate) async fn read_webview_cookies_async(
     let target_host = url.domain().map(str::to_string);
     let target_scheme = url.scheme().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel::<Vec<RawWebViewCookie>>();
+    // getAllCookies 的 completion block 要求 `Fn`（RcBlock::new 的
+    // IntoBlock 约束），而 oneshot::Sender::send 会消费 tx、只剩
+    // FnOnce——v0.0.91 首版构建就栽在这（E0525）。用 Mutex<Option<_>>
+    // 包一层，block 里只借 Mutex、第一次调用时 take 出来发掉。
+    let tx = std::sync::Mutex::new(Some(tx));
     let posted = window
         .run_on_main_thread(move || {
             let Some(mtm) = MainThreadMarker::new() else {
-                let _ = tx.send(Vec::new());
+                if let Some(tx) = tx.lock().ok().and_then(|mut g| g.take()) {
+                    let _ = tx.send(Vec::new());
+                }
                 return;
             };
             // SAFETY：闭包跑在主线程上（run_on_main_thread 保证），
@@ -434,7 +441,9 @@ pub(crate) async fn read_webview_cookies_async(
                         .into_iter()
                         .filter_map(|c| raw_cookie(&c, &target_host, &target_scheme))
                         .collect::<Vec<_>>();
-                    let _ = tx.send(list);
+                    if let Some(tx) = tx.lock().ok().and_then(|mut g| g.take()) {
+                        let _ = tx.send(list);
+                    }
                 },
             );
             unsafe { cookie_store.getAllCookies(&block) };
