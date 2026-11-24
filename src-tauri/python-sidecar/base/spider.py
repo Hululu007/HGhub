@@ -182,6 +182,13 @@ class Spider:
                     _RUNTIME_CACHE.pop(namespace, None)
         return "succeed"
 
+    def clearCache(self):
+        """清空本爬虫命名空间的全部运行时缓存（v0.0.84 全清用）。
+        只删 _RUNTIME_CACHE 里本命名空间的条目，不动其他爬虫的缓存。"""
+        with _RUNTIME_CACHE_LOCK:
+            _RUNTIME_CACHE.pop(_cache_namespace(self), None)
+        return "succeed"
+
     # ============ 工具方法 ============
 
     def regStr(self, reg, src, group=1):

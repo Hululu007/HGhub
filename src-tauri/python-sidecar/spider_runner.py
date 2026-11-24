@@ -342,6 +342,7 @@ class SpiderRunner:
                     "setCache",
                     "getCache",
                     "delCache",
+                    "clearCache",
                 ):
                     if not callable(getattr(spider_instance, cache_method, None)):
                         setattr(

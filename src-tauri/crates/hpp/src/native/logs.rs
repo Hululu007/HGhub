@@ -76,6 +76,16 @@ impl LogBuffer {
         }
     }
 
+    /// 清空日志缓冲（v0.0.84 全清用，最后一步）：丢掉全部已缓存的日志
+    /// 行并把速率限制的已丢弃计数归零，返回丢掉的行数。只动内存缓冲：
+    /// 日志是内存态的，不落盘（见 native/logs.rs 的 LogBuffer）。
+    pub fn clear(&mut self) -> usize {
+        let count = self.entries.len();
+        self.entries.clear();
+        self.dropped = 0;
+        count
+    }
+
     pub fn snapshot(&self) -> Vec<Value> {
         let mut result: Vec<_> = self
             .entries
@@ -134,5 +144,18 @@ mod tests {
         assert!(snapshot.iter().any(|entry| entry["details"]
             .as_str()
             .is_some_and(|v| v.contains("reason"))));
+    }
+
+    #[test]
+    fn clear_drops_all_entries_and_resets_dropped() {
+        // v0.0.84：clear 丢掉全部已缓存行并把速率限制的已丢弃计数归零。
+        let mut logs = LogBuffer::default();
+        logs.push_at(100000, "info", "one", "r1", None);
+        logs.push_at(100000, "info", "two", "r2", None);
+        logs.dropped = 7;
+        assert_eq!(logs.clear(), 2);
+        assert!(logs.snapshot().is_empty());
+        assert_eq!(logs.dropped, 0);
+        assert_eq!(logs.clear(), 0);
     }
 }

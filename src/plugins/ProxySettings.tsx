@@ -28,8 +28,11 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
   // 不是已保存的设置；报告头带应用版本与改写状态、顶部带结论行，
   // 结果同时写入所用插件的运行日志，见 hpp net.diagnose）。
   const [report, setReport] = useState<string | null>(null);
-  // 清理 WebHome 全部数据（v0.0.83）：三个域名缓存键 + WebView 全部
-  // 浏览数据 + 绑定插件的 Rust 请求 Cookie 罐，再重载页面。
+  // 全 App 缓存清理（v0.0.84；v0.0.83 是“清理 WebHome 全部数据”）：
+  // 三个域名缓存键 + WebView 全部浏览数据 + 全部插件的 Rust 请求
+  // Cookie 罐与响应缓存 + webhome: 前缀的存储键 + 媒体预加载缓存 +
+  // __pycache__ 与 *.pyc + Python 边车运行时缓存（边车在运行时才清）
+  // + 插件导入暂存文件，再重载页面；最后清日志（ext.log + debug.log）。
   const [clearResult, setClearResult] = useState<ClearWebhomeDataResult | null>(null);
   const targets = sources.filter(p=>p.endpoint?.url);
   const [target, setTarget] = useState(targets[0]?.endpoint?.url || "");
@@ -46,7 +49,7 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
   };
   const clearCache = async () => {
     if(pending.current)return;
-    if(!window.confirm("会把 WebHome 页面的数据全部清掉：监控快照、本站域名缓存、手动设置的域名（将恢复默认），以及 WebView 的全部浏览数据（页面缓存、Cookie、登录状态、IndexedDB 等），还有 App 这边给插件发的请求 Cookie。清理后页面会重新加载，页面里的登录要重登一次。不动的东西：App 的设置（代理模式、代理地址等）、导入的插件、下载好的视频。确定要全部清掉吗？"))return;
+    if(!window.confirm("会把全 App 的运行时缓存全部清掉：WebHome 页面的三个域名缓存（监控快照、本站域名缓存、手动设置的域名，将恢复默认）、WebView 的全部浏览数据（页面缓存、Cookie、登录状态、IndexedDB 等）、全部插件的请求 Cookie 与网络响应缓存、WebHome 在插件存储里的缓存键、媒体预加载缓存、插件目录下的 Python 字节码缓存（__pycache__ 与 .pyc，只删字节码）、Python 边车里已加载蜘蛛的运行时缓存（边车在运行时才清）、插件导入暂存文件；最后清日志（全部插件的运行日志与 App 自己的调试日志，日志从空开始，下次出问题时新日志更干净、更好定位）。清理后页面会重新加载，页面里的登录要重登一次。不动的东西：App 的设置（代理模式、代理地址等）、导入的插件与插件源文件（.py、.js、HTML 源）、插件存储里自己的数据、下载好的视频。确定要全部清掉吗？"))return;
     pending.current=true;setBusy("clear");setError("");setClearResult(null);
     try { setClearResult(await clearWebhomeData()); }
     catch(e){ const msg=pluginError(e); setError(msg==="WEBHOME_NOT_OPEN"?"请先打开一次 WebHome（任意站点），再回来清理。":msg); }
@@ -62,9 +65,9 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
     <datalist id="proxy-test-targets">{targets.map(p=><option key={p.meta.id} value={p.endpoint!.url}>{p.meta.name}</option>)}</datalist>
     <p>测试仅检查所填地址的 HTTP 连通性，不修改已保存的代理。</p>
     {error&&<p role="alert" className="hg-proxy-error">{error}{!ready&&<button onClick={()=>void load()}>重新读取</button>}</p>}
-    <p role="status">{busy==="clear"?"正在清理 WebHome 数据…":busy==="test"?"正在测试连接…":busy==="diagnose"?"正在诊断网络…（约半分钟）":probe?`${probe.ok?"连接正常":probe.error||"连接失败"} · ${probe.ms} ms`:"保存后，新请求立即使用所选模式。"}</p>
+    <p role="status">{busy==="clear"?"正在清理全部缓存…":busy==="test"?"正在测试连接…":busy==="diagnose"?"正在诊断网络…（约半分钟）":probe?`${probe.ok?"连接正常":probe.error||"连接失败"} · ${probe.ms} ms`:"保存后，新请求立即使用所选模式。"}</p>
     {report&&<><p>按当前选中的代理模式诊断（不改已保存的设置），结果同时写入所用插件的运行日志。</p><pre className="hg-diagnose-report">{report}</pre></>}
-    {clearResult&&<p role="status">已清理：{clearResult.cleared.length?clearResult.cleared.map(k=>clearKeyLabels[k]||k).join("、"):"无"}；本来就没有：{clearResult.absent.length?clearResult.absent.map(k=>clearKeyLabels[k]||k).join("、"):"无"}；请求 Cookie 清掉了 {clearResult.jar_cleared} 条；WebView 全部浏览数据已清除。页面已重新加载，登录态已掉，请重登后再打开 WebHome 点一次分类。</p>}
-    <footer><button disabled={disabled||!target.trim()} onClick={()=>void run("test")}>测试连接</button><button disabled={disabled} onClick={()=>void run("diagnose")}>{busy==="diagnose"?"诊断中…":"网络诊断"}</button><button disabled={disabled} onClick={()=>void clearCache()}>{busy==="clear"?"清理中…":"清理 WebHome 全部数据"}</button><button className="hg-watch-action" disabled={disabled} onClick={()=>void run("save")}>{busy==="save"?"保存中…":"保存代理"}</button></footer>
+    {clearResult&&<p role="status">已清理：域名缓存{clearResult.cleared.length?clearResult.cleared.map(k=>clearKeyLabels[k]||k).join("、"):"无"}；本来就没有：{clearResult.absent.length?clearResult.absent.map(k=>clearKeyLabels[k]||k).join("、"):"无"}；{clearResult.plugins} 个插件的请求 Cookie 清掉了 {clearResult.jar_cleared} 条、响应缓存丢了 {clearResult.response_cache_dropped} 条、WebHome 缓存键删了 {clearResult.webhome_keys_deleted} 个；媒体预加载缓存丢了 {clearResult.media_entries_dropped} 条；Python 字节码缓存删了 {clearResult.pycache_dirs} 个目录、{clearResult.pycache_files} 个零散 .pyc 文件；Python 边车{clearResult.py_running?`已加载的 ${clearResult.py_spiders_total} 个蜘蛛里清掉了 ${clearResult.py_spiders_cleared} 个的运行时缓存`:"没在运行，运行时缓存本就是空的"}；导入暂存清掉了 {clearResult.staging_files} 个文件；WebView 全部浏览数据已清除。日志已清空（插件运行日志 {clearResult.log_entries_dropped} 行{clearResult.debug_log_cleared?"、App 调试日志文件也已清空":""}），清完后日志从空开始，下次出问题时新日志更干净、更好定位。{clearResult.warnings.length?`注意：${clearResult.warnings.join("；")}。`:""}页面已重新加载，登录态已掉，请重登后再打开 WebHome 点一次分类。</p>}
+    <footer><button disabled={disabled||!target.trim()} onClick={()=>void run("test")}>测试连接</button><button disabled={disabled} onClick={()=>void run("diagnose")}>{busy==="diagnose"?"诊断中…":"网络诊断"}</button><button disabled={disabled} onClick={()=>void clearCache()}>{busy==="clear"?"清理中…":"清理全部缓存"}</button><button className="hg-watch-action" disabled={disabled} onClick={()=>void run("save")}>{busy==="save"?"保存中…":"保存代理"}</button></footer>
   </dialog>;
 }

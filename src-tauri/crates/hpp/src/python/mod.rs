@@ -15,6 +15,6 @@ pub mod convert;
 pub mod scan;
 pub mod worker;
 
-pub use client::{LoadInfo, SidecarClient, SidecarInfo};
+pub use client::{LoadInfo, PythonCacheReport, SidecarClient, SidecarInfo};
 pub use scan::{is_python, looks_like_python, scan_source, SpiderFace};
 pub use worker::{PyWorker, PythonBootstrap, RuntimeWorker, UnavailablePython};

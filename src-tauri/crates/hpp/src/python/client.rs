@@ -201,4 +201,86 @@ impl SidecarClient {
             .post_json("/unload", json!({"key": key}), timeout)
             .await;
     }
+
+    /// 列出已加载的蜘蛛 key（GET /list）。
+    pub async fn list(&self, timeout: Duration) -> Result<Vec<String>> {
+        let url = format!("{}/list", self.base);
+        let rsp = self
+            .client
+            .get(&url)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    PluginError::timeout()
+                } else {
+                    PluginError::new("INTERNAL", format!("Python 边车连接失败：{e}"))
+                }
+            })?;
+        if !rsp.status().is_success() {
+            return Err(PluginError::new(
+                "INTERNAL",
+                format!("Python 边车 /list 失败：HTTP {}", rsp.status()),
+            ));
+        }
+        let v: Value = rsp.json().await.map_err(|e| {
+            PluginError::new("INTERNAL", format!("Python 边车 /list 返回无效：{e}"))
+        })?;
+        Ok(v.get("spiders")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// 清空全部已加载蜘蛛的运行时缓存（v0.0.84 全清用）：对每个蜘蛛调
+    /// `clearCache`（`base/spider.py` 的 `BaseSpider.clearCache`，只清
+    /// 本蜘蛛命名空间的 `_RUNTIME_CACHE`）。函数式蜘蛛没有运行时缓存，
+    /// 调不到方法时跳过、不计入也不警告；其他失败记入 warnings 继续清
+    /// 下一个。调用方须先确认边车在运行（见 App 侧 `running_client`）。
+    pub async fn clear_all_spider_caches(&self) -> PythonCacheReport {
+        let timeout = Duration::from_secs(10);
+        let keys = match self.list(timeout).await {
+            Ok(keys) => keys,
+            Err(e) => {
+                return PythonCacheReport {
+                    spiders_total: 0,
+                    spiders_cleared: 0,
+                    warnings: vec![format!("无法列出已加载的 Python 蜘蛛：{e}")],
+                };
+            }
+        };
+        let mut report = PythonCacheReport {
+            spiders_total: keys.len(),
+            spiders_cleared: 0,
+            warnings: Vec::new(),
+        };
+        for key in keys {
+            match self.call(&key, "clearCache", vec![], timeout).await {
+                Ok(_) => report.spiders_cleared += 1,
+                Err(e) if e.to_string().contains("not found") => {
+                    // 函数式蜘蛛：模块里没有 clearCache 方法，也就没有
+                    // _RUNTIME_CACHE 命名空间，无缓存可清。
+                }
+                Err(e) => report
+                    .warnings
+                    .push(format!("Python 蜘蛛 {key} 的运行时缓存清理失败：{e}")),
+            }
+        }
+        report
+    }
+}
+
+/// `SidecarClient::clear_all_spider_caches` 的结果：已加载蜘蛛总数、清掉
+/// 运行时缓存的蜘蛛数、按蜘蛛记的失败警告。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct PythonCacheReport {
+    pub spiders_total: usize,
+    pub spiders_cleared: usize,
+    pub warnings: Vec<String>,
 }

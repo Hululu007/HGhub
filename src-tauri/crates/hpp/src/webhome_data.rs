@@ -1,14 +1,24 @@
-//! WebHome 全部浏览数据清理（v0.0.83）：设置页一键清掉 WebHome 页面
-//! 存的全部数据，再重载页面，让页面下次按默认或重新同步的域名列表跑。
+//! 全 App 缓存清理（v0.0.84；v0.0.83 是“清理 WebHome 全部数据”）：
+//! 设置页一键清掉全部运行时缓存，再重载 WebHome 页面。
 //!
-//! 四步（按顺序）：
+//! 顺序：
 //! 1. 在 webhome 窗口里跑 JS，删三个 localStorage 键（监控快照、
 //!    域名缓存、手动覆盖），取回每键清理前是否存在；
 //! 2. `WebviewWindow::clear_all_browsing_data` 清 WebView 全部浏览数据
 //!    （页面缓存、全部 localStorage/sessionStorage、Cookie、IndexedDB、
 //!    Service Worker 缓存等）；
-//! 3. 清绑定插件的 Rust 请求 Cookie 罐（内存 + 落盘的 cookies.json）；
-//! 4. `location.reload()` 重载 webhome 窗口。
+//! 3. 中间步骤（调用方传进来的 `clear_middle`）：全部插件的 Rust 请求
+//!    Cookie 罐（内存 + 落盘的 cookies.json）、Network 响应缓存、
+//!    `webhome:` 前缀的存储键；全部会话的媒体预加载缓存；插件目录下
+//!    的 `__pycache__` 与 `*.pyc`；Python 边车已加载蜘蛛的运行时缓存
+//!    （边车在运行时才清）；插件导入暂存目录里的文件。各类别尽力清理，
+//!    某一类失败记入 `warnings` 并继续清下一类，不中断重载；
+//! 4. `location.reload()` 重载 webhome 窗口；
+//! 5. 最后清日志（调用方传进来的 `clear_logs`）：全部插件的运行日志
+//!    ext.log 内存缓冲全清；App 侧的 debug.log 由调用方在返回后截断。
+//!    日志放最后：本次清理动作自身的日志行也会随之消失，是预期的；
+//!    清完后日志从空开始，下次出问题时新日志更干净、更好定位。
+//!    清理失败（第 1/2/4 步）时日志不清，留着查错。
 //!
 //! 注意：
 //! - 第 2 步是 fire-and-forget：wry 的 `clear_all_browsing_data` 调
@@ -21,8 +31,11 @@
 //!   `data_store_identifier` 的窗口共享默认存储），主窗口的本地偏好
 //!   也可能一并恢复默认。
 //! - 不碰：App 设置（代理模式、自定义代理地址等）、导入的插件及插件
-//!   文件、下载好的视频。页面里的登录态会掉（Cookie 清了），用完要重登。
+//!   文件、插件存储里非 `webhome:` 的键、下载好的视频、插件源文件
+//!   （*.py、*.js、manifest）、HTML 源文件（localPage 的 *.html）。
+//!   页面里的登录态会掉（Cookie 清了），用完要重登。
 //! - 窗口不存在时不建窗口，返回 `WEBHOME_NOT_OPEN`。
+//! - Node DoH 缓存（host.js 的 `dohCache`）60 秒自过期，不专门清。
 
 use serde::Serialize;
 use serde_json::Value;
@@ -46,14 +59,48 @@ pub const WEBHOME_NOT_OPEN: &str = "WEBHOME_NOT_OPEN";
 /// 随脚本一起丢掉）时回调永远不来，不能无限等。
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// 中间步骤（第 3 步）的清理结果：各类别尽力清理，某一类失败时记入
+/// `warnings` 并继续清下一类，不中断重载。`py_running` 为 false 时
+/// Python 边车没在运行——`_RUNTIME_CACHE` 是边车进程里的内存缓存，
+/// 边车没跑就没有已加载的蜘蛛、也就没有可清的缓存，边车下次启动时
+/// 本就是空的；`staging_files` 是插件导入暂存目录里清掉的文件数。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct MiddleClearReport {
+    pub plugins: usize,
+    pub jar_cleared: usize,
+    pub response_cache_dropped: usize,
+    pub webhome_keys_deleted: usize,
+    pub media_entries_dropped: usize,
+    pub pycache_dirs: usize,
+    pub pycache_files: usize,
+    pub py_running: bool,
+    pub py_spiders_total: usize,
+    pub py_spiders_cleared: usize,
+    pub staging_files: usize,
+    pub warnings: Vec<String>,
+}
+
 /// 清理结果：`cleared` 是三个键里清理前存在、已删掉的；
-/// `absent` 是本来就没有的；`jar_cleared` 是 Rust 请求 Cookie 罐
-/// 里清掉的条数。
+/// `absent` 是本来就没有的；`jar_cleared` 是全部插件的 Rust 请求
+/// Cookie 罐里清掉的总条数；其余字段见 `MiddleClearReport`；
+/// `log_entries_dropped` 是最后一步清掉的插件运行日志行数。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebHomeClearReport {
     pub cleared: Vec<String>,
     pub absent: Vec<String>,
     pub jar_cleared: usize,
+    pub plugins: usize,
+    pub response_cache_dropped: usize,
+    pub webhome_keys_deleted: usize,
+    pub media_entries_dropped: usize,
+    pub pycache_dirs: usize,
+    pub pycache_files: usize,
+    pub py_running: bool,
+    pub py_spiders_total: usize,
+    pub py_spiders_cleared: usize,
+    pub staging_files: usize,
+    pub log_entries_dropped: usize,
+    pub warnings: Vec<String>,
 }
 
 /// WebHome 窗口的最小操作面：跑一段 JS 并把序列化结果交回回调、
@@ -77,31 +124,40 @@ pub fn clear_js() -> String {
     )
 }
 
-/// 清掉 WebHome 窗口的全部数据并重载页面。`clear_jar` 是调用方传进来的
-/// Rust 请求 Cookie 罐清理（app 侧是绑定插件的
-/// `PluginManager::clear_cookie_jar`）。窗口不存在时返回
-/// `WEBHOME_NOT_OPEN`，不建窗口、`clear_jar` 也不跑。
-pub async fn clear_webhome_data<W, F, Fut>(
+/// 清掉全部缓存并重载 WebHome 页面。`clear_middle` 是调用方传进来的
+/// 中间步骤清理（全部插件的运行时缓存 + Python 边车运行时缓存 +
+/// 导入暂存），永不失败、按类别把失败记入报告的 `warnings`；
+/// `clear_logs` 是最后一步的日志清理（全部插件的 ext.log 内存缓冲），
+/// 返回清掉的总行数。窗口不存在时返回 `WEBHOME_NOT_OPEN`，不建窗口、
+/// `clear_middle` 与 `clear_logs` 都不跑。窗口步骤（删键、清浏览数据、
+/// 重载）失败时按 v0.0.83 Fail-fast：不继续往下走、不重载、日志不清。
+pub async fn clear_webhome_data<W, F, Fut, G, Fut2>(
     window: Option<&W>,
-    clear_jar: F,
+    clear_middle: F,
+    clear_logs: G,
 ) -> Result<WebHomeClearReport, String>
 where
     W: WebHomeDataWindow,
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<usize, String>> + Send,
+    Fut: Future<Output = MiddleClearReport> + Send,
+    G: FnOnce() -> Fut2,
+    Fut2: Future<Output = usize> + Send,
 {
-    clear_webhome_data_with_timeout(window, clear_jar, CALLBACK_TIMEOUT).await
+    clear_webhome_data_with_timeout(window, clear_middle, clear_logs, CALLBACK_TIMEOUT).await
 }
 
-pub async fn clear_webhome_data_with_timeout<W, F, Fut>(
+pub async fn clear_webhome_data_with_timeout<W, F, Fut, G, Fut2>(
     window: Option<&W>,
-    clear_jar: F,
+    clear_middle: F,
+    clear_logs: G,
     timeout: Duration,
 ) -> Result<WebHomeClearReport, String>
 where
     W: WebHomeDataWindow,
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<usize, String>> + Send,
+    Fut: Future<Output = MiddleClearReport> + Send,
+    G: FnOnce() -> Fut2,
+    Fut2: Future<Output = usize> + Send,
 {
     let Some(window) = window else {
         return Err(WEBHOME_NOT_OPEN.to_string());
@@ -134,16 +190,31 @@ where
     window
         .clear_browsing_data()
         .map_err(|e| format!("清除浏览数据失败：{e}"))?;
-    // 3. 清 Rust 请求 Cookie 罐。
-    let jar_cleared = clear_jar().await?;
+    // 3. 中间步骤：全部插件的运行时缓存 + Python 边车 + 导入暂存
+    //    （按类别尽力清理，失败记入 warnings，不中断重载）。
+    let middle = clear_middle().await;
     // 4. 重载页面（三个键已由 JS 确认删掉，内存里的旧域名列表随重载丢掉）。
     window
         .reload_page()
         .map_err(|e| format!("重新加载页面失败：{e}"))?;
+    // 5. 最后清日志：本次清理动作自身的日志行也会随之消失，是预期的。
+    let log_entries_dropped = clear_logs().await;
     Ok(WebHomeClearReport {
         cleared,
         absent,
-        jar_cleared,
+        jar_cleared: middle.jar_cleared,
+        plugins: middle.plugins,
+        response_cache_dropped: middle.response_cache_dropped,
+        webhome_keys_deleted: middle.webhome_keys_deleted,
+        media_entries_dropped: middle.media_entries_dropped,
+        pycache_dirs: middle.pycache_dirs,
+        pycache_files: middle.pycache_files,
+        py_running: middle.py_running,
+        py_spiders_total: middle.py_spiders_total,
+        py_spiders_cleared: middle.py_spiders_cleared,
+        staging_files: middle.staging_files,
+        log_entries_dropped,
+        warnings: middle.warnings,
     })
 }
 
@@ -256,13 +327,27 @@ mod tests {
             .to_string()
     }
 
-    fn jar_ok(
+    fn middle_ok(
         order: Arc<StdMutex<Vec<&'static str>>>,
-        count: usize,
-    ) -> impl FnOnce() -> std::future::Ready<Result<usize, String>> {
+        jar_cleared: usize,
+    ) -> impl FnOnce() -> std::future::Ready<MiddleClearReport> {
         move || {
-            order.lock().unwrap().push("jar");
-            std::future::ready(Ok(count))
+            order.lock().unwrap().push("middle");
+            std::future::ready(MiddleClearReport {
+                plugins: 1,
+                jar_cleared,
+                ..Default::default()
+            })
+        }
+    }
+
+    fn logs_ok(
+        order: Arc<StdMutex<Vec<&'static str>>>,
+        dropped: usize,
+    ) -> impl FnOnce() -> std::future::Ready<usize> {
+        move || {
+            order.lock().unwrap().push("logs");
+            std::future::ready(dropped)
         }
     }
 
@@ -316,41 +401,116 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_window_returns_webhome_not_open_and_jar_never_runs() {
-        let called = Arc::new(AtomicBool::new(false));
-        let called_cb = Arc::clone(&called);
-        let err = clear_webhome_data::<MockWindow, _, _>(None, move || {
-            called_cb.store(true, Ordering::SeqCst);
-            std::future::ready(Ok::<usize, String>(0))
-        })
+    async fn no_window_returns_webhome_not_open_and_middle_and_logs_never_run() {
+        let middle_called = Arc::new(AtomicBool::new(false));
+        let logs_called = Arc::new(AtomicBool::new(false));
+        let middle_called_cb = Arc::clone(&middle_called);
+        let logs_called_cb = Arc::clone(&logs_called);
+        let err = clear_webhome_data::<MockWindow, _, _, _, _>(
+            None,
+            move || {
+                middle_called_cb.store(true, Ordering::SeqCst);
+                std::future::ready(MiddleClearReport::default())
+            },
+            move || {
+                logs_called_cb.store(true, Ordering::SeqCst);
+                std::future::ready(0)
+            },
+        )
         .await
         .unwrap_err();
         assert_eq!(err, WEBHOME_NOT_OPEN);
-        assert!(!called.load(Ordering::SeqCst), "jar must not run without a window");
+        assert!(
+            !middle_called.load(Ordering::SeqCst),
+            "middle must not run without a window"
+        );
+        assert!(
+            !logs_called.load(Ordering::SeqCst),
+            "logs must not run without a window"
+        );
     }
 
     #[tokio::test]
     async fn full_clear_runs_all_steps_in_order_and_reloads() {
         let order = Arc::new(StdMutex::new(Vec::new()));
         let window = MockWindow::new(Some(ok_result()), Arc::clone(&order));
-        let report = clear_webhome_data(Some(&window), jar_ok(Arc::clone(&order), 3))
-            .await
-            .unwrap();
+        let report = clear_webhome_data(
+            Some(&window),
+            middle_ok(Arc::clone(&order), 3),
+            logs_ok(Arc::clone(&order), 5),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report,
             WebHomeClearReport {
-                cleared: vec![
-                    "wo_domain_cache".to_string(),
-                    "wo_site_domains".to_string()
-                ],
+                cleared: vec!["wo_domain_cache".to_string(), "wo_site_domains".to_string()],
                 absent: vec!["wo_monitor_snapshot".to_string()],
                 jar_cleared: 3,
+                plugins: 1,
+                response_cache_dropped: 0,
+                webhome_keys_deleted: 0,
+                media_entries_dropped: 0,
+                pycache_dirs: 0,
+                pycache_files: 0,
+                py_running: false,
+                py_spiders_total: 0,
+                py_spiders_cleared: 0,
+                staging_files: 0,
+                log_entries_dropped: 5,
+                warnings: Vec::new(),
             }
         );
         assert_eq!(window.eval_calls(), vec![clear_js()]);
         assert_eq!(
             window.order(),
-            vec!["eval_js", "clear_browsing_data", "jar", "reload_page"]
+            vec![
+                "eval_js",
+                "clear_browsing_data",
+                "middle",
+                "reload_page",
+                "logs"
+            ]
+        );
+        assert_eq!(window.reload_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn middle_warnings_are_reported_and_reload_and_logs_still_run() {
+        // 中间步骤按类别尽力清理：某一类失败只记 warnings，不中断重载与日志清理。
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let window = MockWindow::new(Some(ok_result()), Arc::clone(&order));
+        let order_middle = Arc::clone(&order);
+        let report = clear_webhome_data(
+            Some(&window),
+            move || {
+                order_middle.lock().unwrap().push("middle");
+                std::future::ready(MiddleClearReport {
+                    plugins: 1,
+                    jar_cleared: 2,
+                    warnings: vec!["插件 x 的 Cookie 罐清理失败：boom".to_string()],
+                    ..Default::default()
+                })
+            },
+            logs_ok(Arc::clone(&order), 4),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.jar_cleared, 2);
+        assert_eq!(
+            report.warnings,
+            vec!["插件 x 的 Cookie 罐清理失败：boom".to_string()]
+        );
+        assert_eq!(report.log_entries_dropped, 4);
+        assert_eq!(
+            window.order(),
+            vec![
+                "eval_js",
+                "clear_browsing_data",
+                "middle",
+                "reload_page",
+                "logs"
+            ]
         );
         assert_eq!(window.reload_calls(), 1);
     }
@@ -360,9 +520,13 @@ mod tests {
         let order = Arc::new(StdMutex::new(Vec::new()));
         let mut window = MockWindow::new(Some(ok_result()), Arc::clone(&order));
         window.eval_error = Some("eval boom".to_string());
-        let err = clear_webhome_data(Some(&window), jar_ok(Arc::clone(&order), 3))
-            .await
-            .unwrap_err();
+        let err = clear_webhome_data(
+            Some(&window),
+            middle_ok(Arc::clone(&order), 3),
+            logs_ok(Arc::clone(&order), 0),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("eval boom"), "{err}");
         assert_eq!(window.order(), vec!["eval_js"]);
         assert_eq!(window.reload_calls(), 0);
@@ -372,9 +536,13 @@ mod tests {
     async fn bad_callback_json_errors_without_further_steps() {
         let order = Arc::new(StdMutex::new(Vec::new()));
         let window = MockWindow::new(Some("not json".to_string()), Arc::clone(&order));
-        let err = clear_webhome_data(Some(&window), jar_ok(Arc::clone(&order), 3))
-            .await
-            .unwrap_err();
+        let err = clear_webhome_data(
+            Some(&window),
+            middle_ok(Arc::clone(&order), 3),
+            logs_ok(Arc::clone(&order), 0),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("无法解析"), "{err}");
         assert_eq!(window.order(), vec!["eval_js"]);
         assert_eq!(window.reload_calls(), 0);
@@ -387,9 +555,13 @@ mod tests {
             Some(r#"{"ok":false,"error":"denied","existed":{}}"#.to_string()),
             Arc::clone(&order),
         );
-        let err = clear_webhome_data(Some(&window), jar_ok(Arc::clone(&order), 3))
-            .await
-            .unwrap_err();
+        let err = clear_webhome_data(
+            Some(&window),
+            middle_ok(Arc::clone(&order), 3),
+            logs_ok(Arc::clone(&order), 0),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("denied"), "{err}");
         assert_eq!(window.order(), vec!["eval_js"]);
         assert_eq!(window.reload_calls(), 0);
@@ -401,7 +573,8 @@ mod tests {
         let window = MockWindow::new(None, Arc::clone(&order));
         let err = clear_webhome_data_with_timeout(
             Some(&window),
-            jar_ok(Arc::clone(&order), 3),
+            middle_ok(Arc::clone(&order), 3),
+            logs_ok(Arc::clone(&order), 0),
             Duration::from_millis(50),
         )
         .await
@@ -412,48 +585,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browsing_data_failure_propagates_without_jar_or_reload() {
+    async fn browsing_data_failure_propagates_without_middle_logs_or_reload() {
         let order = Arc::new(StdMutex::new(Vec::new()));
         let mut window = MockWindow::new(Some(ok_result()), Arc::clone(&order));
         window.clear_browsing_error = Some("store boom".to_string());
-        let err = clear_webhome_data(Some(&window), jar_ok(Arc::clone(&order), 3))
-            .await
-            .unwrap_err();
+        let err = clear_webhome_data(
+            Some(&window),
+            middle_ok(Arc::clone(&order), 3),
+            logs_ok(Arc::clone(&order), 0),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("store boom"), "{err}");
         assert_eq!(window.order(), vec!["eval_js", "clear_browsing_data"]);
         assert_eq!(window.reload_calls(), 0);
     }
 
     #[tokio::test]
-    async fn jar_failure_propagates_without_reload() {
-        let order = Arc::new(StdMutex::new(Vec::new()));
-        let window = MockWindow::new(Some(ok_result()), Arc::clone(&order));
-        let err = clear_webhome_data(Some(&window), || {
-            order.lock().unwrap().push("jar");
-            std::future::ready(Err::<usize, String>("jar boom".to_string()))
-        })
-        .await
-        .unwrap_err();
-        assert!(err.contains("jar boom"), "{err}");
-        assert_eq!(
-            window.order(),
-            vec!["eval_js", "clear_browsing_data", "jar"]
-        );
-        assert_eq!(window.reload_calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn reload_failure_is_reported() {
+    async fn reload_failure_is_reported_and_logs_stay() {
+        // 重载失败时日志不清（留着查错），logs 闭包不跑。
         let order = Arc::new(StdMutex::new(Vec::new()));
         let mut window = MockWindow::new(Some(ok_result()), Arc::clone(&order));
         window.reload_error = Some("reload boom".to_string());
-        let err = clear_webhome_data(Some(&window), jar_ok(Arc::clone(&order), 3))
-            .await
-            .unwrap_err();
+        let err = clear_webhome_data(
+            Some(&window),
+            middle_ok(Arc::clone(&order), 3),
+            logs_ok(Arc::clone(&order), 0),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("reload boom"), "{err}");
         assert_eq!(
             window.order(),
-            vec!["eval_js", "clear_browsing_data", "jar", "reload_page"]
+            vec!["eval_js", "clear_browsing_data", "middle", "reload_page"]
         );
     }
 

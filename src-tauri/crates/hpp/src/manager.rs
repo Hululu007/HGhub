@@ -7,6 +7,8 @@ use crate::{
     python::{PyWorker, PythonBootstrap, RuntimeWorker, UnavailablePython},
     runtime::{self, Worker},
     store::{atomic_write, Store},
+    webhome::clear_webhome_prefix_keys,
+    webhome_data::MiddleClearReport,
     wire::Transfer,
     PluginError, Result,
 };
@@ -996,6 +998,127 @@ impl PluginManager {
         network.clear_cookie_jar()
     }
 
+    /// 全清全部插件的运行时缓存（v0.0.84 中间步骤，hpp 侧）：每个已装
+    /// 插件的 Cookie 罐（内存 + cookies.json）、Network 响应缓存、
+    /// `webhome:` 前缀的存储键；再加全部会话的媒体预加载缓存、插件
+    /// 目录下的 `__pycache__` 与 `*.pyc`。按类别尽力清理：某一类失败
+    /// 记入 warnings 并继续下一类。已停用的插件也在内（network/store
+    /// 在 installed() 里对全部索引条目都建好了，与启用无关）。
+    /// 只清运行时缓存：插件源文件（*.py/*.js/manifest）、插件存储里非
+    /// `webhome:` 的键、设置、下载一律不动。
+    pub async fn clear_all_runtime_caches(&self) -> MiddleClearReport {
+        let mut report = MiddleClearReport::default();
+        report.media_entries_dropped = self.sessions.clear_all_caches();
+        let (dirs, files, mut warnings) = Self::clear_pycache(&self.root);
+        report.pycache_dirs = dirs;
+        report.pycache_files = files;
+        report.warnings.append(&mut warnings);
+        let plugins = self
+            .plugins
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        report.plugins = plugins.len();
+        for p in plugins {
+            let p = p.lock().await;
+            let id = p.entry.meta.id.clone();
+            match p.network.clear_cookie_jar() {
+                Ok(n) => report.jar_cleared += n,
+                Err(e) => report
+                    .warnings
+                    .push(format!("插件 {id} 的 Cookie 罐清理失败：{e}")),
+            }
+            report.response_cache_dropped += p.network.clear_response_cache();
+            match clear_webhome_prefix_keys(&p.store) {
+                Ok(n) => report.webhome_keys_deleted += n,
+                Err(e) => report
+                    .warnings
+                    .push(format!("插件 {id} 的 WebHome 缓存键清理失败：{e}")),
+            }
+        }
+        report
+    }
+
+    /// 清空全部插件的运行日志缓冲（v0.0.84 最后一步，hpp 侧）：每个插件
+    /// 的 ext.log 内存缓冲全清，返回丢掉的总行数。日志是内存态的
+    /// （`native/logs.rs` 的 LogBuffer），不落盘。
+    pub async fn clear_all_logs(&self) -> usize {
+        let plugins = self
+            .plugins
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut total = 0;
+        for p in plugins {
+            let p = p.lock().await;
+            let mut logs = p.logs.lock();
+            if let Ok(logs) = logs.as_mut() {
+                total += logs.clear();
+            }
+        }
+        total
+    }
+
+    /// 递归删掉 `root` 下全部 `__pycache__` 目录与 `*.pyc` 文件，返回
+    /// （删掉的目录数，删掉的文件数，警告）。只删字节码：`*.py` 与其他
+    /// 文件一律不动；符号链接不跟进（`DirEntry::file_type` 对链接的
+    /// is_dir/is_file 都返回 false，直接跳过）；单个目录/文件失败时记
+    /// 警告并继续，不中断整轮。
+    fn clear_pycache(root: &std::path::Path) -> (usize, usize, Vec<String>) {
+        let mut dirs = 0;
+        let mut files = 0;
+        let mut warnings = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    warnings.push(format!("无法读取目录 {}：{e}", dir.display()));
+                    continue;
+                }
+            };
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        warnings.push(format!("无法读取目录项：{e}"));
+                        continue;
+                    }
+                };
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(e) => {
+                        warnings.push(format!("无法读取 {} 的类型：{e}", entry.path().display()));
+                        continue;
+                    }
+                };
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let path = entry.path();
+                if ft.is_dir() {
+                    if name == "__pycache__" {
+                        match std::fs::remove_dir_all(&path) {
+                            Ok(()) => dirs += 1,
+                            Err(e) => warnings.push(format!("无法删除 {}：{e}", path.display())),
+                        }
+                    } else {
+                        stack.push(path);
+                    }
+                } else if ft.is_file() && name.ends_with(".pyc") {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => files += 1,
+                        Err(e) => warnings.push(format!("无法删除 {}：{e}", path.display())),
+                    }
+                }
+            }
+        }
+        (dirs, files, warnings)
+    }
+
     /// 网络诊断探针（v0.0.80；v0.0.82：用对话框当前选中的模式跑）：
     /// 只读诊断，见 `Network::diagnose`。走首个已启用 WebHome 插件的
     /// Network（探针量的就是 WebHome 那条路；代理决议与 Node 边车全局
@@ -1082,6 +1205,158 @@ impl Drop for PluginManager {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 两个 fixture 插件的索引：a 已启用、b 已停用（全清必须覆盖已停用
+    /// 的插件——network/store 在 installed() 里对全部索引条目都建好了）。
+    fn write_index(root: &std::path::Path) {
+        let index = json!([
+            {"meta": {"id": "fixture.a", "name": "A", "protocol": 1, "version": "1.0.0", "allowInsecureHttp": true}, "enabled": true, "source": null, "origin": null, "usable": true, "settings": {}, "endpoint": {}},
+            {"meta": {"id": "fixture.b", "name": "B", "protocol": 1, "version": "1.0.0", "allowInsecureHttp": true}, "enabled": false, "source": null, "origin": null, "usable": true, "settings": {}, "endpoint": {}}
+        ]);
+        std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+    }
+
+    fn write_cookies(dir: &std::path::Path, ordinary: usize, web_logins: usize) {
+        let cookie = |name: &str| {
+            json!({"name": name, "value": "1", "domain": "example.com", "path": "/", "hostOnly": false, "secure": false, "httpOnly": false, "expiresAt": null})
+        };
+        let ordinary: Vec<Value> = (0..ordinary).map(|i| cookie(&format!("o{i}"))).collect();
+        let web_logins: Value = (0..web_logins)
+            .map(|i| {
+                (
+                    format!("https://example{i}.com"),
+                    json!({"generation": "g1", "cookies": [cookie(&format!("w{i}"))]}),
+                )
+            })
+            .collect::<serde_json::Map<String, Value>>()
+            .into();
+        std::fs::write(
+            dir.join("cookies.json"),
+            json!({"ordinary": ordinary, "web_logins": web_logins}).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn set_key(store: &Store, key: &str) {
+        store
+            .operation(
+                "set",
+                &Transfer::from_json(json!({ "key": key, "value": "v" })),
+            )
+            .unwrap();
+    }
+
+    fn has_key(store: &Store, key: &str) -> bool {
+        store
+            .operation("get", &Transfer::from_json(json!({ "key": key })))
+            .unwrap()
+            .json()["found"]
+            .as_bool()
+            == Some(true)
+    }
+
+    async fn seed(manager: &PluginManager) {
+        let plugins = manager
+            .plugins
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for p in plugins {
+            let p = p.lock().await;
+            // 响应缓存：每插件 1 条（Network 的 #[cfg(test)] 种子方法）。
+            p.network.seed_response_cache("https://example.com/cached", 8);
+            // 存储：每插件 1 个 webhome: 键 + 1 个插件自己的键。
+            set_key(&p.store, "webhome:domains");
+            set_key(&p.store, "own:progress");
+            // 运行日志：每插件 2 行。
+            let mut logs = p.logs.lock().unwrap();
+            logs.push("info", "line one", "r1", None);
+            logs.push("info", "line two", "r2", None);
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_all_runtime_caches_clears_all_plugins_and_keeps_own_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_index(root);
+        // Cookie 罐：a 2 条（1 普通 + 1 web 登录）、b 1 条（普通）。
+        std::fs::create_dir_all(root.join("fixture.a")).unwrap();
+        std::fs::create_dir_all(root.join("fixture.b")).unwrap();
+        write_cookies(&root.join("fixture.a"), 1, 1);
+        write_cookies(&root.join("fixture.b"), 1, 0);
+        // __pycache__：a 有一个目录（含 .pyc + .py）、一个子目录的
+        // __pycache__；b 有一个散落的 .pyc；两边都有必须保留的 .py。
+        std::fs::create_dir_all(root.join("fixture.a/__pycache__")).unwrap();
+        std::fs::write(root.join("fixture.a/__pycache__/mod.pyc"), b"bytecode").unwrap();
+        std::fs::write(root.join("fixture.a/plugin.py"), b"# source").unwrap();
+        std::fs::create_dir_all(root.join("fixture.a/sub/__pycache__")).unwrap();
+        std::fs::write(root.join("fixture.a/sub/__pycache__/x.pyc"), b"bytecode").unwrap();
+        std::fs::write(root.join("fixture.a/sub/helper.py"), b"# source").unwrap();
+        std::fs::write(root.join("fixture.b/loose.pyc"), b"bytecode").unwrap();
+        std::fs::write(root.join("fixture.b/plugin.py"), b"# source").unwrap();
+
+        let manager = PluginManager::open(root.into()).unwrap();
+        seed(&manager).await;
+        let report = manager.clear_all_runtime_caches().await;
+        assert_eq!(report.plugins, 2);
+        assert_eq!(report.jar_cleared, 3);
+        assert_eq!(report.response_cache_dropped, 2);
+        assert_eq!(report.webhome_keys_deleted, 2);
+        assert_eq!(report.media_entries_dropped, 0);
+        assert_eq!(report.pycache_dirs, 2);
+        assert_eq!(report.pycache_files, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        // 罐子落盘已空、响应缓存已空、webhome: 键已删、自己的键还在。
+        for id in ["fixture.a", "fixture.b"] {
+            assert_eq!(
+                std::fs::read_to_string(root.join(id).join("cookies.json")).unwrap(),
+                "[]"
+            );
+            let plugins = manager.plugins.read().await;
+            let p = plugins.get(id).unwrap().lock().await;
+            assert_eq!(p.network.clear_response_cache(), 0);
+            assert!(!has_key(&p.store, "webhome:domains"));
+            assert!(has_key(&p.store, "own:progress"));
+        }
+        // .py 全在，只删了字节码。
+        assert!(root.join("fixture.a/plugin.py").exists());
+        assert!(root.join("fixture.a/sub/helper.py").exists());
+        assert!(root.join("fixture.b/plugin.py").exists());
+        assert!(!root.join("fixture.a/__pycache__").exists());
+        assert!(!root.join("fixture.a/sub/__pycache__").exists());
+        assert!(!root.join("fixture.b/loose.pyc").exists());
+    }
+
+    #[tokio::test]
+    async fn clear_all_logs_drops_entries_from_all_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_index(root);
+        let manager = PluginManager::open(root.into()).unwrap();
+        seed(&manager).await;
+        assert_eq!(manager.clear_all_logs().await, 4);
+        assert_eq!(manager.clear_all_logs().await, 0);
+        let plugins = manager
+            .plugins
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for p in plugins {
+            let p = p.lock().await;
+            assert!(p.logs.lock().unwrap().snapshot().is_empty());
         }
     }
 }

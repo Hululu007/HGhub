@@ -3,7 +3,10 @@
 //! 运行时本身。页面只能操作绑定它的那个插件；跨站请求直接拒绝。
 
 use crate::{
-    media::PreparedMedia, wire::Transfer, PluginError, PluginManager, Result,
+    media::PreparedMedia,
+    store::Store,
+    wire::Transfer,
+    PluginError, PluginManager, Result,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -247,6 +250,28 @@ pub async fn dispatch(
 
 /// WebHome 缓存与绑定插件共用同一份存储，键名前缀 `webhome:`，与插件
 /// 自身的键隔离；clear 只清这个前缀，不动插件的其他数据。
+///
+/// 清掉指定存储里全部 `webhome:` 前缀的键，返回删掉的键数（v0.0.84
+/// 全清复用同一逻辑；不要整个删掉存储文件）。
+pub(crate) fn clear_webhome_prefix_keys(store: &Store) -> Result<usize> {
+    let keys = store
+        .operation(
+            "keys",
+            &Transfer::from_json(json!({ "prefix": "webhome:" })),
+        )?
+        .json();
+    let mut deleted = 0;
+    if let Some(keys) = keys.as_array() {
+        for k in keys {
+            if let Some(k) = k.as_str() {
+                store.operation("delete", &Transfer::from_json(json!({ "key": k })))?;
+                deleted += 1;
+            }
+        }
+    }
+    Ok(deleted)
+}
+
 async fn cache(
     manager: &Arc<PluginManager>,
     plugin_id: &str,
@@ -256,22 +281,7 @@ async fn cache(
     let store = manager.store(plugin_id).await?;
     // clear 不带 key：它按前缀清，不先取 key。
     if method == "cache.clear" {
-        let keys = store
-            .operation(
-                "keys",
-                &Transfer::from_json(json!({ "prefix": "webhome:" })),
-            )?
-            .json();
-        if let Some(keys) = keys.as_array() {
-            for k in keys {
-                if let Some(k) = k.as_str() {
-                    store.operation(
-                        "delete",
-                        &Transfer::from_json(json!({ "key": k })),
-                    )?;
-                }
-            }
-        }
+        clear_webhome_prefix_keys(&store)?;
         return Ok(json!({ "code": 0 }));
     }
     let key = format!("webhome:{}", text(p, "k")?);
@@ -300,6 +310,36 @@ async fn cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_webhome_prefix_keys_only_deletes_webhome_prefix() {
+        // v0.0.84：只清 webhome: 前缀，插件自身的键不动；存储文件本身不删。
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("storage.json")).unwrap();
+        for key in ["webhome:a", "webhome:b", "own:key", "other"] {
+            store
+                .operation(
+                    "set",
+                    &Transfer::from_json(json!({ "key": key, "value": "v" })),
+                )
+                .unwrap();
+        }
+        assert_eq!(clear_webhome_prefix_keys(&store).unwrap(), 2);
+        assert_eq!(clear_webhome_prefix_keys(&store).unwrap(), 0);
+        let remaining = store
+            .operation("keys", &Transfer::from_json(json!({ "prefix": "" })))
+            .unwrap()
+            .json();
+        let mut remaining: Vec<&str> = remaining
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        remaining.sort_unstable();
+        assert_eq!(remaining, vec!["other", "own:key"]);
+        assert!(dir.path().join("storage.json").exists());
+    }
 
     #[test]
     fn canonical_aliases() {

@@ -126,6 +126,36 @@ fn prune_staging(dir: &std::path::Path) {
     }
 }
 
+/// 清空插件导入暂存目录里的文件（v0.0.84 全清用），返回清掉的文件数。
+/// 暂存的是用户已选文件的拷贝，预览与安装读完即无用（另有 7 天自动
+/// 清理），删了无影响。目录不存在时返回 0，不新建；只删文件，子目录
+/// 留着；单个文件删失败时返回错误（调用方记入 warnings 继续）。
+pub(crate) fn clear_staging_dir(app: &tauri::AppHandle) -> Result<usize> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| hghub_hpp::PluginError::internal("无法确定应用数据目录"))?
+        .join("plugin-imports");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
+    let mut cleared = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            std::fs::remove_file(&path).map_err(|e| {
+                hghub_hpp::PluginError::internal(format!(
+                    "无法删除暂存文件 {}：{e}",
+                    path.display()
+                ))
+            })?;
+            cleared += 1;
+        }
+    }
+    Ok(cleared)
+}
+
 fn staged_name(location: &str, index: usize, stamp: u128) -> String {
     // 选择器/Inbox 返回的最后一段常是百分号编码过的（如 %E8%A5%BF…）：
     // 先解码再切词干/扩展名，否则 `%` 会被下面的 safe 映射换成 `_`，

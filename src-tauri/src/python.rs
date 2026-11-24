@@ -223,3 +223,30 @@ pub fn python_bootstrap(info_path: PathBuf) -> Arc<dyn PythonBootstrap> {
         Arc::new(hghub_hpp::python::worker::UnavailablePython)
     }
 }
+
+/// 边车已在运行时返回可用的客户端，未运行时返回 `None`（v0.0.84 全清
+/// 用）：只读地址文件 + 一次健康检查，绝不启动边车。解释器线程一旦
+/// 启动永不退出，所以“未运行”只意味着本会话还没用过 Python 蜘蛛——
+/// 此时 `_RUNTIME_CACHE` 本就是空的，没有可清的缓存。
+#[cfg(target_os = "ios")]
+pub async fn running_client(app: &tauri::AppHandle) -> Option<SidecarClient> {
+    use tauri::Manager;
+    let text = std::fs::read_to_string(app.path().app_data_dir().ok()?.join("python-sidecar.json"))
+        .ok()?;
+    let api_base = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("apiBase")?
+        .as_str()?
+        .to_string();
+    let client = SidecarClient::new(api_base).ok()?;
+    client.health(Duration::from_secs(2)).await.ok()?;
+    Some(client)
+}
+
+/// 非 iOS 没有进程内 Python 边车，全清时 Python 运行时缓存一项跳过。
+#[cfg(not(target_os = "ios"))]
+pub async fn running_client(
+    _app: &tauri::AppHandle,
+) -> Option<hghub_hpp::python::client::SidecarClient> {
+    None
+}

@@ -337,6 +337,31 @@ impl Network {
         self.save_jar(&jars)?;
         Ok(count)
     }
+
+    /// 丢掉全部响应缓存条目（v0.0.84 全清用）：内存里的 CachedResponse
+    /// 全部清除，返回丢掉的条数。只动缓存本身：Cookie 罐、限速/冷却不动。
+    pub(crate) fn clear_response_cache(&self) -> usize {
+        let mut cache = self.cache.lock().unwrap();
+        let count = cache.len();
+        cache.clear();
+        count
+    }
+
+    /// 测试用：往响应缓存里塞一条假条目（只供清理测试断言计数用，
+    /// 不走真实请求；`clear_response_cache` 的计数靠它验证）。
+    #[cfg(test)]
+    pub(crate) fn seed_response_cache(&self, key: &str, bytes: usize) {
+        use crate::wire::Transfer;
+        use std::time::{Duration, Instant};
+        self.cache.lock().unwrap().insert(
+            key.to_string(),
+            CachedResponse {
+                value: Transfer::from_json(serde_json::json!({"seeded": true})),
+                expires: Instant::now() + Duration::from_secs(60),
+                bytes,
+            },
+        );
+    }
     fn parse_cookie(u: &Url, v: Value) -> Result<SavedCookie> {
         let host = u
             .host_str()
@@ -987,6 +1012,8 @@ pub fn headers(v: &Value) -> Result<HeaderMap> {
     Ok(out)
 }
 
+#[cfg(test)]
+mod clear_tests;
 #[cfg(test)]
 mod node_tests;
 #[cfg(test)]

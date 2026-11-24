@@ -140,6 +140,17 @@ impl MediaSessions {
             s.cache.cancel();
         }
     }
+
+    /// 丢掉全部会话的预加载缓存（v0.0.84 全清用），返回丢掉的总条数。
+    /// 只动内存字节缓存：会话、播放状态、已登记的本地文件不动。
+    pub(crate) fn clear_all_caches(&self) -> usize {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.cache.clear())
+            .sum()
+    }
     pub fn release_plugin(&self, id: &str) {
         self.sessions.lock().unwrap().retain(|_, s| {
             if s.providers.contains_key(id) {

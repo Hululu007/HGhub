@@ -322,42 +322,95 @@ pub fn webhome_player_state(
     Ok(())
 }
 
-/// 清理 WebHome 全部数据（v0.0.83）：删页面 localStorage 里的三个域名
-/// 缓存键、全清 WebView 浏览数据、清绑定插件的 Rust 请求 Cookie 罐，
-/// 再重载 webhome 窗口。窗口不存在时返回 `WEBHOME_NOT_OPEN`，不建
-/// 窗口；会话未绑定插件时也不清（不知道清哪个插件的罐子）。删键、
-/// 取值与步骤顺序的逻辑在 hpp（`webhome_data`），这里只是窗口的薄包装。
+/// 全 App 缓存清理（v0.0.84；v0.0.83 是“清理 WebHome 全部数据”）：
+/// 删页面 localStorage 里的三个域名缓存键、全清 WebView 浏览数据、
+/// 清全部插件的 Rust 请求 Cookie 罐与响应缓存、`webhome:` 前缀的存储键、
+/// 全部会话的媒体预加载缓存、插件目录下的 `__pycache__` 与 `*.pyc`、
+/// Python 边车已加载蜘蛛的运行时缓存（边车在运行时才清）、插件导入
+/// 暂存文件，再重载 webhome 窗口；最后清日志（全部插件的 ext.log
+/// 内存缓冲 + App 自己的 debug.log 文件）。窗口不存在时返回
+/// `WEBHOME_NOT_OPEN`，不建窗口。中间步骤按类别尽力清理、失败记入
+/// warnings；窗口步骤失败时不重载、日志不清（留着查错）。
+/// 不碰：App 设置、导入的插件及插件文件、插件存储里非 `webhome:` 的键、
+/// 下载好的视频、插件源文件、HTML 源文件。
+/// 步骤顺序与报告字段的逻辑在 hpp（`webhome_data`），这里只是窗口的
+/// 薄包装 + App 侧的几项（Python 边车、导入暂存、debug.log）。
 #[tauri::command]
 pub async fn clear_webhome_data(
     app: AppHandle,
     host: State<'_, PluginHost>,
-    state: State<'_, WebHomeState>,
 ) -> Result<Value, String> {
-    // 窗口不存在先报 WEBHOME_NOT_OPEN（比会话未绑定更优先：刚装好、
-    // 还没打开过 WebHome 时两者都没有，用户要看的是前者）。
+    // 窗口不存在先报 WEBHOME_NOT_OPEN（刚装好、还没打开过 WebHome 时，
+    // 用户要看的是这个）。v0.0.84 不再要求会话绑定插件——罐子是全部
+    // 插件一起清，不再按绑定插件挑。
     let Some(window) = app.get_webview_window(LABEL) else {
         return Err(hghub_hpp::webhome_data::WEBHOME_NOT_OPEN.to_string());
     };
     let window = WebHomeWindow(window);
-    let plugin_id = state
-        .session
-        .lock()
-        .map_err(err)?
-        .as_ref()
-        .map(|s| s.plugin_id.clone())
-        .ok_or_else(|| "WebHome 会话未绑定插件".to_string())?;
     let manager = host.manager(&app).await.map_err(err)?;
-    let report = hghub_hpp::webhome_data::clear_webhome_data(Some(&window), || async {
-        manager
-            .clear_cookie_jar(&plugin_id)
-            .await
-            .map_err(|e| e.to_string())
-    })
+    let middle_manager = Arc::clone(&manager);
+    let logs_manager = Arc::clone(&manager);
+    let app_for_py = app.clone();
+    let app_for_staging = app.clone();
+    let report = hghub_hpp::webhome_data::clear_webhome_data(
+        Some(&window),
+        move || {
+            let manager = middle_manager;
+            let app_for_py = app_for_py;
+            let app_for_staging = app_for_staging;
+            async move {
+                let mut middle = manager.clear_all_runtime_caches().await;
+                // Python 边车运行时缓存：边车在运行时才清；没跑时
+                // py_running 为 false、_RUNTIME_CACHE 本就是空的。
+                match crate::python::running_client(&app_for_py).await {
+                    Some(client) => {
+                        middle.py_running = true;
+                        let py = client.clear_all_spider_caches().await;
+                        middle.py_spiders_total = py.spiders_total;
+                        middle.py_spiders_cleared = py.spiders_cleared;
+                        middle.warnings.extend(py.warnings);
+                    }
+                    None => middle.py_running = false,
+                }
+                // 插件导入暂存文件。
+                match crate::plugins::clear_staging_dir(&app_for_staging) {
+                    Ok(n) => middle.staging_files = n,
+                    Err(e) => middle.warnings.push(format!("插件导入暂存清理失败：{e}")),
+                }
+                middle
+            }
+        },
+        move || {
+            let manager = logs_manager;
+            async move { manager.clear_all_logs().await }
+        },
+    )
     .await?;
+    // 最后清 App 自己的 debug.log（落盘文件）：清完日志从空开始，
+    // 下次出问题时新日志更干净、更好定位。本次清理动作自身的日志行
+    // 也会随之消失，是预期的。
+    let debug_log_cleared = app
+        .path()
+        .app_data_dir()
+        .map(|dir| std::fs::remove_file(dir.join("debug.log")).is_ok())
+        .unwrap_or(false);
     Ok(json!({
         "cleared": report.cleared,
         "absent": report.absent,
         "jar_cleared": report.jar_cleared,
+        "plugins": report.plugins,
+        "response_cache_dropped": report.response_cache_dropped,
+        "webhome_keys_deleted": report.webhome_keys_deleted,
+        "media_entries_dropped": report.media_entries_dropped,
+        "pycache_dirs": report.pycache_dirs,
+        "pycache_files": report.pycache_files,
+        "py_running": report.py_running,
+        "py_spiders_total": report.py_spiders_total,
+        "py_spiders_cleared": report.py_spiders_cleared,
+        "staging_files": report.staging_files,
+        "log_entries_dropped": report.log_entries_dropped,
+        "debug_log_cleared": debug_log_cleared,
+        "warnings": report.warnings,
     }))
 }
 

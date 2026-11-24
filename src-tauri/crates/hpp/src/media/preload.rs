@@ -29,6 +29,16 @@ impl Cache {
             token.cancel();
         }
     }
+
+    /// 清空预加载缓存（v0.0.84 全清用）：先取消在途预热，再丢掉已缓存
+    /// 的全部条目，返回丢掉的条数。只动内存字节缓存：不碰播放状态。
+    pub(super) fn clear(&self) -> usize {
+        self.cancel();
+        let mut entries = self.entries.lock().unwrap();
+        let count = entries.len();
+        entries.clear();
+        count
+    }
 }
 
 fn content_range(value: &str) -> Option<(u64, u64, u64)> {
@@ -501,5 +511,27 @@ mod tests {
         assert!(plan("#EXTM3U\n#EXTINF:10,\nhttp://local/1", 0.0)
             .1
             .is_empty());
+    }
+
+    #[test]
+    fn clear_drops_all_entries() {
+        // v0.0.84：Cache::clear 丢掉全部已缓存条目并返回条数。
+        let cache = Cache::default();
+        assert_eq!(cache.clear(), 0);
+        for i in 0..2 {
+            cache.entries.lock().unwrap().push(Entry {
+                resource: i,
+                headers: HeaderMap::new(),
+                data: Bytes::from_static(b"abc"),
+                start: 0,
+                total: 3,
+                at: Instant::now(),
+                policy: (0, false),
+                request_range: None,
+            });
+        }
+        assert_eq!(cache.clear(), 2);
+        assert!(cache.entries.lock().unwrap().is_empty());
+        assert_eq!(cache.clear(), 0);
     }
 }

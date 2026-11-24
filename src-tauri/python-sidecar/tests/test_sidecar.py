@@ -212,6 +212,20 @@ def main():
         status, init = call("demo", "init", [])
         check("init", status == 200)
 
+        # 运行时缓存清理（v0.0.84）：clearCache 只清本蜘蛛命名空间，
+        # 空缓存再清也成功。
+        status, _ = call("demo", "setCache", ["ck1", "v1"])
+        check("setCache", status == 200)
+        status, got = call("demo", "getCache", ["ck1"])
+        check("getCache hit", status == 200 and got == "v1", str(got)[:200])
+        status, cleared = call("demo", "clearCache", [])
+        check("clearCache", status == 200 and cleared == "succeed", str(cleared)[:200])
+        status, got = call("demo", "getCache", ["ck1"])
+        # 未命中时 getCache 返回 None，runner 按“返回值是 dict”归一成 {}。
+        check("getCache miss after clearCache", status == 200 and got == {}, str(got)[:200])
+        status, cleared = call("demo", "clearCache", [])
+        check("clearCache empty ok", status == 200 and cleared == "succeed", str(cleared)[:200])
+
         # 未知方法 / 未加载的 key 报明错。
         status, err = call("demo", "noSuchMethod", [])
         check("unknown method errors", status == 500 and "error" in err, str(err)[:200])
