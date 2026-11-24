@@ -20,7 +20,8 @@
     "android:init": "tauri android init",
     "android:icons": "node scripts/sync-android-icons.mjs",
     "android:dev": "tauri android dev",
-    "android:build": "tauri android build"
+    "android:build": "tauri android build",
+    "check:acl": "node scripts/check-acl.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

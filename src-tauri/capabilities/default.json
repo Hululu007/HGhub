@@ -36,6 +36,7 @@
     "allow-open-url",
     "allow-open-external-media",
     "allow-open-webhome",
+    "allow-clear-webhome-data",
     "allow-webhome-player-state",
     "allow-native-player-open",
     "allow-native-player-close",
