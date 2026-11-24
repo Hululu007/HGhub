@@ -55,6 +55,19 @@
         devicePixelRatio: window.devicePixelRatio || 1,
       });
     }
+    if (method === "net.request") {
+      // v0.0.88：HPP 的 net.request 返回体把响应正文放在 `data`，
+      // 页面按 webhtv 约定读 `body`。SDK 是兼容层，在此补上 body
+      // 引用——JS 赋值只是引用，不复制字符串，不增加 IPC 体积；
+      // `data` 保留不动。bytes 通路不在本次范围，不映射。
+      var mapBody = !payload || payload.responseType !== "bytes";
+      return invoke(method, payload).then(function (r) {
+        if (mapBody && r && typeof r === "object" && r.body === undefined && r.data !== undefined) {
+          r.body = r.data;
+        }
+        return r;
+      });
+    }
     return invoke(method, payload);
   }
   function fmInvoke(method, payload) {
