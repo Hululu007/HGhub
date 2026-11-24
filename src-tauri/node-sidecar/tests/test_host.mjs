@@ -21,6 +21,9 @@
 // 127/8 全拒，所以轮换用例用本机可绑的非保留 IP 做“好地址”，
 // 见下面 findUsableIp）；网络诊断探针（POST /diagnose，
 // port 参数只给测试指临时端口，生产永远 443）。
+// v0.0.82：/diagnose 除报告文本外再回域名小结 summary（Rust 侧
+// 拼结论行用），另有无可用地址分支的小结全零用例——沙箱解析器
+// 给任何合法主机名都造 FakeIP，该用例用非法主机名 'a..b' 触发。
 // 轮换用例在测试进程内直接调 doFetch（不在 spawned 边车子进程
 // 里跑）：沙箱会拦截跨进程发往非 loopback 地址的 TCP，子进程
 // 连不上 DoH 给的非保留 IP；且沙箱拦截一切发往非 loopback 的
@@ -1050,6 +1053,84 @@ test('网络诊断探针：握手通的边缘返回挑战页时标出（v0.0.80�
   } finally {
     stopHost(child);
     good.close();
+    doh.server.close();
+    egress.server.close();
+  }
+});
+
+test('网络诊断探针：返回域名小结（v0.0.82）', { timeout: 30000, skip: !usableIp }, async () => {
+  // 与“两组 DNS 地址”用例同一套布景（坏 TLS + 好 HTTPS + mock
+  // DoH + mock 出口）：除报告文本外，/diagnose 还应回 summary，
+  // Rust 侧拼结论行用。edges 是去重后的边缘数（系统 2 + DoH 1，
+  // 无重叠 = 3）；tlsFail 只计 TCP 通而 TLS 失败的边缘——DoH 给
+  // 的地址在本机沙箱里可能报 TCP 不通（不计入）或 TCP 通/TLS 失
+  // 败（计入），所以只断言 ≥1，不断死数。
+  const addrs = await resolveLocalhost();
+  assert.ok(addrs.length >= 2, `localhost 应至少解析出 2 个地址，实际：${JSON.stringify(addrs)}`);
+  const { server: bad } = await startBadTlsServer(addrs[0].address, 0);
+  const port = bad.address().port;
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('secure-ok');
+  });
+  await new Promise((resolve) => good.listen(port, addrs[1].address, resolve));
+  const doh = await startMockDoh({ a: [usableIp] });
+  const egress = await startMockEgress({});
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca, HG_DOH_BASE_URL: `http://127.0.0.1:${doh.port}` });
+  try {
+    const result = await postDiagnose(base, {
+      domains: ['localhost'],
+      proxyUrl: null,
+      proxyDesc: '直连',
+      port,
+      egressUrls: [`http://127.0.0.1:${egress.port}/cdn-cgi/trace`, `http://127.0.0.1:${egress.port}/ip`],
+    });
+    assert.ok(result.report, `应返回报告：${JSON.stringify(result)}`);
+    assert.ok(result.summary, `应返回小结：${JSON.stringify(result)}`);
+    assert.equal(result.summary.domains.length, 1);
+    const d = result.summary.domains[0];
+    assert.equal(d.host, 'localhost');
+    assert.equal(d.sys, 2, `系统应解析出 2 个地址：${JSON.stringify(d)}`);
+    assert.equal(d.doh, 1, `DoH 应回 1 个地址：${JSON.stringify(d)}`);
+    assert.equal(d.dohState, 'ok');
+    assert.equal(d.edges, 3, `去重后应为 3 条边缘：${JSON.stringify(d)}`);
+    assert.equal(d.tlsOk, 1, `好端点应 TLS 通：${JSON.stringify(d)}`);
+    assert.ok(d.tlsFail >= 1, `坏端点应 TLS 失败：${JSON.stringify(d)}`);
+    assert.equal(d.httpOk, 1, `好端点应 HTTP 200：${JSON.stringify(d)}`);
+  } finally {
+    stopHost(child);
+    bad.close();
+    good.close();
+    doh.server.close();
+    egress.server.close();
+  }
+});
+
+test('网络诊断探针：无可用地址时小结全零、报告写未做握手（v0.0.82）', { timeout: 30000 }, async () => {
+  // 沙箱解析器给任何合法主机名都造一个 FakeIP，走不到无地址分支；
+  // 只有非法主机名（如 'a..b'，双点）才回 ENOTFOUND——用它走到该
+  // 分支。真机上该分支由真正无记录的域名触发。
+  const doh = await startMockDoh({});
+  const egress = await startMockEgress({});
+  const { child, base } = await startHost({ HG_DOH_BASE_URL: `http://127.0.0.1:${doh.port}` });
+  try {
+    const result = await postDiagnose(base, {
+      domains: ['a..b'],
+      proxyUrl: null,
+      proxyDesc: '直连',
+      egressUrls: [`http://127.0.0.1:${egress.port}/cdn-cgi/trace`],
+    });
+    assert.ok(result.report, `应返回报告：${JSON.stringify(result)}`);
+    assert.ok(result.report.includes('a..b：系统 0 个 []'), `DNS 行应写系统 0 个：${result.report}`);
+    assert.ok(result.report.includes('DoH 0 个 []（无记录）'), `DNS 行应写 DoH 无记录：${result.report}`);
+    assert.ok(result.report.includes('无可用地址，未做握手'), `无地址时应写未做握手：${result.report}`);
+    assert.ok(result.summary, `应返回小结：${JSON.stringify(result)}`);
+    assert.equal(result.summary.domains.length, 1);
+    assert.deepEqual(result.summary.domains[0], {
+      host: 'a..b', sys: 0, doh: 0, dohState: 'empty', edges: 0, tlsOk: 0, tlsFail: 0, httpOk: 0,
+    });
+  } finally {
+    stopHost(child);
     doh.server.close();
     egress.server.close();
   }

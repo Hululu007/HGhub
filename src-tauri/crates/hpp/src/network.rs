@@ -881,6 +881,9 @@ impl Network {
                     follow,
                     max,
                     timeout,
+                    // 真实请求：用已保存的设置（探针的 override 只在
+                    // diagnose 里传，见 network/api.rs）。
+                    None,
                     &cancel,
                 )
                 .await?;

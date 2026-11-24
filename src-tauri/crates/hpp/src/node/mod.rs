@@ -15,7 +15,9 @@
 pub mod client;
 
 use crate::{PluginError, Result};
-pub use client::{NodeClient, NodeRequest, NodeResponse};
+pub use client::{
+    DiagnoseDomainSummary, DiagnoseOutcome, DiagnoseSummary, NodeClient, NodeRequest, NodeResponse,
+};
 use futures_util::future::BoxFuture;
 
 /// 边车启动信息：API 入口地址。

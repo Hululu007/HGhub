@@ -1,5 +1,5 @@
 use super::*;
-use crate::node::{NodeRequest, NodeResponse};
+use crate::node::{DiagnoseDomainSummary, DiagnoseSummary, NodeRequest, NodeResponse};
 use futures_util::StreamExt;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use wreq::StatusCode;
@@ -221,6 +221,10 @@ impl Network {
         follow: bool,
         max: usize,
         timeout: Duration,
+        // v0.0.82：探针本次运行的代理决议（对话框当前选中）；None =
+        // 用已保存的设置（所有真实请求）。只影响 Node Api 路径的
+        // 代理选择，不碰全局设置；wreq 回落路径仍用已保存的设置。
+        proxy_override: Option<(crate::proxy::Mode, Option<String>)>,
         cancel: &CancellationToken,
     ) -> Result<Arc<BufferedResponse>> {
         let initial = target.origin();
@@ -238,7 +242,7 @@ impl Network {
                 cookies,
             )?;
             let response = self
-                .shared_hop(outgoing, follow, max, timeout, cancel)
+                .shared_hop(outgoing, follow, max, timeout, proxy_override.clone(), cancel)
                 .await?;
             if let Some(next) =
                 self.redirect(&target, response.status, &response.headers, follow, hop)?
@@ -260,11 +264,14 @@ impl Network {
         follow: bool,
         max: usize,
         timeout: Duration,
+        // v0.0.82：探针本次运行的代理决议（见 buffered）；只在 Node
+        // Api 路径生效，wreq 回落路径仍用已保存的设置（见下）。
+        proxy_override: Option<(crate::proxy::Mode, Option<String>)>,
         cancel: &CancellationToken,
     ) -> Result<Arc<BufferedResponse>> {
         if self.node_transport() {
             return self
-                .send_api_hop(outgoing, follow, max, timeout, cancel)
+                .send_api_hop(outgoing, follow, max, timeout, proxy_override, cancel)
                 .await;
         }
         self.read_hop_wreq(outgoing, follow, max, cancel).await
@@ -292,6 +299,8 @@ impl Network {
         follow: bool,
         max: usize,
         timeout: Duration,
+        // v0.0.82：探针本次运行的代理决议（见 buffered）。
+        proxy_override: Option<(crate::proxy::Mode, Option<String>)>,
         cancel: &CancellationToken,
     ) -> Result<Arc<BufferedResponse>> {
         if cancel.is_cancelled() {
@@ -334,7 +343,7 @@ impl Network {
         };
         let started = Instant::now();
         let response = self
-            .node_hop_with_fallback(&outgoing, timeout, &addrs, started, cancel)
+            .node_hop_with_fallback(&outgoing, timeout, &addrs, started, proxy_override, cancel)
             .await?;
         let mut headers = response.headers;
         let redacted = self.receive_cookies(
@@ -446,9 +455,13 @@ impl Network {
         timeout: Duration,
         addrs: &[std::net::SocketAddr],
         started: Instant,
+        // v0.0.82：探针本次运行的代理决议（见 buffered）；Some 时
+        // 本跳就用它，不读已保存的设置——探针用对话框当前选中的
+        // 模式跑，但绝不改已保存的设置（真实请求不受影响）。
+        proxy_override: Option<(crate::proxy::Mode, Option<String>)>,
         cancel: &CancellationToken,
     ) -> Result<NodeResponse> {
-        let (mode, proxy_url) = self.proxy_decision();
+        let (mode, proxy_url) = proxy_override.unwrap_or_else(|| self.proxy_decision());
         let proxy_desc = describe_proxy(mode, &proxy_url);
         let cookie_note = cookie_note(&outgoing.headers);
         self.log_proxy_decision(&outgoing.target, &proxy_desc, &cookie_note);
@@ -661,15 +674,58 @@ impl Network {
         "https://api.ipify.org",
     ];
 
-    /// 网络诊断探针（v0.0.80）：走 Node 边车，与真实请求同一条路、
-    /// 同一代理决议（已保存的设置）。只读：不改 net.request、回落、
-    /// clearance、代理决议，不碰 Cookie 罐，不存持久化结果。
-    /// 报告返回给设置页展示，同时写进 ext.log（requestId "net"）。
-    pub async fn diagnose(&self, cancel: &CancellationToken) -> Result<String> {
-        let (mode, proxy_url) = self.proxy_decision();
-        let proxy_desc = describe_proxy(mode, &proxy_url);
+    /// 真实分类请求检查的目标（v0.0.82）：① .cf 分类 URL——走正常
+    /// net.request 路径，检验失效镜像改写是否生效；② .xyz 同款作
+    /// 对照。用电影分类第 1 页（与页面 `_getInner` 竞速时打的 URL 同形）。
+    const DIAGNOSE_CATEGORY_URLS: [&str; 2] = [
+        "https://woggpan.xxooo.cf/vodshow/1--------1---.html",
+        "https://woggpan.888484.xyz/vodshow/1--------1---.html",
+    ];
+
+    /// 真实分类请求的超时（v0.0.82）：页面分类请求默认 16 秒
+    ///（`req()`/`_getInner` 的 timeoutSec 默认值）；Rust 侧
+    /// `fetch_once` 默认 15 秒、上限 30 秒，16 秒落在常规预算内。
+    const DIAGNOSE_CATEGORY_TIMEOUT: Duration = Duration::from_secs(16);
+
+    /// 真实分类请求的最大响应体（v0.0.82）：与 `fetch_once` 默认的
+    /// 2 MiB 一致；分类页远小于此。
+    const DIAGNOSE_CATEGORY_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+    /// 分类页列表内容标记（v0.0.82）：与页面 `_getInner` 判定“列表页
+    /// 无有效内容”用的同一组标记（MacCMS 列表页）；命中任一即有内容。
+    const DIAGNOSE_CATEGORY_MARKERS: [&str; 6] = [
+        "module-item",
+        "module-poster-item",
+        "stui-vodlist",
+        "myui-vodlist",
+        "list-item",
+        "data-date",
+    ];
+
+    /// 网络诊断探针（v0.0.80；v0.0.82：用对话框当前选中的模式跑、
+    /// 加真实分类请求检查、报告头带版本与改写状态、顶部加结论行）：
+    /// 走 Node 边车，与真实请求同一条路、同一代理决议（本次运行
+    /// 的模式）。只读：不改 net.request、回落、clearance、代理决议，
+    /// 不碰 Cookie 罐，不存持久化结果。报告返回给设置页展示，同时
+    /// 写进 ext.log（requestId "net"）。
+    ///
+    /// 真实分类请求检查：两条分类 URL 各发一次正常 net.request
+    ///（`buffered()`，与插件 net.request 同一条路：改写、冷却、
+    /// 许可、限速、Cookie、重定向跟随全在；只代理决议用本次运行
+    /// 的模式）。Node 边车不可用时与真实请求一样回落到 wreq——
+    /// 那时代理决议用已保存的设置（override 只进 Node 路径）。
+    /// 最坏耗时是 Node 探针 60 秒 + 两次分类请求各 16 秒。
+    pub async fn diagnose(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        mode: &str,
+        url: &str,
+        version: &str,
+    ) -> Result<String> {
+        let (proxy_mode, proxy_url) = self.probe_proxy_decision(mode, url)?;
+        let proxy_desc = describe_proxy(proxy_mode, &proxy_url);
         let client = self.node_client(cancel).await?;
-        let report = client
+        let outcome = client
             .diagnose(json!({
                 "domains": Self::DIAGNOSE_DOMAINS,
                 "proxyUrl": proxy_url,
@@ -677,10 +733,239 @@ impl Network {
                 "egressUrls": Self::DIAGNOSE_EGRESS_URLS,
             }))
             .await?;
+        let version = version.trim();
+        let version = if version.is_empty() { "未知" } else { version };
+        let mut checks = Vec::with_capacity(Self::DIAGNOSE_CATEGORY_URLS.len());
+        let mut check_lines: Vec<String> = Vec::new();
+        for (i, url) in Self::DIAGNOSE_CATEGORY_URLS.iter().enumerate() {
+            let (detail, result) = self
+                .diagnose_category_check(url, (proxy_mode, proxy_url.clone()), cancel)
+                .await;
+            check_lines.push(format!(
+                "{} {url}\n   {detail}",
+                if i == 0 { "①" } else { "②" }
+            ));
+            checks.push(result);
+        }
+        let conclusion = Self::diagnose_conclusion(&outcome.summary, &checks);
+        let rewrite_desc = if Self::DEAD_MIRROR_REDIRECTS.is_empty() {
+            "无".to_string()
+        } else {
+            Self::DEAD_MIRROR_REDIRECTS
+                .iter()
+                .map(|(from, to)| format!("{from} → {to}"))
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        let report = format!(
+            "结论：{conclusion}\n版本：{version}（失效镜像改写：{rewrite_desc}）\n{}\n真实分类请求（走正常 net.request 路径；超时 16 秒）：\n{}",
+            outcome.report,
+            check_lines.join("\n"),
+        );
         if let Some(logs) = self.logs.lock().unwrap().clone() {
             logs.lock().unwrap().push("info", &report, "net", None);
         }
         Ok(report)
+    }
+
+    /// 探针本次运行的代理决议（v0.0.82）：对话框当前选中的模式，
+    /// 不是已保存的设置。mode/url 都空 = 老调用（无参），沿用已保
+    /// 存的设置；否则按传入模式解析（与 proxy.test 同款
+    /// `Config::for_test`），自定义地址无效时直接报错——不静默换
+    /// 成已保存的设置跑，静默换模式正是本版要修的误导。
+    fn probe_proxy_decision(
+        &self,
+        mode: &str,
+        url: &str,
+    ) -> Result<(crate::proxy::Mode, Option<String>)> {
+        if mode.is_empty() && url.is_empty() {
+            return Ok(self.proxy_decision());
+        }
+        let config =
+            crate::proxy::Config::for_test(mode, url).map_err(PluginError::invalid)?;
+        Ok((config.mode, crate::proxy::effective_proxy_url(&config)))
+    }
+
+    /// 一次真实分类请求检查（v0.0.82）：返回（详情行，结构化结果）。
+    /// 详情行只含本次实测的事实；失败时错误消息原样写（Node 的
+    /// 已试/DoH/解析后缀全在里面）。
+    async fn diagnose_category_check(
+        self: &Arc<Self>,
+        url: &str,
+        proxy: (crate::proxy::Mode, Option<String>),
+        cancel: &CancellationToken,
+    ) -> (String, CategoryCheckResult) {
+        let target = match self.target(url) {
+            Ok(u) => u,
+            Err(e) => {
+                return (
+                    format!("改写：无；解析：—；失败：地址无效（{e}）"),
+                    CategoryCheckResult {
+                        rewritten_to: None,
+                        status: None,
+                        has_content: false,
+                        challenge: false,
+                        error: Some(format!("地址无效（{e}）")),
+                    },
+                );
+            }
+        };
+        let rewritten = rewrite_dead_mirror(&target);
+        let rewritten_to = rewritten
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .map(str::to_string);
+        let rewrite_text = match &rewritten_to {
+            Some(to) => format!("改写：{} → {to}", target.host_str().unwrap_or("")),
+            None => "改写：无".to_string(),
+        };
+        // 解析地址（展示用；失败时以错误后缀里那组为准——同一解析器、
+        // 先后脚查的两组，正常情况下应一致，不一致本身也是诊断信息）。
+        let effective = rewritten.unwrap_or_else(|| target.clone());
+        let addrs = match network_policy::resolve_target_keep_order(&effective, self.strict())
+            .await
+        {
+            Ok(list) => {
+                let mut ips: Vec<String> =
+                    list.iter().map(|a| a.ip().to_string()).collect();
+                ips.sort();
+                ips.dedup();
+                if ips.is_empty() {
+                    "无记录".to_string()
+                } else {
+                    ips.join(", ")
+                }
+            }
+            Err(e) => format!("解析失败（{e}）"),
+        };
+        // 与页面 req() 同款头：裸 UA + Referer 就是 URL 本身。
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", HeaderValue::from_static("Mozilla/5.0"));
+        if let Ok(v) = HeaderValue::from_str(url) {
+            headers.insert("referer", v);
+        }
+        let result = self
+            .buffered(
+                target,
+                Method::GET,
+                headers,
+                None,
+                true,
+                true,
+                Self::DIAGNOSE_CATEGORY_MAX_BYTES,
+                Self::DIAGNOSE_CATEGORY_TIMEOUT,
+                Some(proxy),
+                cancel,
+            )
+            .await;
+        match result {
+            Ok(resp) => {
+                let body = String::from_utf8_lossy(&resp.bytes);
+                let lower = body.to_ascii_lowercase();
+                let challenge = ["just a moment", "cf-browser", "access denied"]
+                    .iter()
+                    .any(|m| lower.contains(m));
+                let marker = Self::DIAGNOSE_CATEGORY_MARKERS
+                    .iter()
+                    .find(|m| body.contains(**m))
+                    .map(|s| s.to_string());
+                let status = resp.status.as_u16();
+                let mut detail = format!(
+                    "{rewrite_text}；解析：{addrs}；HTTP {status}；{}",
+                    if challenge {
+                        "挑战页".to_string()
+                    } else if let Some(m) = &marker {
+                        format!("含列表内容（{m}）")
+                    } else {
+                        "无列表内容标记".to_string()
+                    }
+                );
+                if resp.url.as_str() != url {
+                    detail.push_str(&format!("；最终地址：{}", resp.url));
+                }
+                (
+                    detail,
+                    CategoryCheckResult {
+                        rewritten_to,
+                        status: Some(status),
+                        has_content: marker.is_some(),
+                        challenge,
+                        error: None,
+                    },
+                )
+            }
+            Err(e) => (
+                format!("{rewrite_text}；解析：{addrs}；失败：{}", e.message),
+                CategoryCheckResult {
+                    rewritten_to,
+                    status: None,
+                    has_content: false,
+                    challenge: false,
+                    error: Some(e.message.clone()),
+                },
+            ),
+        }
+    }
+
+    /// 结论行（v0.0.82）：纯函数，只陈述本次测到的事实。域名小结
+    /// 来自 Node /diagnose，真实分类结果来自 `diagnose_category_check`。
+    pub(super) fn diagnose_conclusion(
+        summary: &DiagnoseSummary,
+        checks: &[CategoryCheckResult],
+    ) -> String {
+        let mut clauses: Vec<String> = summary
+            .domains
+            .iter()
+            .map(Self::diagnose_domain_verdict)
+            .collect();
+        if summary.domains.is_empty() {
+            clauses.push("无域名检查结果".to_string());
+        }
+        let mut real = String::new();
+        if let Some(first) = checks.first() {
+            let via = match &first.rewritten_to {
+                Some(to) => format!("经改写（→{to}）后"),
+                None => "（无改写）".to_string(),
+            };
+            real.push_str(&format!(
+                "真实分类请求：.cf {via}{}",
+                first.outcome_text()
+            ));
+        }
+        if let Some(second) = checks.get(1) {
+            real.push_str(&format!("；对照 .xyz {}", second.outcome_text()));
+        }
+        if real.is_empty() {
+            real.push_str("真实分类请求：未执行");
+        }
+        clauses.push(real);
+        clauses.join("；")
+    }
+
+    /// 单个域名的结论分句（v0.0.82）：只用小结里的实测计数。
+    pub(super) fn diagnose_domain_verdict(d: &DiagnoseDomainSummary) -> String {
+        if d.edges == 0 {
+            return format!("{} 无可用地址", d.host);
+        }
+        if d.http_ok == d.edges {
+            return format!("{} 全通（{}/{} 边缘）", d.host, d.http_ok, d.edges);
+        }
+        if d.http_ok > 0 {
+            return format!("{} 部分通（{}/{} 边缘）", d.host, d.http_ok, d.edges);
+        }
+        if d.tls_ok > 0 {
+            return format!("{} TLS 通但 HTTP 未成功", d.host);
+        }
+        if d.tls_fail == d.edges {
+            let mut s = format!("{} TLS 全被断", d.host);
+            if d.doh_state == "empty" {
+                s.push_str("（DoH 无记录）");
+            } else if d.doh_state == "failed" {
+                s.push_str("（DoH 查询失败）");
+            }
+            return s;
+        }
+        format!("{} 无一边缘成功", d.host)
     }
 
     async fn read_hop_wreq(
@@ -744,6 +1029,9 @@ impl Network {
         follow: bool,
         max: usize,
         timeout: Duration,
+        // v0.0.82：探针本次运行的代理决议（见 buffered）；进合并键，
+        // 不同模式的同 URL 请求不共用一条在途结果。
+        proxy_override: Option<(crate::proxy::Mode, Option<String>)>,
         cancel: &CancellationToken,
     ) -> Result<Arc<BufferedResponse>> {
         self.check_cooldown(outgoing.target.host_str().unwrap())?;
@@ -751,7 +1039,9 @@ impl Network {
             || outgoing.headers.contains_key("authorization")
             || outgoing.headers.contains_key("cookie")
         {
-            return self.read_hop(outgoing, follow, max, timeout, cancel).await;
+            return self
+                .read_hop(outgoing, follow, max, timeout, proxy_override, cancel)
+                .await;
         }
         let key = json!([
             crate::proxy::generation(),
@@ -766,6 +1056,10 @@ impl Network {
             outgoing.generation,
             follow,
             max,
+            // 代理决议不同 = 走的路不同，不能合并（见上）。
+            proxy_override
+                .as_ref()
+                .map(|(m, u)| format!("{}|{}", m.as_str(), u.as_deref().unwrap_or(""))),
         ])
         .to_string();
         let mut receiver = {
@@ -779,7 +1073,8 @@ impl Network {
                 let network = self.clone();
                 tokio::spawn(async move {
                     let cancel = CancellationToken::new();
-                    let work = network.read_hop(outgoing, follow, max, timeout, &cancel);
+                    let work =
+                        network.read_hop(outgoing, follow, max, timeout, proxy_override, &cancel);
                     tokio::pin!(work);
                     let result = loop {
                         tokio::select! {
@@ -821,6 +1116,63 @@ impl Network {
                 changed = receiver.changed() => changed.map_err(|_| PluginError::internal("网络合并请求缺少结果"))?,
             }
         }
+    }
+}
+
+/// 一次真实分类请求检查的结构化结果（v0.0.82）：结论行用；详情
+/// 行由 `diagnose_category_check` 直接拼。
+pub(super) struct CategoryCheckResult {
+    /// 改写后的 host（None = 无改写）。
+    pub(super) rewritten_to: Option<String>,
+    /// 成功时 HTTP 状态。
+    pub(super) status: Option<u16>,
+    /// 成功且 body 含列表内容标记。
+    pub(super) has_content: bool,
+    /// 成功但 body 是挑战页。
+    pub(super) challenge: bool,
+    /// 失败时的完整错误消息（含已试/DoH/解析后缀）。
+    pub(super) error: Option<String>,
+}
+
+impl CategoryCheckResult {
+    /// 结论行里的结果分句（v0.0.82）：只陈述本次测到的事实。
+    pub(super) fn outcome_text(&self) -> String {
+        if let Some(e) = &self.error {
+            return format!("失败（{}）", diagnose_short_reason(e));
+        }
+        let status = self.status.unwrap_or(0);
+        if self.challenge {
+            return format!("成功但返回挑战页（HTTP {status}）");
+        }
+        if self.has_content {
+            return format!("成功（HTTP {status}，含列表内容）");
+        }
+        format!("成功但无列表内容（HTTP {status}）")
+    }
+}
+
+/// 错误消息缩成结论行用的短原因（v0.0.82）：只按消息里的原话归类，
+/// 完整消息在报告的检查行里原样写。
+fn diagnose_short_reason(message: &str) -> String {
+    if message.contains("before secure TLS") {
+        "TLS 被断".to_string()
+    } else if message.contains("超时")
+        || message.contains("timed out")
+        || message.contains("Timeout")
+    {
+        "超时".to_string()
+    } else if message.contains("冷却") || message.contains("RATE_LIMITED") {
+        "被限流/冷却".to_string()
+    } else if message.contains("ENOTFOUND")
+        || message.contains("getaddrinfo")
+        || message.contains("解析失败")
+        || message.contains("DNS")
+    {
+        "DNS 失败".to_string()
+    } else if message.contains("502") || message.contains("503") || message.contains("504") {
+        "上游错误".to_string()
+    } else {
+        "失败".to_string()
     }
 }
 

@@ -33,6 +33,13 @@ struct MockNode {
     /// v0.0.78：每次调用的 proxyUrl（Some=经代理，None=直连），
     /// 按调用顺序记——断言回落只发生一次且第二跳是直连。
     proxy_urls: Mutex<Vec<Option<String>>>,
+    /// v0.0.82：每次 /request 的 URL，按调用顺序记——断言探针的
+    /// 真实分类请求到达 Node 时是改写后的 host。
+    urls: Mutex<Vec<String>>,
+    /// v0.0.82：最近一次 /diagnose 的请求体（与 /request 共用
+    /// `last` 会互相覆盖——探针先调 /diagnose、再调两次 /request，
+    /// 读 `last` 拿到的已是分类请求）。
+    diagnose_last: Mutex<Option<Value>>,
 }
 
 struct MockUpstream {
@@ -72,6 +79,8 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
         proxy_error: Default::default(),
         direct_error: Default::default(),
         proxy_urls: Default::default(),
+        urls: Default::default(),
+        diagnose_last: Default::default(),
     });
     let health = state.clone();
     let request = state.clone();
@@ -90,9 +99,12 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
                 let state = diagnose.clone();
                 async move {
                     *state.last.lock().unwrap() = Some(body.clone());
+                    *state.diagnose_last.lock().unwrap() = Some(body.clone());
                     (
                         axum::http::StatusCode::OK,
-                        Json(json!({"report": "网络诊断 2026/11/24（代理：直连）\nexample.test：系统 1 个 [93.184.216.34]；DoH 2 个 [104.17.255.47, 172.66.199.198]\n  93.184.216.34：TCP 通，TLS 通（TLSv1.3 / TLS_AES_256_GCM_SHA384，ALPN 无 ALPN，10ms）；HTTP 200，非挑战页\n出口 IP：1.2.3.4（colo=HKG，cloudflare trace）"})),
+                        // v0.0.82：/diagnose 除报告文本外再回域名小结
+                        //（结论行用）；小结数字与报告文本自洽。
+                        Json(json!({"report": "网络诊断 2026/11/24（代理：直连）\nexample.test：系统 1 个 [93.184.216.34]；DoH 2 个 [104.17.255.47, 172.66.199.198]\n  93.184.216.34：TCP 通，TLS 通（TLSv1.3 / TLS_AES_256_GCM_SHA384，ALPN 无 ALPN，10ms）；HTTP 200，非挑战页\n出口 IP：1.2.3.4（colo=HKG，cloudflare trace）", "summary": {"domains": [{"host": "example.test", "sys": 1, "doh": 2, "dohState": "ok", "edges": 3, "tlsOk": 1, "tlsFail": 0, "httpOk": 1}]}})),
                     )
                 }
             }),
@@ -109,6 +121,14 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
                     state.proxy_urls.lock().unwrap().push(proxy_url.clone());
+                    // v0.0.82：记每次 /request 的 URL（断言探针的真实
+                    // 分类请求到达 Node 时是改写后的 host）。
+                    state.urls.lock().unwrap().push(
+                        body.get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    );
                     if state.fail.load(Ordering::Relaxed) {
                         return (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -134,7 +154,17 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
                         state.direct_status.lock().unwrap().unwrap_or(200)
                     };
                     let text = if status == 200 {
-                        "node-body"
+                        // v0.0.82：分类页 URL 回带列表内容标记的 HTML，
+                        // 探针的真实分类请求检查靠它判定“含列表内容”。
+                        if body
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .is_some_and(|u| u.contains("/vodshow/"))
+                        {
+                            "<html><body><div class=\"module-item\">x</div></body></html>"
+                        } else {
+                            "node-body"
+                        }
                     } else {
                         "bad gateway"
                     };
@@ -396,7 +426,12 @@ async fn dead_mirror_request_reaches_live_mirror() {
     )
     .await
     .unwrap();
-    assert_eq!(result.json()["data"], json!("node-body"));
+    // v0.0.82：mock 对分类页 URL 回带 module-item 的 HTML（探针
+    // 的真实分类请求检查靠它判定“含列表内容”）。
+    assert_eq!(
+        result.json()["data"],
+        json!("<html><body><div class=\"module-item\">x</div></body></html>")
+    );
     let last = node.last.lock().unwrap().clone().unwrap();
     assert_eq!(
         last["url"],
@@ -526,18 +561,23 @@ async fn dead_mirror_redirect_is_logged_to_ext_log() {
 }
 
 #[tokio::test]
-async fn diagnose_does_not_rewrite_dead_mirrors() {
-    // v0.0.81：探针走 /diagnose，不经过 send_api_hop——请求体里的
-    // 域名仍是原始 .cf 域名（探针就是要测原始域名），且 ext.log 里
-    // 不应出现重定向行。
+async fn diagnose_domain_check_does_not_rewrite_but_category_check_does() {
+    // v0.0.81：探针的域名对照部分走 /diagnose，不经过 send_api_hop——
+    // 请求体里的域名仍是原始 .cf 域名（探针就是要测原始域名）。
+    // v0.0.82：探针新增的真实分类请求检查走正常 net.request 路径，
+    // .cf 分类 URL 应在 send_api_hop 里改写、写一行 ext.log（那是
+    // 检查的目的，不是探针“重写了对照”）。
     let (node_base, node, node_server) = start_mock_node().await;
     let dir = tempfile::tempdir().unwrap();
     let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
     let logs: crate::native::Logs = Default::default();
     network.set_logs(logs.clone());
-    let _report = network.diagnose(&CancellationToken::new()).await.unwrap();
+    let _report = network
+        .diagnose(&CancellationToken::new(), "", "", "")
+        .await
+        .unwrap();
     let body = node
-        .last
+        .diagnose_last
         .lock()
         .unwrap()
         .clone()
@@ -552,12 +592,16 @@ async fn diagnose_does_not_rewrite_dead_mirrors() {
         "探针域名应保持原始 .cf：{domains:?}"
     );
     let entries = logs.lock().unwrap().snapshot();
-    assert!(
-        !entries.iter().any(|e| e["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains("失效镜像重定向")),
-        "探针不应触发重定向日志"
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("失效镜像重定向"))
+            .count(),
+        1,
+        "真实分类请求检查里 .cf 应改写一次、记一行；域名对照部分不应改写"
     );
     node_server.shutdown().await;
 }
@@ -1204,16 +1248,35 @@ async fn network_diagnose_returns_report_and_logs_it_to_ext_log() {
     // v0.0.80：探针走 Node 边车 /diagnose，报告返回给调用方，同
     // 时写进 ext.log（requestId "net"）；请求体里带 4 个玩偶域名、
     // 代理描述与出口查询地址。
+    // v0.0.82：报告顶部多了结论行与版本行，末尾多了两次真实分类
+    // 请求检查（mock /request 对 vodshow URL 回带 module-item 的
+    // HTML）；/diagnose 请求体改读 diagnose_last（两次分类请求
+    // 后 `last` 已是分类请求）。
     let (node_base, node, node_server) = start_mock_node().await;
     let dir = tempfile::tempdir().unwrap();
     let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
     let logs: crate::native::Logs = Default::default();
     network.set_logs(logs.clone());
-    let report = network.diagnose(&CancellationToken::new()).await.unwrap();
-    assert!(report.starts_with("网络诊断 "), "{report}");
+    let report = network
+        .diagnose(&CancellationToken::new(), "off", "", "0.0.82-test")
+        .await
+        .unwrap();
+    assert!(report.starts_with("结论："), "{report}");
+    assert!(report.contains("版本：0.0.82-test（失效镜像改写："), "{report}");
+    assert!(report.contains("网络诊断 2026/11/24（代理：直连）"), "{report}");
     assert!(report.contains("出口 IP：1.2.3.4"), "{report}");
+    assert!(report.contains("真实分类请求"), "{report}");
+    assert!(
+        report.contains("① https://woggpan.xxooo.cf/vodshow/1--------1---.html"),
+        "{report}"
+    );
+    assert!(
+        report.contains("② https://woggpan.888484.xyz/vodshow/1--------1---.html"),
+        "{report}"
+    );
+    assert!(report.contains("含列表内容（module-item）"), "{report}");
     let body = node
-        .last
+        .diagnose_last
         .lock()
         .unwrap()
         .clone()
@@ -1234,10 +1297,17 @@ async fn network_diagnose_returns_report_and_logs_it_to_ext_log() {
         "应带 2 个出口查询地址：{body}"
     );
     let entries = logs.lock().unwrap().snapshot();
+    // v0.0.82：真实分类请求检查的 .cf 改写行先写进 ext.log，报告
+    // 行在后——找含“网络诊断”的那条，不取第一条 requestId 为 net 的。
     let line = entries
         .iter()
-        .find(|e| e["requestId"] == "net")
-        .expect("应有一条 requestId 为 net 的日志");
+        .find(|e| {
+            e["requestId"] == "net"
+                && e["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("网络诊断 "))
+        })
+        .expect("应有一条 requestId 为 net 的探针报告日志");
     assert_eq!(line["level"], "info");
     assert!(
         line["text"].as_str().unwrap().contains("网络诊断 "),
@@ -1245,6 +1315,259 @@ async fn network_diagnose_returns_report_and_logs_it_to_ext_log() {
         line["text"]
     );
     node_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnose_uses_dialog_selected_proxy_mode_not_saved() {
+    // v0.0.82：已保存的是直连（fallback_network Mode::Off），但
+    // 对话框当前选的是自定义——探针的域名对照与两次真实分类请求
+    // 都必须走自定义代理，不能静默用已保存的直连跑。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
+    let report = network
+        .diagnose(
+            &CancellationToken::new(),
+            "custom",
+            "http://127.0.0.1:7890",
+            "0.0.82",
+        )
+        .await
+        .unwrap();
+    let body = node
+        .diagnose_last
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应调过 /diagnose");
+    assert_eq!(
+        body["proxyUrl"].as_str().unwrap(),
+        "http://127.0.0.1:7890",
+        "域名对照应带对话框选中的自定义代理：{body}"
+    );
+    assert_eq!(
+        body["proxyDesc"].as_str().unwrap(),
+        "自定义 http://127.0.0.1:7890",
+        "报告头代理描述应是自定义：{body}"
+    );
+    // 两次真实分类请求各调一次 /request，且都经自定义代理。
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        *node.proxy_urls.lock().unwrap(),
+        vec![
+            Some("http://127.0.0.1:7890".to_string()),
+            Some("http://127.0.0.1:7890".to_string())
+        ],
+        "两次真实分类请求都应用对话框选中的代理，不用已保存的直连"
+    );
+    assert!(
+        report.contains("版本：0.0.82（失效镜像改写："),
+        "报告头应带传入的版本号：{report}"
+    );
+    node_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnose_category_check_reports_rewrite_and_content() {
+    // v0.0.82：两次真实分类请求走正常 net.request 路径——① .cf
+    // 到达 Node 时已是改写后的 .xyz URL（SNI/Host 的证明），报告
+    // 里写明改写、解析地址、HTTP 200、含列表内容；② 对照不改写。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
+    let report = network
+        .diagnose(&CancellationToken::new(), "off", "", "0.0.82")
+        .await
+        .unwrap();
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2, "应正好发两次分类请求");
+    assert_eq!(
+        *node.urls.lock().unwrap(),
+        vec![
+            "https://woggpan.888484.xyz/vodshow/1--------1---.html".to_string(),
+            "https://woggpan.888484.xyz/vodshow/1--------1---.html".to_string(),
+        ],
+        "① .cf 到达 Node 时应已改写为 .xyz（与 ② 同 URL）"
+    );
+    assert!(
+        report.contains("改写：woggpan.xxooo.cf → woggpan.888484.xyz"),
+        "① 应写明改写：{report}"
+    );
+    assert!(report.contains("改写：无"), "② 对照不应改写：{report}");
+    assert!(report.contains("HTTP 200"), "{report}");
+    assert!(report.contains("含列表内容（module-item）"), "{report}");
+    assert!(
+        report.contains("真实分类请求：.cf 经改写（→woggpan.888484.xyz）后成功（HTTP 200，含列表内容）"),
+        "结论应点名改写后成功：{report}"
+    );
+    assert!(
+        report.contains("对照 .xyz 成功（HTTP 200，含列表内容）"),
+        "结论应有点名对照成功：{report}"
+    );
+    node_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnose_category_check_reports_failure_verbatim() {
+    // v0.0.82：两次真实分类请求都失败时，报告原样写错误消息
+    //（含已试/DoH/解析后缀——真机上的后缀来自 Node，本用例只断
+    // 言失败原样上报、不重试、不吞掉），结论点名失败。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
+    node.fail.store(true, Ordering::Relaxed);
+    let report = network
+        .diagnose(&CancellationToken::new(), "off", "", "0.0.82")
+        .await
+        .unwrap();
+    assert_eq!(node.calls.load(Ordering::Relaxed), 2, "失败也不重试");
+    assert!(
+        report.contains("失败：Node 边车请求失败：mock node down"),
+        "失败应原样写进报告：{report}"
+    );
+    assert!(
+        report.contains("真实分类请求：.cf 经改写（→woggpan.888484.xyz）后失败（失败）"),
+        "结论应点名改写后失败：{report}"
+    );
+    assert!(report.contains("对照 .xyz 失败（失败）"), "{report}");
+    node_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnose_rejects_invalid_custom_proxy() {
+    // v0.0.82：自定义地址无效时直接报错，不静默换成已保存的设置跑。
+    let (node_base, _node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
+    let err = network
+        .diagnose(&CancellationToken::new(), "custom", "not a url", "0.0.82")
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("代理地址"), "{}", err.message);
+    let err = network
+        .diagnose(&CancellationToken::new(), "bogus", "", "0.0.82")
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("代理模式"), "{}", err.message);
+    node_server.shutdown().await;
+}
+
+fn diagnose_domain_summary(
+    host: &str,
+    sys: usize,
+    doh: usize,
+    doh_state: &str,
+    edges: usize,
+    tls_ok: usize,
+    tls_fail: usize,
+    http_ok: usize,
+) -> crate::node::DiagnoseDomainSummary {
+    crate::node::DiagnoseDomainSummary {
+        host: host.to_string(),
+        sys,
+        doh,
+        doh_state: doh_state.to_string(),
+        edges,
+        tls_ok,
+        tls_fail,
+        http_ok,
+    }
+}
+
+fn diagnose_check(
+    rewritten_to: Option<&str>,
+    status: Option<u16>,
+    has_content: bool,
+    challenge: bool,
+    error: Option<&str>,
+) -> super::api::CategoryCheckResult {
+    super::api::CategoryCheckResult {
+        rewritten_to: rewritten_to.map(str::to_string),
+        status,
+        has_content,
+        challenge,
+        error: error.map(str::to_string),
+    }
+}
+
+#[test]
+fn diagnose_conclusion_all_live_and_rewrite_success() {
+    // v0.0.82：结论行——.xyz/.net 全通、.cf TLS 全被断（DoH 无记录）、
+    // 真实分类请求经改写后成功、对照成功。按 09:28 真机探针的数字拼。
+    let summary = crate::node::DiagnoseSummary {
+        domains: vec![
+            diagnose_domain_summary("woggpan.888484.xyz", 5, 2, "ok", 7, 7, 0, 7),
+            diagnose_domain_summary("www.wogg.net", 2, 2, "ok", 4, 4, 0, 4),
+            diagnose_domain_summary("woggpan.xxooo.cf", 1, 0, "empty", 1, 0, 1, 0),
+            diagnose_domain_summary("wogg.xxooo.cf", 1, 0, "empty", 1, 0, 1, 0),
+        ],
+    };
+    let checks = vec![
+        diagnose_check(Some("woggpan.888484.xyz"), Some(200), true, false, None),
+        diagnose_check(None, Some(200), true, false, None),
+    ];
+    assert_eq!(
+        super::Network::diagnose_conclusion(&summary, &checks),
+        "woggpan.888484.xyz 全通（7/7 边缘）；www.wogg.net 全通（4/4 边缘）；woggpan.xxooo.cf TLS 全被断（DoH 无记录）；wogg.xxooo.cf TLS 全被断（DoH 无记录）；真实分类请求：.cf 经改写（→woggpan.888484.xyz）后成功（HTTP 200，含列表内容）；对照 .xyz 成功（HTTP 200，含列表内容）"
+    );
+}
+
+#[test]
+fn diagnose_conclusion_real_request_failure_names_reason() {
+    // v0.0.82：结论行——改写后仍失败时点名原因（TLS 被断），对照成功。
+    let summary = crate::node::DiagnoseSummary {
+        domains: vec![diagnose_domain_summary(
+            "woggpan.888484.xyz",
+            5,
+            2,
+            "ok",
+            7,
+            7,
+            0,
+            7,
+        )],
+    };
+    let checks = vec![
+        diagnose_check(
+            Some("woggpan.888484.xyz"),
+            None,
+            false,
+            false,
+            Some("Node 边车请求失败：Client network socket disconnected before secure TLS connection was established（已试: 198.20.0.19；DoH 无结果；仅 1 个地址，无处可换）（解析: 198.20.0.19:443；共 1 个地址）"),
+        ),
+        diagnose_check(None, Some(200), true, false, None),
+    ];
+    let conclusion = super::Network::diagnose_conclusion(&summary, &checks);
+    assert!(
+        conclusion.contains("真实分类请求：.cf 经改写（→woggpan.888484.xyz）后失败（TLS 被断）"),
+        "{conclusion}"
+    );
+    assert!(
+        conclusion.contains("对照 .xyz 成功（HTTP 200，含列表内容）"),
+        "{conclusion}"
+    );
+}
+
+#[test]
+fn diagnose_domain_verdict_covers_no_address_partial_and_doh_failed() {
+    // v0.0.82：结论分句——无可用地址、部分通、DoH 查询失败三种分支。
+    assert_eq!(
+        super::Network::diagnose_domain_verdict(&diagnose_domain_summary(
+            "x.test", 0, 0, "empty", 0, 0, 0, 0
+        )),
+        "x.test 无可用地址"
+    );
+    assert_eq!(
+        super::Network::diagnose_domain_verdict(&diagnose_domain_summary(
+            "x.test", 2, 1, "ok", 3, 2, 0, 1
+        )),
+        "x.test 部分通（1/3 边缘）"
+    );
+    assert_eq!(
+        super::Network::diagnose_domain_verdict(&diagnose_domain_summary(
+            "x.test", 1, 0, "failed", 1, 0, 1, 0
+        )),
+        "x.test TLS 全被断（DoH 查询失败）"
+    );
 }
 
 #[test]

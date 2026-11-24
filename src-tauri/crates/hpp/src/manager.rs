@@ -989,12 +989,15 @@ impl PluginManager {
         Ok(())
     }
 
-    /// 网络诊断探针（v0.0.80）：只读诊断，见 `Network::diagnose`。
-    /// 走首个已启用 WebHome 插件的 Network（探针量的就是 WebHome
-    /// 那条路；代理决议与 Node 边车全局共享，换哪个插件结果相同，
-    /// 差别只在报告写进哪个插件的 ext.log）；没有 WebHome 插件时
-    /// 走首个已启用插件的 Network；没有可用插件时报错。
-    pub async fn network_diagnose(&self) -> Result<String> {
+    /// 网络诊断探针（v0.0.80；v0.0.82：用对话框当前选中的模式跑）：
+    /// 只读诊断，见 `Network::diagnose`。走首个已启用 WebHome 插件的
+    /// Network（探针量的就是 WebHome 那条路；代理决议与 Node 边车全局
+    /// 共享，换哪个插件结果相同，差别只在报告写进哪个插件的 ext.log）；
+    /// 没有 WebHome 插件时走首个已启用插件的 Network；没有可用插件时报错。
+    /// mode/url/version 是设置页对话框当前的值：mode 是当前选中的代理
+    /// 模式（跟随系统/自定义/直连），url 是自定义地址（非自定义时为空），
+    /// version 是应用版本（前端 `__APP_VERSION__`，报告头用）。
+    pub async fn network_diagnose(&self, mode: &str, url: &str, version: &str) -> Result<String> {
         let plugins = self.list().await;
         let target = plugins
             .iter()
@@ -1007,7 +1010,7 @@ impl PluginManager {
         };
         let network = self.network(&id).await?;
         network
-            .diagnose(&tokio_util::sync::CancellationToken::new())
+            .diagnose(&tokio_util::sync::CancellationToken::new(), mode, url, version)
             .await
     }
     /// WebHome 缓存与插件共用同一份存储（store.rs），不是另一份副本。

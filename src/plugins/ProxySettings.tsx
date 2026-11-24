@@ -3,6 +3,7 @@ import { IChevR, IClose, ILink } from "../icons";
 import { pluginCommand, pluginError } from "./client";
 import { useHost } from "./HostContext";
 import { registerBackHandler } from "../back";
+import { APP_VERSION } from "../environment";
 
 type Mode = "system" | "custom" | "off";
 type Config = { mode: Mode; url: string };
@@ -21,8 +22,9 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
   const [mode, setMode] = useState<Mode>("system"), [url, setUrl] = useState("");
   const [ready, setReady] = useState(false), [busy, setBusy] = useState(""), [error, setError] = useState("");
   const [probe, setProbe] = useState<Probe | null>(null), [visible, setVisible] = useState(false);
-  // 网络诊断探针（v0.0.80）：按已保存的代理设置跑，结果同时写入
-  // 所用插件的运行日志（见 hpp net.diagnose）。
+  // 网络诊断探针（v0.0.80；v0.0.82：按对话框当前选中的模式跑，
+  // 不是已保存的设置；报告头带应用版本与改写状态、顶部带结论行，
+  // 结果同时写入所用插件的运行日志，见 hpp net.diagnose）。
   const [report, setReport] = useState<string | null>(null);
   const targets = sources.filter(p=>p.endpoint?.url);
   const [target, setTarget] = useState(targets[0]?.endpoint?.url || "");
@@ -33,7 +35,7 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
     if(pending.current)return;pending.current=true;setBusy(action);setError("");
     try {
       if(action==="test") setProbe(await pluginCommand<Probe>("proxy.test",{mode,url:mode==="custom"?url:"",target}));
-      else if(action==="diagnose") setReport(await pluginCommand<string>("net.diagnose"));
+      else if(action==="diagnose") setReport(await pluginCommand<string>("net.diagnose",{mode,url:mode==="custom"?url:"",version:APP_VERSION}));
       else { const v=await pluginCommand<Config>("proxy.set",{mode,url:mode==="custom"?url:""});onSaved(v); }
     } catch(e){setError(pluginError(e));} finally {pending.current=false;setBusy("");}
   };
@@ -47,8 +49,8 @@ function ProxyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (v: C
     <datalist id="proxy-test-targets">{targets.map(p=><option key={p.meta.id} value={p.endpoint!.url}>{p.meta.name}</option>)}</datalist>
     <p>测试仅检查所填地址的 HTTP 连通性，不修改已保存的代理。</p>
     {error&&<p role="alert" className="hg-proxy-error">{error}{!ready&&<button onClick={()=>void load()}>重新读取</button>}</p>}
-    <p role="status">{busy==="test"?"正在测试连接…":busy==="diagnose"?"正在诊断网络…（约十几秒）":probe?`${probe.ok?"连接正常":probe.error||"连接失败"} · ${probe.ms} ms`:"保存后，新请求立即使用所选模式。"}</p>
-    {report&&<><p>按已保存的代理设置诊断，结果同时写入所用插件的运行日志。</p><pre className="hg-diagnose-report">{report}</pre></>}
+    <p role="status">{busy==="test"?"正在测试连接…":busy==="diagnose"?"正在诊断网络…（约半分钟）":probe?`${probe.ok?"连接正常":probe.error||"连接失败"} · ${probe.ms} ms`:"保存后，新请求立即使用所选模式。"}</p>
+    {report&&<><p>按当前选中的代理模式诊断（不改已保存的设置），结果同时写入所用插件的运行日志。</p><pre className="hg-diagnose-report">{report}</pre></>}
     <footer><button disabled={disabled||!target.trim()} onClick={()=>void run("test")}>测试连接</button><button disabled={disabled} onClick={()=>void run("diagnose")}>{busy==="diagnose"?"诊断中…":"网络诊断"}</button><button className="hg-watch-action" disabled={disabled} onClick={()=>void run("save")}>{busy==="save"?"保存中…":"保存代理"}</button></footer>
   </dialog>;
 }

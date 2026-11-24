@@ -244,9 +244,11 @@ impl NodeClient {
         })
     }
 
-    /// 网络诊断探针（v0.0.80）：POST /diagnose，返回报告文本。
+    /// 网络诊断探针（v0.0.80）：POST /diagnose，返回报告文本与域名小结。
     /// 边车内部 60 秒截止；本侧超时放 65 秒，让边车先收尾回报告。
-    pub async fn diagnose(&self, body: Value) -> Result<String> {
+    /// v0.0.82：小结是每域名的实测计数（Rust 侧拼结论行用），缺失时
+    /// 直接报错——静默拼一条空结论比报错更误导。
+    pub async fn diagnose(&self, body: Value) -> Result<DiagnoseOutcome> {
         let rsp = self
             .post_json("/diagnose", body, Duration::from_secs(65))
             .await?;
@@ -264,13 +266,51 @@ impl NodeClient {
                 format!("网络诊断失败：{message}"),
             ));
         }
-        v.get("report")
+        let report = v
+            .get("report")
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| {
                 PluginError::new("INTERNAL", "Node 边车 /diagnose 未返回报告")
-            })
+            })?;
+        let summary: DiagnoseSummary = serde_json::from_value(
+            v.get("summary")
+                .cloned()
+                .ok_or_else(|| PluginError::new("INTERNAL", "Node 边车 /diagnose 未返回域名小结"))?,
+        )
+        .map_err(|_| PluginError::new("INTERNAL", "Node 边车 /diagnose 域名小结格式无效"))?;
+        Ok(DiagnoseOutcome { report, summary })
     }
+}
+
+/// 网络诊断探针返回的域名小结（v0.0.82）：每域名的实测计数，Rust 侧
+/// 拼结论行用。edges 是去重后的边缘数，是 tls_ok/tls_fail/http_ok
+/// 的分母（sys 与 doh 可能重叠，不能直接相加）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DiagnoseDomainSummary {
+    pub host: String,
+    pub sys: usize,
+    pub doh: usize,
+    pub doh_state: String,
+    pub edges: usize,
+    pub tls_ok: usize,
+    pub tls_fail: usize,
+    pub http_ok: usize,
+}
+
+/// 网络诊断探针返回的域名小结（v0.0.82）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct DiagnoseSummary {
+    pub domains: Vec<DiagnoseDomainSummary>,
+}
+
+/// 网络诊断探针的完整返回（v0.0.82）：报告文本 + 域名小结。
+#[derive(Debug, Clone)]
+pub struct DiagnoseOutcome {
+    pub report: String,
+    pub summary: DiagnoseSummary,
 }
 
 #[cfg(test)]
@@ -363,7 +403,7 @@ mod tests {
                     }
                     (
                         axum::http::StatusCode::OK,
-                        Json(json!({"report": "网络诊断 2026/11/24（代理：直连）\nexample.test：系统 1 个 [93.184.216.34]；DoH 2 个 [104.17.255.47, 172.66.199.198]\n出口 IP：1.2.3.4（colo=HKG，cloudflare trace）"})),
+                        Json(json!({"report": "网络诊断 2026/11/24（代理：直连）\nexample.test：系统 1 个 [93.184.216.34]；DoH 2 个 [104.17.255.47, 172.66.199.198]\n出口 IP：1.2.3.4（colo=HKG，cloudflare trace）", "summary": {"domains": [{"host": "example.test", "sys": 1, "doh": 2, "dohState": "ok", "edges": 3, "tlsOk": 1, "tlsFail": 0, "httpOk": 1}]}})),
                     )
                 }),
             );
@@ -457,14 +497,18 @@ mod tests {
     #[tokio::test]
     async fn diagnose_returns_report_and_maps_failure() {
         // v0.0.80：/diagnose 200 回报告文本；500 转 INTERNAL 错误。
+        // v0.0.82：同时回域名小结，供结论行用。
         let (base, _state, server) = serve_mock().await;
         let client = NodeClient::new(base).unwrap();
-        let report = client
+        let outcome = client
             .diagnose(json!({"domains": ["example.test"]}))
             .await
             .unwrap();
-        assert!(report.contains("网络诊断"), "{report}");
-        assert!(report.contains("出口 IP：1.2.3.4"), "{report}");
+        assert!(outcome.report.contains("网络诊断"), "{}", outcome.report);
+        assert!(outcome.report.contains("出口 IP：1.2.3.4"), "{}", outcome.report);
+        assert_eq!(outcome.summary.domains.len(), 1);
+        assert_eq!(outcome.summary.domains[0].host, "example.test");
+        assert_eq!(outcome.summary.domains[0].http_ok, 1);
         let err = client
             .diagnose(json!({"domains": ["boom.invalid"]}))
             .await

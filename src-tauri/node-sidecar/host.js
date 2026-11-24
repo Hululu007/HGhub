@@ -853,8 +853,10 @@ function readJsonBody(req) {
 // 代理决议，不碰 Cookie 罐，结果不持久化。入口是设置页的“网络诊断”
 // 按钮（hpp 命令 net.diagnose → Rust Network::diagnose → POST
 // /diagnose）。与真实请求同一条路、同一代理决议（proxyUrl 由 Rust
-// 按已保存的设置传进来）；DoH 对照直接调 fetchDohAddrs，不受
-// doFetch“系统列表不够用才查”的限制——探针就是要对照两边。
+// 按对话框当前选中的模式传进来，v0.0.82；之前是已保存的设置）；DoH
+// 对照直接调 fetchDohAddrs，不受 doFetch“系统列表不够用才查”的
+// 限制——探针就是要对照两边。v0.0.82 起 /diagnose 除报告文本外再回
+// 一份域名小结（每域名的实测计数），Rust 侧拼结论行用。
 // ---------------------------------------------------------------------------
 const DIAGNOSE_TLS_TIMEOUT_MS = 5000;
 const DIAGNOSE_HTTP_TIMEOUT_MS = 10000;
@@ -902,7 +904,8 @@ function probeTls(host, ip, timeoutMs, port = 443) {
 }
 
 // 握手通的边缘再发一次 HTTPS GET（钉死该 IP，与真实请求同款
-// UA/头）：记状态码与 body 是否挑战页。
+// UA/头）：记状态码与 body 是否挑战页。返回 {text, ok}：ok 只在
+// 2xx 且非挑战页时为真（v0.0.82：结论行要按边缘计数，文本不够）。
 async function probeHttp(host, ip, port, proxyUrl, deadline) {
   const timeoutMs = Math.max(1, Math.min(DIAGNOSE_HTTP_TIMEOUT_MS, deadline - Date.now()));
   try {
@@ -912,14 +915,18 @@ async function probeHttp(host, ip, port, proxyUrl, deadline) {
       timeoutMs,
     );
     const body = Buffer.from(res.bodyBase64 || '', 'base64').toString('utf8');
-    return `${res.status}，${CHALLENGE_RE.test(body) ? '挑战页' : '非挑战页'}`;
+    const challenge = CHALLENGE_RE.test(body);
+    return { text: `${res.status}，${challenge ? '挑战页' : '非挑战页'}`, ok: res.status >= 200 && res.status < 300 && !challenge };
   } catch (e) {
-    return `失败（${oneLine((e && e.message) || String(e))}）`;
+    return { text: `失败（${oneLine((e && e.message) || String(e))}）`, ok: false };
   }
 }
 
 // 一个域名：系统解析与 DoH 各查一遍（并行），去重后逐边缘握手
-// （并行），握手通的再发 HTTPS GET（并行）。
+// （并行），握手通的再发 HTTPS GET（并行）。返回 {lines, summary}：
+// summary 是本次实测的计数（v0.0.82：Rust 侧拼结论行用；edges 是
+// 去重后的边缘数，是 tlsOk/tlsFail/httpOk 的分母——sys 与 doh
+// 可能重叠，不能直接相加）。
 async function diagnoseDomain(host, proxyUrl, port, deadline) {
   const lines = [];
   const [sys, doh] = await Promise.all([
@@ -938,9 +945,10 @@ async function diagnoseDomain(host, proxyUrl, port, deadline) {
   for (const a of [...sys, ...doh.addrs]) {
     if (!seen.has(a.address)) { seen.add(a.address); ips.push(a.address); }
   }
+  const summary = { host, sys: sys.length, doh: doh.addrs.length, dohState: doh.state, edges: ips.length, tlsOk: 0, tlsFail: 0, httpOk: 0 };
   if (ips.length === 0) {
     lines.push('  无可用地址，未做握手');
-    return lines;
+    return { lines, summary };
   }
   const handshakes = await Promise.all(ips.map((ip) => probeTls(host, ip, DIAGNOSE_TLS_TIMEOUT_MS, port)));
   const httpResults = new Map();
@@ -950,9 +958,12 @@ async function diagnoseDomain(host, proxyUrl, port, deadline) {
   for (const h of handshakes) {
     if (!h.tcpOk) lines.push(`  ${h.ip}：TCP 不通（${h.error}，${h.ms}ms）`);
     else if (!h.tlsOk) lines.push(`  ${h.ip}：TCP 通，TLS 失败（${h.error}，${h.ms}ms）`);
-    else lines.push(`  ${h.ip}：TCP 通，TLS 通（${h.cipher}，ALPN ${h.alpn || '无 ALPN'}，${h.ms}ms）；HTTP ${httpResults.get(h.ip)}`);
+    else lines.push(`  ${h.ip}：TCP 通，TLS 通（${h.cipher}，ALPN ${h.alpn || '无 ALPN'}，${h.ms}ms）；HTTP ${httpResults.get(h.ip).text}`);
   }
-  return lines;
+  summary.tlsOk = handshakes.filter((h) => h.tlsOk).length;
+  summary.tlsFail = handshakes.filter((h) => h.tcpOk && !h.tlsOk).length;
+  summary.httpOk = [...httpResults.values()].filter((r) => r.ok).length;
+  return { lines, summary };
 }
 
 // 出口 IP：cloudflare trace 优先（顺带记 colo），不可用时换下一个。
@@ -992,16 +1003,18 @@ async function diagnose(body) {
   const deadline = Date.now() + DIAGNOSE_DEADLINE_MS;
   const lines = [`网络诊断 ${new Date().toLocaleString('zh-CN', { hour12: false })}（代理：${proxyDesc}）`];
   const perDomain = await Promise.all(domains.map((d) => diagnoseDomain(d, proxyUrl, port, deadline)));
-  for (const part of perDomain) lines.push(...part);
+  for (const part of perDomain) lines.push(...part.lines);
   lines.push(await diagnoseEgress(egressUrls, proxyUrl, deadline));
-  return lines.join('\n');
+  // v0.0.82：除报告文本外再回一份域名小结（每域名的实测计数），
+  // Rust 侧拼结论行用；报告文本本身一字不动。
+  return { report: lines.join('\n'), summary: { domains: perDomain.map((p) => p.summary) } };
 }
 
 async function handleDiagnose(req, res) {
   try {
     const body = await readJsonBody(req);
-    const report = await diagnose(body || {});
-    sendJson(res, 200, { report });
+    const { report, summary } = await diagnose(body || {});
+    sendJson(res, 200, { report, summary });
   } catch (e) {
     sendJson(res, 500, { error: (e && e.message) || String(e), code: 'INTERNAL' });
   }
