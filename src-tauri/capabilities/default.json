@@ -46,6 +46,8 @@
     "allow-native-player-seek",
     "allow-native-player-set-rate",
     "allow-native-player-set-volume",
-    "allow-native-player-state"
+    "allow-native-player-state",
+    "native-player:allow-register-listener",
+    "native-player:allow-remove-listener"
   ]
 }

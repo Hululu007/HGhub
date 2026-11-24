@@ -29,8 +29,35 @@ tauri::ios_plugin_binding!(init_plugin_orientation);
 /// `@_cdecl("init_plugin_share")`），只在 iOS 编译；与 orientation 同一写法。
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_share);
+/// 启动时装 panic hook：release 是 `panic = "abort"`（Cargo.toml），
+/// 任何 Rust panic 都会直接 abort 进程——不 unwind、不返回错误、
+/// 不写 debug.log。hook 在 abort 之前执行，把 message + 位置写进
+/// debug.log（绕开 DEBUG_WRITER 锁，见 logging::write_panic_record），
+/// 再把原默认 hook 也跑一遍（stderr 输出保留）。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "panic（消息不是字符串）".to_string()
+        };
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        // 截断到 500 字，避免超大消息把日志撑爆。
+        let msg: String = msg.chars().take(500).collect();
+        crate::logging::write_panic_record(&format!("[panic] {msg}（{loc}）"));
+        default_hook(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_hook();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "android")]
     let builder = builder.plugin(tauri::plugin::Builder::<tauri::Wry, ()>::new("web-login")
@@ -91,6 +118,7 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            crate::logging::set_panic_log_dir(&dir);
             network_policy::bind_security(&dir);
             hghub_hpp::proxy::bind(&dir);
             app.manage(plugins::PluginHost::new(dir.join("hpp")));

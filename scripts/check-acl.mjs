@@ -16,6 +16,17 @@
 // （webhome_call / webhome_close）由远端页面经 fm 桥调、不在 src/ 里，
 // 由 capabilities/webhome.json 覆盖，不在本检查范围。
 //
+// 再扫 addPluginListener("plugin", "event", cb) 字面量调用：前端注册
+// 插件事件监听时，Tauri 内部调 plugin:<plugin>|registerListener（取消
+// 时调 removeListener），这两个命令也要有权限，否则真机上报
+// "Command plugin:native-player|registerListener not allowed by ACL"
+// （v0.0.89 诊断日志：Feed.tsx 挂载时注册原生播放器监听，
+// native-player 的 manifest 里根本没有这两个权限）。核心插件 app 的
+// 默认权限集含 register/remove listener，default.json 里的
+// core:default 已覆盖它；其他插件须在 default.json 里显式登记
+// <plugin>:allow-register-listener / allow-remove-listener，并在
+// src-tauri/permissions/<plugin>/ 下有对应的权限定义文件。
+//
 // 跑法：node scripts/check-acl.mjs（package.json 的 check:acl）。
 // 负向测试不用改真文件：CHECK_ACL_CAPABILITY / CHECK_ACL_PERMISSIONS
 // 可指向临时文件，例如去掉 allow-clear-webhome-data 后的 default.json
@@ -71,6 +82,57 @@ function permissionFor(cmd) {
   return `allow-${cmd.replace(/_/g, "-")}`;
 }
 
+// addPluginListener("plugin", "event", cb) / addPluginListener<T>("plugin", …)：
+// 只认插件名字面量；每个插件要 registerListener 与 removeListener 两个权限。
+const LISTENER_RE = /addPluginListener\s*(?:<[^>]*>\s*)?\(\s*["']([^"']+)["']/g;
+// 任何 addPluginListener( 出现都必须能解析成字面量，否则是动态插件名、无法核对。
+const LISTENER_ANY_RE = /addPluginListener\s*(?:<[^>]*>\s*)?\(/g;
+
+const listeners = new Map(); // plugin -> "file:line"
+const unverifiableListeners = [];
+for (const file of walk(srcDir, [])) {
+  const text = readFileSync(file, "utf-8");
+  const lines = text.split("\n");
+  const literalLines = new Set();
+  for (const m of text.matchAll(LISTENER_RE)) {
+    const line = text.slice(0, m.index).split("\n").length;
+    literalLines.add(line);
+    if (!listeners.has(m[1])) listeners.set(m[1], `${file}:${line}`);
+  }
+  for (const m of text.matchAll(LISTENER_ANY_RE)) {
+    const line = text.slice(0, m.index).split("\n").length;
+    if (!literalLines.has(line))
+      unverifiableListeners.push(`${file}:${line}: ${lines[line - 1].trim()}`);
+  }
+}
+
+// 非核心插件的监听权限定义在 src-tauri/permissions/<plugin>/ 下的
+// allow-register-listener.toml / allow-remove-listener.toml 里（由
+// build.rs 的 InlinedPlugin 生成 manifest）；核心插件 app 的定义在
+// Tauri 自带权限里，不在这里查。
+function pluginPermissionDefined(plugin, perm) {
+  const cmd = perm === "allow-register-listener" ? "registerListener" : "removeListener";
+  let text;
+  try {
+    text = readFileSync(
+      join(root, "src-tauri", "permissions", plugin, `${perm}.toml`),
+      "utf-8",
+    );
+  } catch {
+    return false;
+  }
+  return (
+    new RegExp(`^identifier\\s*=\\s*"${perm}"`, "m").test(text) &&
+    new RegExp(`commands\\.allow\\s*=\\s*\\[[^\\]]*"${cmd}"[^\\]]*\\]`).test(text)
+  );
+}
+
+function listenerPermission(plugin, cmd) {
+  const short =
+    cmd === "registerListener" ? "allow-register-listener" : "allow-remove-listener";
+  return plugin === "app" ? `core:app:${short}` : `${plugin}:${short}`;
+}
+
 const capability = JSON.parse(readFileSync(capabilityPath, "utf-8"));
 const allowed = new Set(capability.permissions || []);
 const defined = new Set(
@@ -96,19 +158,57 @@ for (const [cmd, where] of [...commands.entries()].sort()) {
       .join("、")}`);
 }
 
+const listenerMissing = [];
+for (const [plugin, where] of [...listeners.entries()].sort()) {
+  for (const cmd of ["registerListener", "removeListener"]) {
+    const perm = listenerPermission(plugin, cmd);
+    const short =
+      cmd === "registerListener" ? "allow-register-listener" : "allow-remove-listener";
+    // app 是核心插件：core:default 已含它的 register/remove listener 默认权限。
+    const inCap = allowed.has(perm) || (plugin === "app" && allowed.has("core:default"));
+    const inDef = plugin === "app" || pluginPermissionDefined(plugin, short);
+    console.log(
+      `${inCap && inDef ? "OK  " : "MISS"} addPluginListener ${plugin} ${cmd} -> ${perm} (${where})`,
+    );
+    if (!inCap || !inDef)
+      listenerMissing.push(
+        `addPluginListener ${plugin} ${cmd} -> ${perm} (${where}): ${[
+          !inCap ? "default.json 缺" : "",
+          !inDef ? `permissions/${plugin}/${short}.toml 缺定义` : "",
+        ]
+          .filter(Boolean)
+          .join("、")}`,
+      );
+  }
+}
+
 let failed = false;
 if (unverifiable.length) {
   failed = true;
   console.error("\n无法核对的动态 invoke 调用（命令名不是字符串字面量）：");
   for (const u of unverifiable) console.error(`  ${u}`);
 }
+if (unverifiableListeners.length) {
+  failed = true;
+  console.error("\n无法核对的动态 addPluginListener 调用（插件名不是字符串字面量）：");
+  for (const u of unverifiableListeners) console.error(`  ${u}`);
+}
 if (missing.length) {
   failed = true;
   console.error("\n缺 ACL 权限：");
   for (const m of missing) console.error(`  ${m}`);
 }
+if (listenerMissing.length) {
+  failed = true;
+  console.error("\n缺插件监听 ACL 权限：");
+  for (const m of listenerMissing) console.error(`  ${m}`);
+}
 if (failed) {
-  console.error(`\nFAIL: ${commands.size} 个命令，${missing.length} 个缺权限，${unverifiable.length} 个无法核对`);
+  console.error(
+    `\nFAIL: ${commands.size} 个命令（${missing.length} 个缺权限，${unverifiable.length} 个无法核对）+ ${listeners.size} 个插件监听（${listenerMissing.length} 个缺权限，${unverifiableListeners.length} 个无法核对）`,
+  );
   process.exit(1);
 }
-console.log(`\nPASS: ${commands.size} 个命令，权限全在 default.json 且 app.toml 有定义`);
+console.log(
+  `\nPASS: ${commands.size} 个命令 + ${listeners.size} 个插件监听，权限全在 default.json 且有定义`,
+);

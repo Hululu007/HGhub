@@ -7,6 +7,41 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
 
 static DEBUG_WRITER: Mutex<()> = Mutex::new(());
 
+/// Panic hook 记下的 debug.log 目录（setup 时由 app_data_dir 填入）。
+/// hook 触发时 setup 早已跑完；若未记下（setup 之前就 panic），hook 静默跳过。
+static PANIC_LOG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub(crate) fn set_panic_log_dir(dir: &Path) {
+    let _ = PANIC_LOG_DIR.set(dir.to_path_buf());
+}
+
+/// panic hook 用：直接写文件，绕开 DEBUG_WRITER。
+/// hook 可能正好在某次 append_debug 持锁时触发（panic 点就是写日志处），
+/// 再拿同一把锁会死锁；这里不拿锁、不建目录（setup 已建好），只 open +
+/// write。任何失败都静默吞掉——hook 里绝不能再 panic。
+pub(crate) fn write_panic_record(message: &str) {
+    let Some(dir) = PANIC_LOG_DIR.get() else { return };
+    let at = utc_timestamp().unwrap_or_else(|_| "?".to_string());
+    let prefix = format!("[{at}] [pid={}] ", std::process::id());
+    let mut record = String::new();
+    for line in message.lines() {
+        record.push_str(&prefix);
+        record.push_str(line);
+        record.push('\n');
+    }
+    if record.is_empty() {
+        record.push_str(&prefix);
+        record.push('\n');
+    }
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("debug.log"))
+    {
+        let _ = f.write_all(record.as_bytes());
+    }
+}
+
 fn format_utc(at: OffsetDateTime) -> Result<String, String> {
     at.to_offset(UtcOffset::UTC)
         .format(&Rfc3339)

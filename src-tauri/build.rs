@@ -1,7 +1,16 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    tauri_build::build();
+    // native-player 是 Rust 内联插件（native_player::plugin()）：它的权限
+    // manifest 不在 app.toml 里，须经 InlinedPlugin 从
+    // permissions/native-player/ 生成——只加文件不改 build.rs 是不够的。
+    // v0.0.90：补 registerListener/removeListener 的权限定义，否则前端
+    // addPluginListener("native-player", …) 在真机上被 ACL 拒绝。
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .plugin("native-player", tauri_build::InlinedPlugin::new()),
+    )
+    .expect("failed to build Tauri app");
     // tauri-build links its Common Controls v6 manifest only into binary targets.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")

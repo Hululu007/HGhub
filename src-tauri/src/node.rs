@@ -257,9 +257,14 @@ fn start_engine_thread(inner: &Arc<Inner>) -> Result<()> {
             // node_start 在调用线程上跑事件循环，正常情况下永不返回；
             // 返回即引擎已死（Node 不能二次启动，只能报错，不尝试重启）。
             let rc = unsafe { node_start(argv.len() as _, argv.as_mut_ptr()) };
-            *thread_inner.startup_error.lock().unwrap() = Some(format!(
-                "Node 引擎已停止（node_start 返回 {rc}），请重启应用"
-            ));
+            let msg = format!("Node 引擎已停止（node_start 返回 {rc}），请重启应用");
+            *thread_inner.startup_error.lock().unwrap() = Some(msg.clone());
+            // v0.0.90：引擎死掉也要留一行在 debug.log（只记 startup_error
+            // 时，闪退后重开看不到引擎死没死）。info_path 的父目录就是
+            // app_data_dir（plugins.rs 里拼的 <app_data_dir>/node-sidecar.json）。
+            if let Some(dir) = info_path.parent() {
+                let _ = crate::logging::append_debug(dir, &format!("[node] {msg}"));
+            }
         })
         .map_err(|e| PluginError::internal(format!("无法启动 Node 引擎线程：{e}")))?;
     Ok(())
