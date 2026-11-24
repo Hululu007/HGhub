@@ -1,3 +1,4 @@
+mod browser;
 mod commands;
 mod clearance;
 mod download;
@@ -155,6 +156,7 @@ pub fn run() {
             webhome::webhome_call,
             webhome::webhome_player_state,
             webhome::clear_webhome_data,
+            browser::browser_close,
             native_player::native_player_open,
             native_player::native_player_close,
             native_player::native_player_play,

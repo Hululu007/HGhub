@@ -4,6 +4,7 @@
 //! × 只是隐藏，重开直接显示，换源时导航——iOS 上窗口销毁后从窗口表注销
 //! 的时机由系统把握，关了重建会撞 label 已存在。
 use crate::{
+    browser,
     clearance::{self, Clearance},
     plugins::PluginHost,
 };
@@ -102,6 +103,7 @@ fn outcome_kind(outcome: &Outcome) -> &'static str {
         Outcome::Value(_) => "Value",
         Outcome::Play { .. } => "Play",
         Outcome::OpenVod(_) => "OpenVod",
+        Outcome::OpenInAppBrowser { .. } => "OpenInAppBrowser",
         Outcome::Toast(_) => "Toast",
         Outcome::PlayerControl(..) => "PlayerControl",
         Outcome::OpenWebhome(_) => "OpenWebhome",
@@ -172,6 +174,11 @@ async fn open_webhome_inner(
         .initialization_script(SDK)
         .build()
         .map_err(err)?;
+    // iOS：WKWebView 默认不开启边缘滑动前进/后退。wo 页面详情用
+    // history.pushState，系统手势后退正好触发 history.back() 关详情。
+    // 只开系统级手势，不在 JS 里拦截手势，避免与页面内横滑冲突。
+    #[cfg(target_os = "ios")]
+    enable_back_forward_gestures(&window, app);
     // 页面按 fmpause/fmresume 感知前后台（04 §14）。
     let focused_window = window.clone();
     window.on_window_event(move |event| {
@@ -189,6 +196,25 @@ async fn open_webhome_inner(
     Ok(json!({ "url": home_page }))
 }
 
+/// iOS：给 WebHome 窗口开 WKWebView 的 back-forward 手势。Tauri 的
+/// WebviewWindowBuilder 没暴露这项，用 with_webview 拿原生 WKWebView
+/// 再开。只在建窗时开一次，窗口常驻，手势跟窗口走。开失败不影响开窗：
+/// 窗口照常可用，只是右滑回不去。
+#[cfg(target_os = "ios")]
+fn enable_back_forward_gestures(window: &WebviewWindow, app: &AppHandle) {
+    if let Err(e) = window.as_ref().with_webview(|webview| {
+        let ptr = webview.inner();
+        // SAFETY：inner() 返回的是活着的 WKWebView；with_webview 的闭包
+        // 在主线程上跑，WKWebView 的属性设置要求主线程。
+        unsafe {
+            let wk = &*(ptr as *const objc2_web_kit::WKWebView);
+            wk.setAllowsBackForwardNavigationGestures(true);
+        }
+    }) {
+        debug_log(app, &format!("[webhome] 手势开启失败：{e}"));
+    }
+}
+
 #[tauri::command]
 pub async fn webhome_close(app: AppHandle) -> Result<(), String> {
     // × 只是隐藏窗口，不销毁：iOS 上窗口销毁后从窗口表注销的时机由
@@ -201,6 +227,24 @@ pub async fn webhome_close(app: AppHandle) -> Result<(), String> {
         debug_log(&app, "[webhome] 窗口隐藏");
     }
     Ok(())
+}
+
+/// 去主窗口的 Outcome（播放 / 打开详情 / 直播 / 收藏 / 设置）处理完后
+/// 把 WebHome 窗口藏起来：主窗口原生播放器在播、WebHome 窗口盖在上面，
+/// 用户会以为点了没反应。hide-and-reuse：窗口不销毁，用户可从主窗口
+/// 底部 Webhome 页签回来。先发事件再 hide——事件已发出，主窗口那边
+/// 已经在播；hide 失败只记日志，不让整个 call 报错。
+fn hide_webhome_after_open(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        if let Err(e) = window.hide() {
+            debug_log(app, &format!("[webhome] 播放后隐藏窗口失败：{e}"));
+        } else {
+            // 与 webhome_close 同款：hide 不一定触发 Focused(false)，
+            // 补发 fmpause 让页面感知切后台。
+            let _ = window.eval("window.dispatchEvent(new Event('fmpause'))");
+            debug_log(app, "[webhome] 播放后窗口隐藏");
+        }
+    }
 }
 
 #[tauri::command]
@@ -253,6 +297,7 @@ pub async fn webhome_call(
                 main.emit("webhome-play", json!({ "media": media, "title": title }))
                     .map_err(err)?;
             }
+            hide_webhome_after_open(&app);
             Ok(json!({ "code": 0 }))
         }
         Outcome::OpenVod(detail) => {
@@ -262,6 +307,18 @@ pub async fn webhome_call(
                     json!({ "pluginId": plugin_id, "detail": detail }),
                 )
                 .map_err(err)?;
+            }
+            hide_webhome_after_open(&app);
+            Ok(json!({ "code": 0 }))
+        }
+        Outcome::OpenInAppBrowser { url, toast } => {
+            // 网盘分享链 / go.php 外链：在 App 内专用浏览器窗口打开，不走
+            // 系统浏览器；打开成功再给主窗口一句提示，别静默。WebHome
+            // 窗口不藏：浏览器窗口关掉后用户回到原来的详情页。
+            browser::open_browser(&app, &url).map_err(err)?;
+            if let Some(main) = main {
+                main.emit("webhome-toast", json!({ "message": toast }))
+                    .map_err(err)?;
             }
             Ok(json!({ "code": 0 }))
         }
@@ -292,6 +349,7 @@ pub async fn webhome_call(
                 main.emit("webhome-open-live", json!({ "pluginId": plugin_id }))
                     .map_err(err)?;
             }
+            hide_webhome_after_open(&app);
             Ok(json!({ "code": 0 }))
         }
         Outcome::OpenKeep => {
@@ -299,6 +357,7 @@ pub async fn webhome_call(
                 main.emit("webhome-open-keep", json!({ "pluginId": plugin_id }))
                     .map_err(err)?;
             }
+            hide_webhome_after_open(&app);
             Ok(json!({ "code": 0 }))
         }
         Outcome::OpenSetting => {
@@ -306,6 +365,7 @@ pub async fn webhome_call(
                 main.emit("webhome-open-setting", json!({ "pluginId": plugin_id }))
                     .map_err(err)?;
             }
+            hide_webhome_after_open(&app);
             Ok(json!({ "code": 0 }))
         }
         Outcome::SetToolbar(visible) => {

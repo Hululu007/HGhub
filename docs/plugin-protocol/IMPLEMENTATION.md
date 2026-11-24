@@ -108,10 +108,24 @@ WebHome（HTML 源）v1 已落地：`meta.webhome` 声明与 `webhome: {}` 能�
 hpp 有 5 个 WebHome 集成测试通过；`hg.env.features` 含 `"webhome"`。
 iOS 上第二个 WebView 窗口尚未真机验证，是 v1 的主要待验收项。
 
+`pan.play` / `pan.check` 已支持：网盘分享链宿主播不了，`pan.play` 在
+App 内专用浏览器窗口打开该链接并在主窗口给一句提示；`pan.check` 不做
+真实检测，全部返回 ok 占位，让页面的健康检测拿到有效目标。`fm.open`
+（`app.openExternal`）同样在应用内浏览器窗口打开外链。浏览器窗口只做
+浏览（不注入桥、不接插件能力），顶部浮动栏显示当前域名与 × 关闭按钮，
+关闭只是隐藏、再打开时复用窗口导航；非 http(s) 深链由系统接手。直链播放
+仍走 `player.playUrl` → `prepare_direct`，不受影响。
+
 v0.0.66 窗口里的 × 换成小房子控件：平时右边中部只露出一个“‹”，点它展开
 成 🏠，再点弹出源面板（`app.webhomeSources` 列源、`app.openWebhome` 切源、
 “关闭”隐藏窗口）；几秒不用自动收回右边。`ui.setToolbar` 控制的是小房子
 控件的显隐。
+
+小房子控件后来改成常显的圆形房子按钮（白房子图标、半透明深色底）：去掉
+“‹”展开步骤，点圆房子直接弹出源面板，面板内容与行为不变；几秒不用面板
+自己收起，按钮一直留着。iOS 上 WebHome 窗口开了 WKWebView 的
+back-forward 手势：页面详情用 history.pushState，右滑后退关详情；只开
+系统级手势，不在 JS 里拦截手势。手势待真机验收。
 
 v0.0.48 支持直接导入 HTML 文件为 WebHome 源：导入时按内容识别（不认扩展名），
 远程 HTML 的 `meta.webhome.homePage` 就是原地址，页面留在远端；本地 HTML 文件存进

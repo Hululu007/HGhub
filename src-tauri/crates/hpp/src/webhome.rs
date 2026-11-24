@@ -20,6 +20,13 @@ pub enum Outcome {
     Play { media: PreparedMedia, title: Option<String> },
     /// 在主窗口打开作品详情页。
     OpenVod(Value),
+    /// 在 App 内专用浏览器窗口打开一个外链（网盘分享链 / go.php 中转链）：
+    /// 宿主没有网盘播放能力，交给应用内浏览器窗口加载；toast 是给主窗口
+    /// 的提示文案。
+    OpenInAppBrowser {
+        url: String,
+        toast: String,
+    },
     /// 在主窗口显示一句话提示。
     Toast(String),
     /// 播放器控制（play/pause/seek/stop），主窗口收到后转给当前播放器。
@@ -114,6 +121,33 @@ pub async fn dispatch(
             Outcome::Play {
                 media,
                 title: p["title"].as_str().map(String::from),
+            }
+        }
+        "pan.play" => {
+            // 网盘分享链宿主播不了：不走 prepare_direct（它只接受直链），
+            // 在 App 内专用浏览器窗口打开；同时给主窗口一句提示。
+            let url = text(p, "url")?;
+            crate::model::url(url, true, true)?;
+            Outcome::OpenInAppBrowser {
+                url: url.to_string(),
+                toast: "已在应用内打开网盘链接".to_string(),
+            }
+        }
+        "pan.check" => {
+            // v1 不做真实检测：宿主没有网盘直链校验能力。返回全部 ok 占位，
+            // 让页面的健康检测拿到有效目标、播放键可点；一直报 UNSUPPORTED
+            // 的话详情页的播放键永远拿不到有效目标。
+            let items = p["items"].as_array().cloned().unwrap_or_default();
+            let results: Vec<Value> = items.iter().map(|_| json!({ "state": "ok" })).collect();
+            Outcome::Value(json!({ "results": results }))
+        }
+        "app.openExternal" => {
+            // fm.open：go.php 这类外链同样在 App 内浏览器窗口打开，不导航走页面。
+            let url = text(p, "url")?;
+            crate::model::url(url, true, true)?;
+            Outcome::OpenInAppBrowser {
+                url: url.to_string(),
+                toast: "已在应用内打开链接".to_string(),
             }
         }
         "player.playVod" | "player.playVodInline" | "app.openVod" => {

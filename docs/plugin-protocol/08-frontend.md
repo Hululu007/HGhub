@@ -239,13 +239,18 @@ WebView 窗口里打开该插件的首页（远程是 `homePage`，本地页面�
 
 主窗口负责接页面动作：直链播放（`player.playUrl`）在主窗口用同一套播放器
 全屏播出，返回/播完关闭并释放会话；详情、直播、收藏、设置走现有导航；
-页面提示（`ext.toast`）在主窗口顶部以提示条显示。播放状态由主窗口推回 Rust，
-供页面的 `player.status` 查询。同一时间至多一个 WebHome 窗口；小房子面板
+页面提示（`ext.toast`）在主窗口顶部以提示条显示；网盘分享链（`pan.play`）
+与外链（`app.openExternal`）在 App 内专用浏览器窗口打开，同时在主窗口给一句提示。
+浏览器窗口只做浏览：不注入 `window.fm` 桥、不接插件能力，顶部一条注入的
+浮动栏显示当前域名与一个 × 关闭按钮；× 只是把窗口隐藏（窗口常驻不销毁，
+再打开同一/新链接时已有窗口导航过去并显示）；页面里点“用 App 打开”这类
+非 http(s) 深链时由系统接手。
+播放状态由主窗口推回 Rust，供页面的 `player.status` 查询。同一时间至多一个 WebHome 窗口；小房子面板
 里的“关闭”只是把窗口隐藏起来（窗口一直活着，不销毁——iOS 上窗口销毁后从
-窗口表注销的时机由系统把握，关了重建会撞 label 已存在）。窗口右边中部平时
-只露出一个“‹”；点它展开成 🏠；点 🏠 弹出源面板，列出已装的 WebHome 源
-（当前打开的标出，未就绪的置灰），点一个切过去，下面一行“关闭”回主界面；
-几秒不用自动收回右边成“‹”。面板用 `app.webhomeSources` 取列表、
+窗口表注销的时机由系统把握，关了重建会撞 label 已存在）。窗口右边中部一个
+常显的圆形房子按钮（白房子图标、半透明深色底），点它直接弹出源面板，列出
+已装的 WebHome 源（当前打开的标出，未就绪的置灰），点一个切过去，下面一行
+“关闭”回主界面；几秒不用面板自己收起，按钮一直留着。面板用 `app.webhomeSources` 取列表、
 `app.openWebhome` 切源（见 [04 §14](04-host-api.md)）。重开同一插件
 直接显示（页面状态保留），打开另一插件的首页则让活着的 webview 导航到
 新首页（桥在导航后重新注入）；多次打开在宿主侧串行化。建窗仍报 label
@@ -258,9 +263,11 @@ WebView 窗口里打开该插件的首页（远程是 `homePage`，本地页面�
 显式放行。`src-tauri/capabilities/webhome.json` 给 `webhome` 窗口放行
 `webhome_call` 与 `webhome_close`（远端地址 `https://*:*` / `http://*:*`，
 `local: false`），缺了它页面每次调用都会被拒（`Command webhome_call
-not allowed by ACL`）。注意连带效应：应用命令的权限定义在
+not allowed by ACL`）。浏览器窗口同理：`src-tauri/capabilities/browser.json`
+给 `browser` 窗口放行 `browser_close`。注意连带效应：应用命令的权限定义在
 `src-tauri/permissions/app.toml`（`allow-<命令名>`，下划线变连字符）里，
 一旦应用有了自己的权限清单，本地内容的调用也要逐条放行——所以
 `capabilities/default.json` 里必须同时列出主窗口用的全部命令
-（除 `webhome_call` / `webhome_close` 只在 WebHome 窗口里调），
+（除 `webhome_call` / `webhome_close` 只在 WebHome 窗口、`browser_close`
+只在浏览器窗口里调），
 否则主窗口的功能会被一并拦掉。新增命令时两处要一起补。

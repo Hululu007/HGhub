@@ -419,11 +419,14 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 | `player.preloadArtwork` | v1 空操作，返回 `{ code: 0 }` |
 | `player.control`（别名 `ctrl`） | `action` 为 `play` / `pause` / `toggle` / `seek` / `stop`；`seek` 需 `seconds`；只对当前直链播放有效 |
 | `player.status`（别名 `stat`） | 返回主窗口推送的播放状态 `{ playing, positionSec, durationSec }` |
+| `pan.play` | 网盘分享链：宿主播不了，在 App 内专用浏览器窗口打开该链接，同时在主窗口给一句提示；参数 `{ type, url, password, title, name, ... }`，`url` 必填 |
+| `pan.check` | 网盘链接可用性占位：v1 不做真实检测，全部返回 `{ results: [{ state: "ok" }] }`，让页面的健康检测拿到有效目标、播放键可点 |
 | `app.search`（别名 `search`） | 调绑定插件的 `search.search`，返回原样结果 |
 | `app.openVod` / `app.openLive` / `app.openKeep` / `app.openSetting` | 在主窗口打开详情 / 直播 / 收藏（我的） / 设置；`openVod` 的参数与 `player.playVod` 相同 |
 | `app.history`（别名 `history_list`） | 返回绑定插件的本地观看记录（按 `lastProgress`，最新在前，最多 50 条） |
 | `app.webhomeSources` | 列出已装的 WebHome 源 `[{ id, name, current, ready }]`：`current` 是当前窗口绑定的源，`ready` 是已启用且已就绪；供窗口里的小房子面板用 |
 | `app.openWebhome` | 切到另一个 WebHome 源：宿主让活着的 webview 导航到它的首页（窗口不重建，见 [08 §10](08-frontend.md)）；参数 `{ pluginId }` |
+| `app.openExternal` | 在 App 内专用浏览器窗口打开一个外链（`fm.open` 的目标方法）；参数 `{ url }` |
 | `cache.set` / `cache.get` / `cache.del` / `cache.clear` | 读写绑定插件的存储，键统一加 `webhome:` 前缀；`clear` 只清该前缀下的键 |
 | `config.info`（别名 `config_info`） | `{ id, url, desc, version }`：绑定插件的 id、首页的实际打开地址、简介与版本；本地页面（`meta.webhome.localPage`）的 url 是宿主打开时现算的回环地址 |
 | `site.info`（别名 `site`） | `{ key, name, type: "webhome" }` |
@@ -435,14 +438,14 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 | `navigation.back` / `navigation.reload` | 页面内处理：有历史则后退，否则关闭窗口；重载当前页 |
 | `ui.getViewport` | 页面内处理，返回 `{ width, height, devicePixelRatio }` |
 
-以下方法 v1 **不支持**，调用抛 `UNSUPPORTED`：`pan.*`（投屏）、`ui.setChrome`、
-`ui.restoreChrome`。
+以下方法 v1 **不支持**，调用抛 `UNSUPPORTED`：`ui.setChrome`、`ui.restoreChrome`。
 
 限制：同一时间至多一个 WebHome 窗口；打开另一插件的首页会让活着的
 webview 导航到新首页（窗口不重建，见 [08 §10](08-frontend.md)）。窗口右边
-中部有一个宿主注入的小房子控件：平时只露出一个“‹”，点它展开成 🏠，
-再点弹出源面板（列已装的 WebHome 源，点一个切过去，下面一行“关闭”回主
-界面）；几秒不用自动收回右边。页面自己的返回键关不掉窗口。
+中部有一个宿主注入的小房子控件：一个常显的圆形房子按钮（白房子图标、
+半透明深色底），点它直接弹出源面板（列已装的 WebHome 源，点一个切过去，
+下面一行“关闭”回主界面）；几秒不用面板自己收起，按钮一直留着。页面自己
+的返回键关不掉窗口。
 页面是用户打开的浏览面，与 [§12](#12-hgwebview可选) 的登录视图不同：登录视图
 不能访问应用桥接接口，WebHome 页面则通过本节的桥与宿主交互。
 直链播放的会话刷新是空操作（返回原会话）；页面关闭不影响已打开的详情页。

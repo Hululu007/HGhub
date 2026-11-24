@@ -1,0 +1,1 @@
+{"$schema":"../gen/schemas/desktop-schema.json","description":"应用内浏览器窗口：网盘分享链 / go.php 外链在 App 内打开。窗口只加载远端 http(s) 页面，不注入插件桥；唯一的命令是 browser_close（注入的浮动栏 × 按钮调它藏起窗口）。","identifier":"browser","local":false,"permissions":["allow-browser-close"],"remote":{"urls":["https://*:*","http://*:*"]},"windows":["browser"]}

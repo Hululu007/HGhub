@@ -160,6 +160,10 @@
     req: fmReq,
     res: net.resourceUrl,
     play: player.playUrl,
+    open: function (url) {
+      if (url && typeof url === "object") return post("app.openExternal", url);
+      return post("app.openExternal", { url: url });
+    },
     vod: player.playVod,
     vodInline: player.playVodInline,
     search: fmSearch,
@@ -188,36 +192,28 @@
   window.fongmiClient = { mode: "webhome", isLeanback: false };
 
   // 小房子：WebHome 窗口的源切换与关闭控件（04 §14、08 §10）。
-  // 平时只在右边中部露出一个“‹”；点它展开成 🏠；点 🏠 弹出源面板
-  // （列已装的 WebHome 源，点一个切过去，下面一行“关闭”回主界面）；
-  // 几秒不用自动收回右边。窗口常驻不销毁，× 由此控件代替。
-  var houseTab = document.createElement("button");
-  houseTab.id = "hg-webhome-tab";
-  houseTab.type = "button";
-  houseTab.setAttribute("aria-label", "展开");
-  houseTab.textContent = "‹";
-  houseTab.style.cssText = "position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483647;width:18px;height:48px;border:none;border-radius:8px 0 0 8px;background:rgba(0,0,0,.55);color:#fff;font-size:18px;line-height:1;padding:0;cursor:pointer;";
+  // 右侧中部一个常显的圆形房子按钮（白房子图标、半透明深色底）；
+  // 点它直接弹出源面板（列已装的 WebHome 源，点一个切过去，下面一行
+  // “关闭”回主界面）；几秒不用面板自己收起，按钮一直留着。窗口常驻
+  // 不销毁，× 由此控件代替。
   var houseBtn = document.createElement("button");
   houseBtn.id = "hg-webhome-btn";
   houseBtn.type = "button";
   houseBtn.setAttribute("aria-label", "源切换");
-  houseBtn.textContent = "🏠";
-  houseBtn.style.cssText = "position:fixed;right:8px;top:50%;transform:translateY(-50%);z-index:2147483647;width:40px;height:40px;border:none;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:19px;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;";
+  houseBtn.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff" aria-hidden="true"><path d="M12 3 2 12h3v8h6v-6h2v6h6v-8h3L12 3z"/></svg>';
+  houseBtn.style.cssText = "position:fixed;right:8px;top:50%;transform:translateY(-50%);z-index:2147483647;width:44px;height:44px;border:none;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;cursor:pointer;";
   var housePanel = document.createElement("div");
   housePanel.id = "hg-webhome-panel";
-  housePanel.style.cssText = "position:fixed;right:56px;top:50%;transform:translateY(-50%);z-index:2147483647;width:230px;max-height:60vh;overflow-y:auto;border-radius:12px;background:rgba(20,20,24,.92);color:#fff;box-shadow:0 4px 24px rgba(0,0,0,.4);padding:6px;display:none;";
+  housePanel.style.cssText = "position:fixed;right:60px;top:50%;transform:translateY(-50%);z-index:2147483647;width:230px;max-height:60vh;overflow-y:auto;border-radius:12px;background:rgba(20,20,24,.92);color:#fff;box-shadow:0 4px 24px rgba(0,0,0,.4);padding:6px;display:none;";
   var houseErr = document.createElement("div");
   houseErr.style.cssText = "display:none;padding:6px 10px;color:#ff8a80;font-size:12px;line-height:1.4;";
   var houseTimer = null;
   var houseRoot = document.body || document.documentElement;
-  houseRoot.appendChild(houseTab);
   houseRoot.appendChild(houseBtn);
   houseRoot.appendChild(housePanel);
   function houseCollapse() {
     houseTimer = null;
     housePanel.style.display = "none";
-    houseBtn.style.display = "none";
-    houseTab.style.display = "";
   }
   function houseArm() {
     if (houseTimer) clearTimeout(houseTimer);
@@ -271,11 +267,6 @@
       houseShowError(e && e.message ? e.message : "加载失败");
     });
   }
-  houseTab.addEventListener("click", function () {
-    houseTab.style.display = "none";
-    houseBtn.style.display = "flex";
-    houseArm();
-  });
   houseBtn.addEventListener("click", function () {
     if (housePanel.style.display === "block") {
       housePanel.style.display = "none";
@@ -284,7 +275,7 @@
       houseOpenPanel();
     }
   });
-  // 点面板外面只收起面板，小房子留着，4 秒后自己收回。
+  // 点面板外面只收起面板，小房子留着，4 秒后面板自己收起。
   document.addEventListener("click", function (e) {
     if (housePanel.style.display !== "block") return;
     var t = e.target;
@@ -296,10 +287,10 @@
     setToolbar: function (visible) {
       if (visible === false) {
         if (houseTimer) { clearTimeout(houseTimer); houseTimer = null; }
-        houseTab.style.display = "none";
         houseBtn.style.display = "none";
         housePanel.style.display = "none";
       } else {
+        houseBtn.style.display = "flex";
         houseCollapse();
       }
     },
