@@ -381,6 +381,188 @@ async fn node_doh_suffix_passes_through_with_resolved_count() {
 }
 
 #[tokio::test]
+async fn dead_mirror_request_reaches_live_mirror() {
+    // v0.0.81：请求 https://woggpan.xxooo.cf/... 时，mock Node 收
+    // 到的是改写后的 https://woggpan.888484.xyz/...（路径/查询不
+    // 变）；Node 只从 URL 取 hostname 做 SNI/Host，所以收到改写后
+    // 的 URL 就是 SNI/Host 已改写的证明。两个 .cf 域名都改，非列表
+    // 内 host 不动。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    let result = fetch_text(
+        &network,
+        "https://woggpan.xxooo.cf/vodshow/1--------1---.html?x=1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.json()["data"], json!("node-body"));
+    let last = node.last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        last["url"],
+        json!("https://woggpan.888484.xyz/vodshow/1--------1---.html?x=1"),
+        "第一个 .cf 镜像应改写到 .xyz 镜像：{last}"
+    );
+    fetch_text(&network, "https://wogg.xxooo.cf/vodshow/2--------1---.html")
+        .await
+        .unwrap();
+    let last = node.last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        last["url"],
+        json!("https://woggpan.888484.xyz/vodshow/2--------1---.html"),
+        "第二个 .cf 镜像应改写到同一 .xyz 镜像：{last}"
+    );
+    fetch_text(&network, "https://www.wogg.net/vodshow/2--------1---.html")
+        .await
+        .unwrap();
+    let last = node.last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        last["url"],
+        json!("https://www.wogg.net/vodshow/2--------1---.html"),
+        "非列表内 host 不应改写：{last}"
+    );
+    node_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn dead_mirror_error_suffix_resolves_rewritten_host() {
+    // v0.0.81：Node 报错时 Rust append 的（解析: …）后缀是改写后
+    // host 的解析结果——本机解析器给 .xyz 与 .cf 各回不同的 FakeIP，
+    // 用同一解析器现查两边作对照（不硬编码地址：FakeIP 的具体值
+    // 随环境变）。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    *node.direct_error.lock().unwrap() = Some("mock node down".to_string());
+    let err = fetch_text(
+        &network,
+        "https://woggpan.xxooo.cf/vodshow/1--------1---.html",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "NETWORK");
+    let xyz = Url::parse("https://woggpan.888484.xyz/").unwrap();
+    let xyz_addrs = network_policy::resolve_target_keep_order(&xyz, false)
+        .await
+        .expect("改写后的 host 应能解析");
+    assert!(
+        !xyz_addrs.is_empty(),
+        "改写后的 host 应解析到地址"
+    );
+    assert!(
+        err.message.contains(&xyz_addrs[0].to_string()),
+        "解析后缀应是改写后 host 的地址（{}）：{}",
+        xyz_addrs[0],
+        err.message
+    );
+    // .cf 那边的地址不应出现在后缀里（若本机解析器对两边回了相同
+    // 地址，或 .cf 已查无记录，则跳过否定断言）。
+    let cf = Url::parse("https://woggpan.xxooo.cf/").unwrap();
+    if let Ok(cf_addrs) = network_policy::resolve_target_keep_order(&cf, false).await {
+        for a in &cf_addrs {
+            if !xyz_addrs.contains(a) {
+                assert!(
+                    !err.message.contains(&a.to_string()),
+                    "解析后缀不应含原 .cf host 的地址（{a}）：{}",
+                    err.message
+                );
+            }
+        }
+    }
+    node_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn dead_mirror_redirect_is_logged_to_ext_log() {
+    // v0.0.81：每次改写在 ext.log 里记一行（requestId "net"，
+    // from → to）；非列表内 host 不记重定向行。
+    let (node_base, _node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    let logs: crate::native::Logs = Default::default();
+    network.set_logs(logs.clone());
+    fetch_text(
+        &network,
+        "https://woggpan.xxooo.cf/vodshow/1--------1---.html",
+    )
+    .await
+    .unwrap();
+    let entries = logs.lock().unwrap().snapshot();
+    let line = entries
+        .iter()
+        .find(|e| {
+            e["requestId"] == "net"
+                && e["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("失效镜像重定向")
+        })
+        .expect("应有一条 requestId 为 net 的重定向日志");
+    assert_eq!(line["level"], "info");
+    assert!(
+        line["text"]
+            .as_str()
+            .unwrap()
+            .contains("woggpan.xxooo.cf → woggpan.888484.xyz"),
+        "日志应含 from → to：{}",
+        line["text"]
+    );
+    fetch_text(&network, "https://www.wogg.net/vodshow/2--------1---.html")
+        .await
+        .unwrap();
+    let entries = logs.lock().unwrap().snapshot();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("失效镜像重定向"))
+            .count(),
+        1,
+        "非列表内 host 不应再记重定向行"
+    );
+    node_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnose_does_not_rewrite_dead_mirrors() {
+    // v0.0.81：探针走 /diagnose，不经过 send_api_hop——请求体里的
+    // 域名仍是原始 .cf 域名（探针就是要测原始域名），且 ext.log 里
+    // 不应出现重定向行。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
+    let logs: crate::native::Logs = Default::default();
+    network.set_logs(logs.clone());
+    let _report = network.diagnose(&CancellationToken::new()).await.unwrap();
+    let body = node
+        .last
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应调过 /diagnose");
+    let domains: Vec<String> = serde_json::from_value(body["domains"].clone()).unwrap();
+    assert!(
+        domains.contains(&"woggpan.xxooo.cf".to_string()),
+        "探针域名应保持原始 .cf：{domains:?}"
+    );
+    assert!(
+        domains.contains(&"wogg.xxooo.cf".to_string()),
+        "探针域名应保持原始 .cf：{domains:?}"
+    );
+    let entries = logs.lock().unwrap().snapshot();
+    assert!(
+        !entries.iter().any(|e| e["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("失效镜像重定向")),
+        "探针不应触发重定向日志"
+    );
+    node_server.shutdown().await;
+}
+
+#[tokio::test]
 async fn media_request_stays_on_wreq() {
     let (node_base, node, node_server) = start_mock_node().await;
     let (upstream, upstream_state, upstream_server) = start_mock_upstream().await;

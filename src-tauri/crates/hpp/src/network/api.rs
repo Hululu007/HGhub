@@ -281,6 +281,11 @@ impl Network {
     ///
     /// v0.0.78：窄回落与 5xx 诊断（见 `node_hop_with_fallback`）——
     /// 只在跟随系统模式；5xx 不再当正常数据返回（wreq 路径仍当数据）。
+    ///
+    /// v0.0.81：失效镜像重定向（见 `rewrite_dead_mirror`）——请求
+    /// 目标 host 是已死的 .cf 镜像时，在函数入口就改写到活的 .xyz
+    /// 镜像，再走冷却/许可/预检；解析与诊断后缀里出现的是改写后
+    /// 的 host，SNI/Host 随 URL 一起变（Node 只从 URL 取 hostname）。
     async fn send_api_hop(
         &self,
         outgoing: Outgoing,
@@ -291,6 +296,15 @@ impl Network {
     ) -> Result<Arc<BufferedResponse>> {
         if cancel.is_cancelled() {
             return Err(PluginError::cancelled());
+        }
+        let mut outgoing = outgoing;
+        // v0.0.81：失效镜像重定向——在冷却/许可/预检之前改写（见
+        // rewrite_dead_mirror 的证据注释）。请求头不动：outgoing()
+        // 已按原 host 附好 Cookie/通行证，.cf 与 .xyz 是同一站，
+        // 附过去无害；.xyz 不挑战，不需要通行证。
+        if let Some(redirected) = rewrite_dead_mirror(&outgoing.target) {
+            self.log_mirror_redirect(&outgoing.target, &redirected);
+            outgoing.target = redirected;
         }
         let host = outgoing.target.host_str().unwrap();
         self.check_cooldown(host)?;
@@ -564,6 +578,25 @@ impl Network {
         );
     }
 
+    /// 失效镜像重定向写进 ext.log（v0.0.81）：from → to；每次改写记
+    /// 一行（requestId `"net"`）。没绑日志面板时（测试用的 Network）
+    /// 不记。
+    fn log_mirror_redirect(&self, from: &Url, to: &Url) {
+        let Some(logs) = self.logs.lock().unwrap().clone() else {
+            return;
+        };
+        logs.lock().unwrap().push(
+            "info",
+            &format!(
+                "net.request 失效镜像重定向：{} → {}",
+                from.host_str().unwrap_or(""),
+                to.host_str().unwrap_or("")
+            ),
+            "net",
+            None,
+        );
+    }
+
     /// 边车 DoH 使用情况写进 ext.log（v0.0.80）：主机名、补充几个
     /// 地址、成功/失败。`doh` 来自边车响应/错误的 doh 字段（见
     /// node/client.rs）；没查过 DoH 时不记。没绑日志面板时不记。
@@ -593,6 +626,23 @@ impl Network {
             None,
         );
     }
+
+    /// 失效镜像重定向（v0.0.81）：玩偶站的两个 .cf 镜像已死——探针
+    /// （2026-11-24 09:28，直连）证明 `woggpan.xxooo.cf` /
+    /// `wogg.xxooo.cf` 的唯一系统解析地址 TLS 全被断（198.20.0.94 /
+    /// 198.20.0.21，141/147ms），公开 DNS 对它俩查无记录（DoH 0 个）；
+    /// 而同站的 .xyz / .net 镜像 7/4 条边缘全通、HTTP 200、非挑战页。
+    /// 09:30 分类仍失败在 198.20.0.19（.cf 段的地址，.xyz/.net 从不
+    /// 解析到 198.20.0.x）——分类请求打到了死镜像，DoH 对 .cf 无能
+    /// 为力。4 个域名是同一 MacCMS 站点的镜像，内容相同。Node Api
+    /// 请求路径上把死镜像 upfront 改写到活的 .xyz 镜像，不先试原域
+    /// 名（.cf 之死是确定性的，没必要每次浪费一次失败请求；若 .cf
+    /// 日后复活，重定向也无害——.xyz 同样能出内容）。探针不重写
+    /// （探针就是要测原始域名，它不走 `send_api_hop`）。
+    const DEAD_MIRROR_REDIRECTS: [(&'static str, &'static str); 2] = [
+        ("woggpan.xxooo.cf", "woggpan.888484.xyz"),
+        ("wogg.xxooo.cf", "woggpan.888484.xyz"),
+    ];
 
     /// 网络诊断探针的目标域名（v0.0.80）：当前 WebHome 失败的玩偶站
     /// 4 个域名。只用于诊断（net.diagnose），不进任何请求逻辑——
@@ -814,6 +864,21 @@ fn redact_proxy_url(url: &str) -> Option<(String, bool)> {
     ))
 }
 
+/// 死镜像改写（v0.0.81，纯函数）：host 在 `DEAD_MIRROR_REDIRECTS`
+/// 里时返回改写后的 URL——只换 host，scheme/端口/路径/查询/片段
+/// 都不动；不在表里时回 `None`。`Url` 解析时已把 host 小写规范化，
+/// 这里直接精确匹配。
+fn rewrite_dead_mirror(target: &Url) -> Option<Url> {
+    let host = target.host_str()?;
+    let to = Network::DEAD_MIRROR_REDIRECTS
+        .iter()
+        .find(|(from, _)| *from == host)?
+        .1;
+    let mut rewritten = target.clone();
+    rewritten.set_host(Some(to)).ok()?;
+    Some(rewritten)
+}
+
 /// 窄回落只在跟随系统且实际解析出代理时才有意义：自定义是用户显式
 /// 路由，不擅自绕过；直连/无代理时没有可回落的对象。
 fn fallback_eligible(mode: crate::proxy::Mode, proxy_url: &Option<String>) -> bool {
@@ -950,6 +1015,36 @@ fn with_resolved_addrs(mut e: PluginError, addrs: &[std::net::SocketAddr]) -> Pl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dead_mirror_redirect_rewrites_cf_hosts_only() {
+        // v0.0.81：两个 .cf 镜像改写到活的 .xyz 镜像，只换 host，
+        // 路径/查询/端口都不动；非列表内 host 不动。
+        assert_eq!(
+            rewrite_dead_mirror(
+                &Url::parse("https://woggpan.xxooo.cf/vodshow/1--------1---.html").unwrap()
+            )
+            .unwrap()
+            .as_str(),
+            "https://woggpan.888484.xyz/vodshow/1--------1---.html"
+        );
+        assert_eq!(
+            rewrite_dead_mirror(
+                &Url::parse("https://wogg.xxooo.cf:8443/a/b?x=1&y=2").unwrap()
+            )
+            .unwrap()
+            .as_str(),
+            "https://woggpan.888484.xyz:8443/a/b?x=1&y=2"
+        );
+        assert!(rewrite_dead_mirror(
+            &Url::parse("https://www.wogg.net/vodshow/2--------1---.html").unwrap()
+        )
+        .is_none());
+        assert!(rewrite_dead_mirror(
+            &Url::parse("https://woggpan.888484.xyz/vodshow/1--------1---.html").unwrap()
+        )
+        .is_none());
+    }
 
     #[test]
     fn resolved_addrs_suffix_goes_on_all_node_errors_except_cancelled() {
