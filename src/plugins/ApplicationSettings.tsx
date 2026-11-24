@@ -1,5 +1,6 @@
 import ProxySettings from "./ProxySettings";
 import CacheClearSettings from "./CacheClearSettings";
+import DebugLogSettings from "./DebugLogSettings";
 import { playbackSources, SourcePicker } from "./ImmersiveHome";
 import { IBack, IChevR, IGrid, ISettings, IMoon, ISun, IVolMute, IPlayF, IRefresh, ILockF, IHeart, IInfo } from "../icons";
 import type { ReactNode } from "react";
@@ -62,6 +63,7 @@ export default function ApplicationSettings({ onBack }: { onBack: () => void }) 
         </div></details>
       </Section>
       <Section title="缓存清理"><CacheClearSettings/></Section>
+      <Section title="运行日志"><DebugLogSettings/></Section>
       {isTauri() && <Section title="下载管理"><DownloadManager/></Section>}
       <Section title="网络"><ProxySettings/><Setting icon={<ILockF size={16}/>} title="严格安全模式" description="用于插件与媒体请求。自建服务需要访问局域网时可关闭。"><Toggle label="严格安全模式" on={app.strictSecurity} disabled={!app.strictSecurityReady||app.securityPending} onChange={on=>void app.setStrictSecurity(on).catch(e=>setError(pluginError(e)))}/></Setting></Section>
       <Section title="关于"><Setting icon={<IInfo size={16}/>} title={`红苹果影视 ${APP_VERSION}`} description="由用户自行导入内容源与解析器的插件视频播放器"/></Section>

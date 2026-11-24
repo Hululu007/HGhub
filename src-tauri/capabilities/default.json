@@ -33,6 +33,7 @@
     "allow-delete-download",
     "allow-serve-download",
     "allow-debug-log",
+    "allow-read-debug-log",
     "allow-open-url",
     "allow-open-external-media",
     "allow-open-webhome",

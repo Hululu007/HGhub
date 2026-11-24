@@ -119,6 +119,7 @@ pub fn run() {
             download::delete_download,
             download::serve_download,
             commands::debug_log,
+            commands::read_debug_log,
             commands::open_url,
             commands::open_external_media,
             webhome::open_webhome,

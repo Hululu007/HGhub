@@ -56,6 +56,62 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// 诊断日志（v0.0.89）：WebHome 关键操作记进 App 自己的 debug.log（落盘，
+/// 闪退后还在），供复现后回看最后几行定位崩点。只记 method + 插件 id +
+/// 简短标记，不记响应体、完整 URL、密钥/Cookie；写失败不影响调用本身。
+fn debug_log(app: &AppHandle, msg: &str) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = crate::logging::append_debug(&dir, msg);
+    }
+}
+
+/// webhome_call 的简短参数标记：net.request 与播放类方法只记目标 host
+///（不记完整 URL），其他方法不记参数。
+fn call_marker(method: &str, payload: &Value) -> String {
+    let url = match method {
+        "req" | "net.request" => payload["url"].as_str(),
+        m if m.starts_with("player.") => payload["url"].as_str(),
+        _ => None,
+    };
+    match url {
+        Some(u) => match u.parse::<Url>() {
+            Ok(parsed) => format!(" host={}", parsed.host_str().unwrap_or("?")),
+            Err(_) => " host=?".to_string(),
+        },
+        None => String::new(),
+    }
+}
+
+/// 错误文案进日志前截断（前 120 字）并去掉完整 URL：遇到 "://" 就截到
+/// scheme 开头。诊断后缀里的 IP 地址与状态码不受影响。
+fn redact_error(e: &str) -> String {
+    let mut s: String = e.chars().take(120).collect();
+    if let Some(pos) = s.find("://") {
+        let cut = s[..pos]
+            .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '-' && c != '.')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        s.truncate(cut);
+        s.push('…');
+    }
+    s
+}
+
+fn outcome_kind(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Value(_) => "Value",
+        Outcome::Play { .. } => "Play",
+        Outcome::OpenVod(_) => "OpenVod",
+        Outcome::Toast(_) => "Toast",
+        Outcome::PlayerControl(..) => "PlayerControl",
+        Outcome::OpenWebhome(_) => "OpenWebhome",
+        Outcome::OpenLive => "OpenLive",
+        Outcome::OpenKeep => "OpenKeep",
+        Outcome::OpenSetting => "OpenSetting",
+        Outcome::SetToolbar(_) => "SetToolbar",
+    }
+}
+
 #[tauri::command]
 pub async fn open_webhome(
     app: AppHandle,
@@ -94,6 +150,7 @@ async fn open_webhome_inner(
             // 窗口一直活着（× 只是隐藏）：直接显示，页面状态保留。
             window.show().map_err(err)?;
             window.set_focus().map_err(err)?;
+            debug_log(app, &format!("[webhome] 窗口显示：{plugin_id}（已开同源）"));
             return Ok(json!({ "url": home_page }));
         }
         // 换源：让活着的 webview 导航到新首页，桥在导航后重新注入
@@ -102,9 +159,10 @@ async fn open_webhome_inner(
         window
             .navigate(home_page.parse().map_err(err)?)
             .map_err(err)?;
-        *state.session.lock().map_err(err)? = Some(WebHomeSession { plugin_id });
+        *state.session.lock().map_err(err)? = Some(WebHomeSession { plugin_id: plugin_id.clone() });
         window.show().map_err(err)?;
         window.set_focus().map_err(err)?;
+        debug_log(app, &format!("[webhome] 窗口导航：{plugin_id}"));
         return Ok(json!({ "url": home_page }));
     }
     // 窗口不存在才建新窗。建窗仍撞 label 说明有窗口存在但前面没认
@@ -126,7 +184,8 @@ async fn open_webhome_inner(
         }
     });
     window.set_focus().map_err(err)?;
-    *state.session.lock().map_err(err)? = Some(WebHomeSession { plugin_id });
+    *state.session.lock().map_err(err)? = Some(WebHomeSession { plugin_id: plugin_id.clone() });
+    debug_log(app, &format!("[webhome] 窗口新建：{plugin_id}"));
     Ok(json!({ "url": home_page }))
 }
 
@@ -139,6 +198,7 @@ pub async fn webhome_close(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(LABEL) {
         window.hide().map_err(err)?;
         let _ = window.eval("window.dispatchEvent(new Event('fmpause'))");
+        debug_log(&app, "[webhome] 窗口隐藏");
     }
     Ok(())
 }
@@ -158,9 +218,16 @@ pub async fn webhome_call(
         .as_ref()
         .map(|s| s.plugin_id.clone())
         .ok_or_else(|| "WebHome 会话未绑定插件".to_string())?;
+    debug_log(
+        &app,
+        &format!(
+            "[webhome] call 入：{plugin_id} {method}{}",
+            call_marker(&method, &payload)
+        ),
+    );
     let manager = host.manager(&app).await.map_err(err)?;
     let player_state = state.player_state.lock().map_err(err)?.clone();
-    let outcome = dispatch_with_clearance(
+    let outcome = match dispatch_with_clearance(
         &app,
         &manager,
         &state,
@@ -169,9 +236,17 @@ pub async fn webhome_call(
         payload,
         player_state,
     )
-    .await?;
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            debug_log(&app, &format!("[webhome] call 出：Err {}", redact_error(&e)));
+            return Err(e);
+        }
+    };
+    let kind = outcome_kind(&outcome);
     let main = app.get_webview_window("main");
-    match outcome {
+    let result = match outcome {
         Outcome::Value(value) => Ok(value),
         Outcome::Play { media, title } => {
             if let Some(main) = main {
@@ -243,7 +318,12 @@ pub async fn webhome_call(
             }
             Ok(json!({ "code": 0 }))
         }
+    };
+    match &result {
+        Ok(_) => debug_log(&app, &format!("[webhome] call 出：Ok {kind}")),
+        Err(e) => debug_log(&app, &format!("[webhome] call 出：Err {}", redact_error(e))),
     }
+    result
 }
 
 /// 从 WebHome 窗口的 Cookie 存储里读 `url` 的 Cookie（v0.0.86 桥与

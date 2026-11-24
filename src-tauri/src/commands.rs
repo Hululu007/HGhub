@@ -94,6 +94,39 @@ pub fn security_set(strict: bool) -> Result<bool, String> {
 pub fn debug_log(app: tauri::AppHandle, msg: String) -> Result<(), String> {
     crate::logging::append_debug(&app.path().app_data_dir().map_err(|e| e.to_string())?, &msg)
 }
+
+/// 读 App 自己的 debug.log（v0.0.89 诊断版，供设置页「运行日志」查看）：
+/// 返回最后 N 行（默认 200，上限 1000），总量封顶约 50KB；文件不存在
+/// 返回空串。只读，不删不改。
+#[tauri::command]
+pub fn read_debug_log(app: tauri::AppHandle, lines: Option<u32>) -> Result<String, String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("debug.log");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let keep = lines.unwrap_or(200).clamp(1, 1000) as usize;
+    const MAX_BYTES: usize = 50 * 1024;
+    let mut kept: Vec<&str> = text.lines().rev().take(keep).collect();
+    kept.reverse();
+    let mut out = kept.join("\n");
+    if out.len() > MAX_BYTES {
+        let mut start = out.len() - MAX_BYTES;
+        if let Some(pos) = out[start..].find('\n') {
+            start += pos + 1;
+        }
+        while start < out.len() && !out.is_char_boundary(start) {
+            start += 1;
+        }
+        out = out[start..].to_string();
+    }
+    Ok(out)
+}
 #[tauri::command]
 pub fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let target = crate::network_policy::parse_target(&url)?;
