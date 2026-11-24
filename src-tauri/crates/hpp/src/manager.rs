@@ -1008,6 +1008,26 @@ impl PluginManager {
         Ok(count)
     }
 
+    /// 加宽桥（v0.0.87）：把 WebHome 窗口里首页 URL 的 Cookie 记下来，
+    /// 供下一次发往 `target_origin` 的引擎请求附上（只附当次、不进
+    /// 罐子、不落盘）；并把桥了几个、名字是什么、来源是哪个域写进
+    /// ext.log（requestId `"net"`，只报名字与域名、不报值）。窗口不
+    /// 存在时调用方根本不调这里；插件已停用时报 `UNSUPPORTED`（与
+    /// `bridge_webview_cookies` 同一条路），调用方静默回落。
+    pub async fn bridge_home_cookies(
+        &self,
+        id: &str,
+        target_origin: &str,
+        source_host: &str,
+        cookies: Vec<WebViewCookie>,
+    ) -> Result<usize> {
+        let network = self.network(id).await?;
+        let names = network.set_home_cookies(target_origin, cookies);
+        let count = names.len();
+        network.log_home_cookie_bridge(&names, source_host);
+        Ok(count)
+    }
+
     /// 清空某插件的请求 Cookie 罐（v0.0.83）：内存 + 落盘的 cookies.json
     /// 一起清，返回清掉的条数。只动罐子本身。
     pub async fn clear_cookie_jar(&self, id: &str) -> Result<usize> {

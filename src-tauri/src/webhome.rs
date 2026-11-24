@@ -246,41 +246,24 @@ pub async fn webhome_call(
     }
 }
 
-/// WebView→引擎 Cookie 桥（v0.0.86）：发起 WebHome 引擎请求前，把
-/// WebHome 窗口里目标 URL 的 Cookie 读出来合并进该插件的 Rust 罐。
-/// 只做 WebView→引擎一个方向：引擎自己的 Set-Cookie 照常进罐，不
-/// 回写 WebView。窗口不存在、URL 非法、读不到 Cookie 时返回 0、
-/// 不失败请求——桥只是给引擎补它没见过的会话 Cookie，罐子本身仍
-/// 是权威；`__cf_bm` 与过期 Cookie 不进罐（hpp 的 `merge_` 侧按
-/// 与 `set_clearance` / `receive_cookies` 同一条规矩过滤）。
-/// `cookies_for_url` 是阻塞调用（等主线程回消息），放 spawn_blocking 里。
-async fn bridge_webview_cookies(
-    app: &AppHandle,
-    manager: &Arc<PluginManager>,
-    plugin_id: &str,
-    url: &str,
-) -> usize {
-    let Some(window) = app.get_webview_window(LABEL) else {
-        return 0;
-    };
-    let Ok(target) = url.parse::<Url>() else {
-        return 0;
-    };
+/// 从 WebHome 窗口的 Cookie 存储里读 `url` 的 Cookie（v0.0.86 桥与
+/// v0.0.87 加宽桥共用）：`cookies_for_url` 是阻塞调用（等主线程回
+/// 消息），放 spawn_blocking 里。读不到时返回空列表——调用方照样记
+/// `0 个`（桥跑了、窗口里没有该 URL 的 Cookie），与桥没跑是两回事。
+async fn read_webview_cookies(window: &WebviewWindow, url: &Url) -> Vec<hghub_hpp::WebViewCookie> {
     let w = window.clone();
-    let u = target.clone();
+    let u = url.clone();
     let cookies = tokio::task::spawn_blocking(move || w.cookies_for_url(u))
         .await
         .ok()
         .and_then(|r| r.ok())
         .unwrap_or_default();
-    // 空列表也往下传：hpp 侧照样写一行 `Cookie 桥接：0 个`——桥跑了、
-    // 窗口里没有该 URL 的 Cookie，与桥没跑是两回事，真机验收靠这行区分。
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let host = target.host_str().unwrap_or("").to_string();
-    let bridged: Vec<hghub_hpp::WebViewCookie> = cookies
+    let host = url.host_str().unwrap_or("").to_string();
+    cookies
         .into_iter()
         .map(|c| {
             let expires_at = c
@@ -304,9 +287,69 @@ async fn bridge_webview_cookies(
                 expires_at,
             }
         })
-        .collect();
+        .collect()
+}
+
+/// WebView→引擎 Cookie 桥（v0.0.86）：发起 WebHome 引擎请求前，把
+/// WebHome 窗口里目标 URL 的 Cookie 读出来合并进该插件的 Rust 罐。
+/// 只做 WebView→引擎一个方向：引擎自己的 Set-Cookie 照常进罐，不
+/// 回写 WebView。窗口不存在、读不到 Cookie 时返回 0、不失败请求——
+/// 桥只是给引擎补它没见过的会话 Cookie，罐子本身仍是权威；
+/// `__cf_bm` 与过期 Cookie 不进罐（hpp 的 `merge_` 侧按与
+/// `set_clearance` / `receive_cookies` 同一条规矩过滤）。
+async fn bridge_webview_cookies(
+    app: &AppHandle,
+    manager: &Arc<PluginManager>,
+    plugin_id: &str,
+    target: &Url,
+) -> usize {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return 0;
+    };
+    // 空列表也往下传：hpp 侧照样写一行 `Cookie 桥接：0 个`——桥跑了、
+    // 窗口里没有该 URL 的 Cookie，与桥没跑是两回事，真机验收靠这行区分。
+    let bridged = read_webview_cookies(&window, target).await;
     manager
         .bridge_webview_cookies(plugin_id, bridged)
+        .await
+        .unwrap_or(0)
+}
+
+/// 加宽桥（v0.0.87）：首页的 Cookie 也读出来，记到“发往目标 origin
+/// 的当次附加”里——WebView 只加载 homePage，从不访问目标域名，
+/// v0.0.86 的桥按目标 URL 读永远是 0 个（真机每次都是 0 个）；首页落
+/// 的会话 Cookie 是唯一剩下的来源，源站只看 Cookie 头里的名和值。
+/// 只附当次请求，不进罐子不落盘（hpp 侧 `set_home_cookies`）。首页
+/// 与目标同 origin 时跳过（目标桥已经处理了）。窗口不存在、首页地址
+/// 读不出来时返回 0、不记日志——调用方静默回落。
+async fn bridge_home_cookies(
+    app: &AppHandle,
+    manager: &Arc<PluginManager>,
+    plugin_id: &str,
+    target: &Url,
+) -> usize {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return 0;
+    };
+    let Ok(home_page) = hghub_hpp::media::MediaSessions::webhome_page_url(manager, plugin_id).await
+    else {
+        return 0;
+    };
+    let Ok(home) = home_page.parse::<Url>() else {
+        return 0;
+    };
+    if home.origin() == target.origin() {
+        return 0;
+    }
+    let bridged = read_webview_cookies(&window, &home).await;
+    let source_host = home.host_str().unwrap_or("").to_string();
+    manager
+        .bridge_home_cookies(
+            plugin_id,
+            &target.origin().ascii_serialization(),
+            &source_host,
+            bridged,
+        )
         .await
         .unwrap_or(0)
 }
@@ -323,7 +366,11 @@ async fn maybe_bridge_webview_cookies(
         return;
     }
     if let Some(url) = payload["url"].as_str() {
-        bridge_webview_cookies(app, manager, plugin_id, url).await;
+        if let Ok(target) = url.parse::<Url>() {
+            bridge_webview_cookies(app, manager, plugin_id, &target).await;
+            // v0.0.87 加宽桥：首页的 Cookie 也记下来，供当次请求附上。
+            bridge_home_cookies(app, manager, plugin_id, &target).await;
+        }
     }
 }
 

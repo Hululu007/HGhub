@@ -18,7 +18,9 @@ struct Permits {
 pub(super) struct Outgoing {
     target: Url,
     method: Method,
-    headers: HeaderMap,
+    /// `pub(super)`：测试要读组装好的 Cookie 头（加宽桥的并入结果），
+    /// 字段本身只在 `network` 模块树内可见。
+    pub(super) headers: HeaderMap,
     body: Option<Vec<u8>>,
     cookies: bool,
     generation: Option<String>,
@@ -60,6 +62,36 @@ impl Network {
             let existing = headers.get("cookie").and_then(|v| v.to_str().ok());
             let extra = self.clearance_cookies(&target, existing);
             if !extra.is_empty() {
+                let merged = match existing {
+                    Some(cur) if !cur.is_empty() => format!("{cur}; {extra}"),
+                    _ => extra,
+                };
+                if let Ok(value) = HeaderValue::from_str(&merged) {
+                    headers.insert("cookie", value);
+                }
+            }
+        }
+        // v0.0.87 加宽桥：首页落的会话 Cookie 按目标 origin 取出来并
+        // 进当次请求的 Cookie 头——只附当次、不进罐子；已有同名 Cookie
+        //（罐子或通行证的）的不重复带，目标域名的优先；合并失败（非法
+        // 字符）时只放弃附加，不让整个请求失败。
+        if cookies {
+            let existing = headers.get("cookie").and_then(|v| v.to_str().ok());
+            let present: Vec<&str> = existing
+                .map(|v| {
+                    v.split(';')
+                        .filter_map(|p| p.trim().split('=').next())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let extra: Vec<String> = self
+                .home_cookies_for(&target)
+                .into_iter()
+                .filter(|(n, _)| !present.iter().any(|p| p.eq_ignore_ascii_case(n)))
+                .map(|(n, v)| format!("{n}={v}"))
+                .collect();
+            if !extra.is_empty() {
+                let extra = extra.join("; ");
                 let merged = match existing {
                     Some(cur) if !cur.is_empty() => format!("{cur}; {extra}"),
                     _ => extra,
@@ -482,10 +514,19 @@ impl Network {
             .await;
         match first {
             Ok(response) if (500..600).contains(&response.status) => {
+                // v0.0.87：5xx 也记响应行——状态与 Set-Cookie、体标记
+                // 都在响应里，错误转走后就看不见了。
+                self.log_response(&response, "");
                 let outcome = if eligible && started.elapsed() < Duration::from_secs(5) {
                     match self.direct_retry(&request, started, cancel).await {
-                        Ok(retry) if retry.status < 500 => return Ok(retry),
-                        Ok(retry) => format!("同样 {}", retry.status),
+                        Ok(retry) if retry.status < 500 => {
+                            self.log_response(&retry, "直连重试");
+                            return Ok(retry);
+                        }
+                        Ok(retry) => {
+                            self.log_response(&retry, "直连重试");
+                            format!("同样 {}", retry.status)
+                        }
                         Err(e) => format!("失败：{}", short_error(&e)),
                     }
                 } else {
@@ -502,7 +543,10 @@ impl Network {
                     &cookie_note,
                 ))
             }
-            Ok(response) => Ok(response),
+            Ok(response) => {
+                self.log_response(&response, "");
+                Ok(response)
+            }
             Err(e)
                 if eligible
                     && started.elapsed() < Duration::from_secs(5)
@@ -512,6 +556,7 @@ impl Network {
                     Ok(retry) if (500..600).contains(&retry.status) => {
                         // 直连重试也拿到 503 时，Retry-After 冷却仍要落
                         // （与 5xx 分支一致）。
+                        self.log_response(&retry, "直连重试");
                         if retry.status == 503 {
                             self.note_rate_limit(host, retry.status, &retry.headers);
                         }
@@ -522,7 +567,10 @@ impl Network {
                         );
                         Err(with_resolved_addrs(first_err, addrs))
                     }
-                    Ok(retry) => Ok(retry),
+                    Ok(retry) => {
+                        self.log_response(&retry, "直连重试");
+                        Ok(retry)
+                    }
                     Err(retry_err) => {
                         let mut first_err = e;
                         first_err.message = format!(
@@ -606,6 +654,76 @@ impl Network {
                 "net.request Cookie 桥接：{} 个（名字：{}）",
                 names.len(),
                 names.join(", ")
+            ),
+            "net",
+            None,
+        );
+    }
+
+    /// 加宽桥写进 ext.log（v0.0.87）：首页的 Cookie 桥了几个、名字
+    /// 是什么、来源是哪个域（只报名字与域名，不报值）。0 个也记一
+    /// 行——桥跑了、WebView 里首页没有 Cookie，与桥没跑是两回事。
+    /// 没绑日志面板时（测试用的 Network）不记。
+    pub(crate) fn log_home_cookie_bridge(&self, names: &[String], source_host: &str) {
+        let Some(logs) = self.logs.lock().unwrap().clone() else {
+            return;
+        };
+        logs.lock().unwrap().push(
+            "info",
+            &format!(
+                "net.request Cookie 桥接（首页 {source_host}）：{} 个（名字：{}）",
+                names.len(),
+                names.join(", ")
+            ),
+            "net",
+            None,
+        );
+    }
+
+    /// 响应里 Set-Cookie 的名字（v0.0.87）：只报名字，不报值；没有时
+    /// 为空，由调用方写“无”。
+    fn set_cookie_names(headers: &HeaderMap) -> Vec<String> {
+        headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter_map(|s| s.split(';').next())
+            .filter_map(|pair| pair.split('=').next())
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    /// 每次 Node 引擎请求的响应写进 ext.log（v0.0.87）：HTTP 状态 +
+    /// 收到的 Set-Cookie 名字（有就报名字、无就报“无”）+ 响应体标记
+    ///（是否含 module-item、是否含验证页文本、是否含 just-a-moment）。
+    /// 只记布尔标记，绝不记完整响应体；只报 Cookie 名字，不报值。
+    /// `note` 为空是首跳、`"直连重试"` 是直连重试那跳。没绑日志面板
+    /// 时（测试用的 Network）不记。
+    pub(crate) fn log_response(&self, response: &NodeResponse, note: &str) {
+        let Some(logs) = self.logs.lock().unwrap().clone() else {
+            return;
+        };
+        let (has_list, has_verify, has_challenge) = super::response_markers(&response.body);
+        let set_cookies = Self::set_cookie_names(&response.headers);
+        let set_cookies = if set_cookies.is_empty() {
+            "无".to_string()
+        } else {
+            set_cookies.join(", ")
+        };
+        let note = if note.is_empty() {
+            String::new()
+        } else {
+            format!("（{note}）")
+        };
+        logs.lock().unwrap().push(
+            "info",
+            &format!(
+                "net.request 响应{note}：HTTP {}；Set-Cookie：{set_cookies}；内容：module-item={}，验证页={}，just-a-moment={}",
+                response.status,
+                if has_list { "是" } else { "否" },
+                if has_verify { "是" } else { "否" },
+                if has_challenge { "是" } else { "否" },
             ),
             "net",
             None,

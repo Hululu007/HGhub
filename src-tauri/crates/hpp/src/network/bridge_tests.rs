@@ -173,3 +173,168 @@ fn log_cookie_bridge_writes_ext_log_line() {
         entries[1]["text"]
     );
 }
+
+fn home_cookie(name: &str, value: &str, secure: bool) -> WebViewCookie {
+    WebViewCookie {
+        name: name.into(),
+        value: value.into(),
+        domain: "home.example".into(),
+        path: "/".into(),
+        host_only: false,
+        secure,
+        http_only: false,
+        expires_at: None,
+    }
+}
+
+fn outgoing_cookie(network: &Network, url: &str) -> String {
+    let out = network
+        .outgoing(
+            Url::parse(url).unwrap(),
+            Method::GET,
+            HeaderMap::new(),
+            None,
+            true,
+        )
+        .unwrap();
+    out.headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+#[test]
+fn home_cookies_attach_only_to_matching_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let network = network(dir.path());
+    let names = network.set_home_cookies(
+        "https://a.example",
+        vec![home_cookie("sid", "home", false)],
+    );
+    assert_eq!(names, vec!["sid".to_string()]);
+    assert_eq!(
+        outgoing_cookie(&network, "https://a.example/path"),
+        "sid=home"
+    );
+    // 其他 origin 不附带：首页 Cookie 只跟桥时那个目标走。
+    assert_eq!(outgoing_cookie(&network, "https://b.example/path"), "");
+}
+
+#[test]
+fn home_cookies_jar_cookie_wins_on_same_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let network = network(dir.path());
+    network.merge_webview_cookies(vec![cookie("sid", "jar", "a.example", true, None)]);
+    network.set_home_cookies(
+        "https://a.example",
+        vec![home_cookie("sid", "home", false)],
+    );
+    // 同名时目标域名的罐子 Cookie 优先，首页的同名 Cookie 不重复带。
+    assert_eq!(
+        outgoing_cookie(&network, "https://a.example/"),
+        "sid=jar"
+    );
+}
+
+#[test]
+fn home_cookies_secure_only_for_https() {
+    let dir = tempfile::tempdir().unwrap();
+    let network = network(dir.path());
+    network.set_home_cookies(
+        "http://a.example",
+        vec![home_cookie("sid", "home", true)],
+    );
+    assert_eq!(outgoing_cookie(&network, "http://a.example/"), "");
+    network.set_home_cookies(
+        "https://a.example",
+        vec![home_cookie("sid", "home", true)],
+    );
+    assert_eq!(
+        outgoing_cookie(&network, "https://a.example/"),
+        "sid=home"
+    );
+}
+
+#[test]
+fn home_cookies_skip_bot_expired_and_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let network = network(dir.path());
+    let names = network.set_home_cookies(
+        "https://a.example",
+        vec![
+            home_cookie("__cf_bm", "x", false),
+            home_cookie("__CF_BM", "x", false),
+            cookie("old", "x", "home.example", false, Some(1)),
+            cookie("", "x", "home.example", false, None),
+            cookie("novalue", "", "home.example", false, None),
+            cookie("nodomain", "x", "", false, None),
+        ],
+    );
+    assert!(names.is_empty(), "应全部滤掉：{names:?}");
+    assert_eq!(outgoing_cookie(&network, "https://a.example/"), "");
+}
+
+#[test]
+fn home_cookies_overwrite_same_origin_and_cap_origins() {
+    let dir = tempfile::tempdir().unwrap();
+    let network = network(dir.path());
+    network.set_home_cookies(
+        "https://a.example",
+        vec![home_cookie("sid", "v1", false)],
+    );
+    network.set_home_cookies(
+        "https://a.example",
+        vec![home_cookie("sid", "v2", false)],
+    );
+    assert_eq!(outgoing_cookie(&network, "https://a.example/"), "sid=v2");
+    for i in 0..33 {
+        network.set_home_cookies(
+            &format!("https://o{i}.example"),
+            vec![home_cookie("sid", "home", false)],
+        );
+    }
+    // 上限 32 个 origin：最旧的 o0 被丢掉，最新的 o32 还在。
+    assert_eq!(outgoing_cookie(&network, "https://o0.example/"), "");
+    assert_eq!(
+        outgoing_cookie(&network, "https://o32.example/"),
+        "sid=home"
+    );
+}
+
+#[test]
+fn log_home_cookie_bridge_writes_ext_log_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let network = network(dir.path());
+    let logs: crate::native::Logs = Default::default();
+    network.set_logs(logs.clone());
+    network.log_home_cookie_bridge(
+        &["server_session".to_string(), "sid".to_string()],
+        "home.example",
+    );
+    let entries = logs.lock().unwrap().snapshot();
+    let line = entries
+        .iter()
+        .find(|e| e["requestId"] == "net")
+        .expect("应有一条 requestId 为 net 的加宽桥日志");
+    assert_eq!(line["level"], "info");
+    let text = line["text"].as_str().unwrap();
+    assert!(
+        text.contains(
+            "net.request Cookie 桥接（首页 home.example）：2 个（名字：server_session, sid）"
+        ),
+        "日志应含桥接计数、名字与来源域：{text}"
+    );
+    // 0 个也记一行（桥跑了、WebView 里首页没有 Cookie）。
+    network.log_home_cookie_bridge(&[], "home.example");
+    let entries = logs.lock().unwrap().snapshot();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("net.request Cookie 桥接（首页 home.example）：0 个"),
+        "0 个也应记一行：{}",
+        entries[1]["text"]
+    );
+}

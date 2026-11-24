@@ -101,6 +101,26 @@ pub fn looks_like_challenge(text: &str) -> bool {
         .any(|m| lower.contains(m))
 }
 
+/// 响应体标记（v0.0.87，响应日志用）：只做字节子串匹配，不解析
+/// HTML、不记响应体——验证页与拦截页都是 HTTP 200，状态码分不出
+/// 来。返回（有 module-item、有验证页文本、有 just-a-moment）。
+pub fn response_markers(body: &[u8]) -> (bool, bool, bool) {
+    fn contains(body: &[u8], needle: &[u8]) -> bool {
+        !needle.is_empty() && body.windows(needle.len()).any(|w| w == needle)
+    }
+    fn contains_ci(body: &[u8], needle: &[u8]) -> bool {
+        !needle.is_empty()
+            && body
+                .windows(needle.len())
+                .any(|w| w.eq_ignore_ascii_case(needle))
+    }
+    (
+        contains(body, b"module-item"),
+        contains(body, "验证密码".as_bytes()) || contains(body, "访问人数过多".as_bytes()),
+        contains_ci(body, b"just a moment"),
+    )
+}
+
 impl CookieJars {
     fn len(&self) -> usize {
         self.ordinary.len()
@@ -145,6 +165,12 @@ pub struct Network {
     /// WebView clearance 拿到的通行证（v0.0.77）：只在内存里按插件
     /// 保存，不落盘、不进 Cookie 罐；`__cf_bm` 绝不进这里。
     clearance: Mutex<Vec<SavedCookie>>,
+    /// WebView 首页的 Cookie（v0.0.87 加宽桥）：按请求目标 origin 记
+    /// 的“当次附加”Cookie——首页（wo.vivas.cc.cd 这类）落的会话
+    /// Cookie，引擎请求发往其他域名时也附上；只附当次请求，绝不以
+    /// 错误域名存进罐子、不落盘。`outgoing()` 按目标 origin 取、按名
+    /// 去重后并进 Cookie 头；上限 32 个 origin，超了丢最旧的。
+    home_cookies: Mutex<Vec<(String, Vec<WebViewCookie>)>>,
     /// 该插件的 ext.log 面板（v0.0.78）：`Installed::installed` 在装配
     /// 时绑定；net.request 的代理决议写进这里。没绑定时不记（测试用
     /// 的 Network 没有日志面板）。
@@ -207,6 +233,7 @@ impl Network {
             node_bootstrap: Mutex::new(node_bootstrap),
             node_client: Default::default(),
             clearance: Default::default(),
+            home_cookies: Default::default(),
             logs: Default::default(),
             #[cfg(test)]
             proxy_override: Default::default(),
@@ -323,6 +350,56 @@ impl Network {
         let _ = self.save_jar(&next);
         *guard = next;
         merged
+    }
+    /// 记下 WebView 首页的 Cookie，供下一次发往 `target_origin` 的
+    /// 引擎请求附上（v0.0.87 加宽桥）：首页只加载 homePage，从不访
+    /// 问目标域名，WebView 里没有目标 URL 的 Cookie 可桥（v0.0.86
+    /// 的教训，真机每次都是 0 个）——首页落的会话 Cookie 是唯一剩下
+    /// 的来源；源站只看 Cookie 头里的名和值，不认它来自哪个域。只记
+    /// 当次附加：不进罐子、不落盘；`__cf_bm`、空名/空值/空域名/已过期
+    /// 不收（与 `merge_webview_cookies` 同一条规矩）。按目标 origin
+    /// 记，每次桥覆盖同一 origin 的旧条目；上限 32 个 origin，超了丢
+    /// 最旧的。返回实际记下的 Cookie 名字（只报名字，不报值）。
+    pub fn set_home_cookies(
+        &self,
+        target_origin: &str,
+        cookies: Vec<WebViewCookie>,
+    ) -> Vec<String> {
+        let kept: Vec<WebViewCookie> = cookies
+            .into_iter()
+            .filter(|c| {
+                !c.name.is_empty()
+                    && !c.value.is_empty()
+                    && !c.domain.is_empty()
+                    && !c.name.eq_ignore_ascii_case(BOT_MANAGEMENT_COOKIE)
+                    && !c.expires_at.is_some_and(|t| t <= now())
+            })
+            .collect();
+        let names: Vec<String> = kept.iter().map(|c| c.name.clone()).collect();
+        let mut guard = self.home_cookies.lock().unwrap();
+        guard.retain(|(o, _)| o != target_origin);
+        guard.push((target_origin.to_string(), kept));
+        while guard.len() > 32 {
+            guard.remove(0);
+        }
+        names
+    }
+    /// 取发往 `target` 的当次附加 Cookie（v0.0.87）：按目标 origin
+    /// 匹配加宽桥记下的首页 Cookie，只取名字和值；Secure 的只给 https
+    /// 目标（浏览器同款规则）。不改存储、不消耗——`fetch` 的重试循环
+    /// 里同一请求会再调一次 `outgoing()`，重试也要带上同一份。
+    fn home_cookies_for(&self, target: &Url) -> Vec<(String, String)> {
+        let origin = target.origin().ascii_serialization();
+        let guard = self.home_cookies.lock().unwrap();
+        let Some((_, cookies)) = guard.iter().find(|(o, _)| *o == origin) else {
+            return Vec::new();
+        };
+        let https = target.scheme() == "https";
+        cookies
+            .iter()
+            .filter(|c| https || !c.secure)
+            .map(|c| (c.name.clone(), c.value.clone()))
+            .collect()
     }
     /// 匹配目标 URL 的通行证（`name=value` 串，已按路径长度排过序）：
     /// 请求头里已有同名 Cookie 的不重复带；`__cf_bm` 永不从这里出去。
@@ -1076,6 +1153,8 @@ pub fn headers(v: &Value) -> Result<HeaderMap> {
 
 #[cfg(test)]
 mod bridge_tests;
+#[cfg(test)]
+mod response_log_tests;
 #[cfg(test)]
 mod clear_tests;
 #[cfg(test)]
