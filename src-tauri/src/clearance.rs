@@ -37,6 +37,7 @@ pub enum Clearance {
     Failed,
 }
 
+#[cfg(not(target_os = "ios"))]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -125,9 +126,68 @@ async fn finish(
     }
 }
 
+/// 在窗口的 Cookie 存储里找一只 `cf_clearance`（iOS，v0.0.91）：走
+/// `webhome` 的异步读——同步 `cookies_for_url` 会在主线程上转嵌套
+/// run loop、重入 tao 的事件循环而 panic（见 webhome.rs 的
+/// `read_webview_cookies_async`）。转换与旧路一致：domain 取原值、
+/// 不去前导点、不小写。
+#[cfg(target_os = "ios")]
+async fn find_clearance_cookie(window: &WebviewWindow, target: &Url) -> Option<ClearanceCookie> {
+    crate::webhome::read_webview_cookies_async(window, target)
+        .await
+        .into_iter()
+        .find(|c| c.name.eq_ignore_ascii_case("cf_clearance"))
+        .map(|c| ClearanceCookie {
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path,
+            secure: c.secure,
+            http_only: c.http_only,
+            expires_at: c.expires_at,
+        })
+}
+
+/// 在窗口的 Cookie 存储里找一只 `cf_clearance`（非 iOS）：
+/// `cookies_for_url` 是阻塞调用（等主线程回消息），放 spawn_blocking 里。
+#[cfg(not(target_os = "ios"))]
+async fn find_clearance_cookie(window: &WebviewWindow, target: &Url) -> Option<ClearanceCookie> {
+    let w = window.clone();
+    let u = target.clone();
+    tokio::task::spawn_blocking(move || w.cookies_for_url(u))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|cookies| {
+            cookies
+                .into_iter()
+                .find(|c| c.name().eq_ignore_ascii_case("cf_clearance"))
+        })
+        .map(|c| {
+            let expires_at = c
+                .max_age()
+                .map(|age| now_ms().saturating_add(age.whole_milliseconds() as u64))
+                .or_else(|| {
+                    c.expires_datetime()
+                        .map(|t| (t.unix_timestamp().max(0) as u64) * 1000)
+                });
+            ClearanceCookie {
+                name: c.name().to_string(),
+                value: c.value().to_string(),
+                domain: c
+                    .domain()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| target.host_str().unwrap_or("").to_string()),
+                path: c.path().unwrap_or("/").to_string(),
+                secure: c.secure().unwrap_or(false),
+                http_only: c.http_only().unwrap_or(false),
+                expires_at,
+            }
+        })
+}
+
 /// 每秒读一次窗口的 Cookie 存储，拿到 `cf_clearance` 即返回；
-/// 超时返回 None。`cookies_for_url` 是阻塞调用（等主线程回消息），
-/// 必须放 spawn_blocking 里，不能占着 tokio 工作线程。
+/// 超时返回 None。
 async fn poll_for_clearance(
     window: &WebviewWindow,
     target: &Url,
@@ -135,39 +195,7 @@ async fn poll_for_clearance(
 ) -> Option<ClearanceCookie> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        let w = window.clone();
-        let u = target.clone();
-        let found = tokio::task::spawn_blocking(move || w.cookies_for_url(u))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .and_then(|cookies| {
-                cookies
-                    .into_iter()
-                    .find(|c| c.name().eq_ignore_ascii_case("cf_clearance"))
-            })
-            .map(|c| {
-                let expires_at = c
-                    .max_age()
-                    .map(|age| now_ms().saturating_add(age.whole_milliseconds() as u64))
-                    .or_else(|| {
-                        c.expires_datetime()
-                            .map(|t| (t.unix_timestamp().max(0) as u64) * 1000)
-                    });
-                ClearanceCookie {
-                    name: c.name().to_string(),
-                    value: c.value().to_string(),
-                    domain: c
-                        .domain()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| target.host_str().unwrap_or("").to_string()),
-                    path: c.path().unwrap_or("/").to_string(),
-                    secure: c.secure().unwrap_or(false),
-                    http_only: c.http_only().unwrap_or(false),
-                    expires_at,
-                }
-            });
-        if let Some(cookie) = found {
+        if let Some(cookie) = find_clearance_cookie(window, target).await {
             return Some(cookie);
         }
         if tokio::time::Instant::now() + POLL_INTERVAL >= deadline {

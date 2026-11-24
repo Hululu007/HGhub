@@ -49,6 +49,26 @@ tokio-util = "0.7"
 # tokio-util 不需要：app 侧只在 android/windows 登录里用，hpp 自带一份。
 [target.'cfg(target_os = "ios")'.dependencies]
 futures-util = "0.3"
+# v0.0.91：WebHome 的同步 Cookie 读改异步——直接调 WKHTTPCookieStore
+# 的 getAllCookies（与 wry 的 cookies() 同款调用，但不用它那个在主线
+# 程上转嵌套 run loop 的 wait_for_blocking_operation）。版本与 vendored
+# wry 0.57.1 的 Cargo.toml 一致（objc2-web-kit 0.3.2、block2 0.6；
+# objc2-foundation 0.3.2；objc2 0.6 与 macOS 侧同一版本）。
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSString",
+  "NSDate",
+  "NSHTTPCookie",
+] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "WKWebsiteDataStore",
+  "WKHTTPCookieStore",
+] }
+block2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wry = "0.57"

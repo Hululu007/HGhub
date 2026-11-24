@@ -326,10 +326,160 @@ pub async fn webhome_call(
     result
 }
 
+/// WKHTTPCookieStore 里一只 Cookie 的最小快照（v0.0.91）：只含桥与
+/// clearance 要用的字段，全是普通 Rust 数据，可跨线程经 oneshot 回传。
+/// `domain` 是 NSHTTPCookie 的 domain 原值（一定有值——wry 的
+/// `cookie_from_wkwebview` 里 domain 一定被设置，所以这里没有 host_only
+/// 字段；转 `WebViewCookie` 时 host_only 恒为 false，与旧转换一致）。
+#[cfg(target_os = "ios")]
+pub(crate) struct RawWebViewCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    /// unix 毫秒；None = 会话 Cookie（无 expiresDate）。
+    pub expires_at: Option<u64>,
+}
+
+/// 一只 NSHTTPCookie 按 wry `cookies_for_url` 的同一规则过滤并转成
+/// `RawWebViewCookie`，不过滤的返回 None。规则照搬 wry 0.57.1
+/// `wkwebview/mod.rs:1292`：domain 与 URL 的 domain 相等，且 secure
+/// 的只给 https（http 时只给 localhost 与环回地址），不 secure 的都行。
+#[cfg(target_os = "ios")]
+fn raw_cookie(
+    cookie: &objc2_foundation::NSHTTPCookie,
+    target_host: &Option<String>,
+    target_scheme: &str,
+) -> Option<RawWebViewCookie> {
+    use std::net::Ipv4Addr;
+    use std::str::FromStr;
+
+    let domain = cookie.domain().to_string();
+    let secure = cookie.isSecure();
+    let host_matches = Some(domain.as_str()) == target_host.as_deref();
+    let scheme_ok = (secure && target_scheme == "https")
+        || (secure
+            && target_scheme == "http"
+            && (matches!(target_host.as_deref(), Some("localhost"))
+                || target_host
+                    .as_deref()
+                    .and_then(|d| Ipv4Addr::from_str(d).ok())
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)))
+        || !secure;
+    if !host_matches || !scheme_ok {
+        return None;
+    }
+    Some(RawWebViewCookie {
+        name: cookie.name().to_string(),
+        value: cookie.value().to_string(),
+        domain,
+        path: cookie.path().to_string(),
+        secure,
+        http_only: cookie.isHTTPOnly(),
+        expires_at: cookie
+            .expiresDate()
+            .map(|d| (d.timeIntervalSince1970().max(0.0) * 1000.0) as u64),
+    })
+}
+
+/// 从 WebHome 窗口的 Cookie 存储异步读 `url` 的 Cookie（v0.0.91，iOS）。
+///
+/// v0.0.86–v0.0.90 的旧实现调同步 `WebviewWindow::cookies_for_url`：
+/// wry 的 `cookies()` 在主线程上用 `wait_for_blocking_operation` 转嵌套
+/// run loop 等 `getAllCookies` 回调；tao 正处在用户回调分发中
+/// （InUserCallback）时，嵌套循环让 BeforeWaiting 观察者重入，tao 0.37.2
+/// `app_state.rs:417` panic（真机 2026-11-24 21:05 的 `[panic]` 行）。
+///
+/// 新实现只在主线程上发异步请求：经 `WebviewWindow::run_on_main_thread`
+/// 把闭包以正常用户事件投递到主线程（不转嵌套循环），闭包里调
+/// `WKWebsiteDataStore::defaultDataStore().httpCookieStore().getAllCookies`
+/// 并立即返回；completion 里把 `NSArray<NSHTTPCookie>` 按 wry 的同一规则
+/// 过滤后经 oneshot 发回；tokio 侧 `await` oneshot（普通 park，不转
+/// loop），2 秒超时返回空列表——与原来“读不到返回空”的语义一致。
+/// WebHome 窗口用默认 data store（wry mod.rs:286，未配自定义
+/// data_store_identifier 的窗口共享默认存储），就是同一个 store。
+/// `getAllCookies` 的 completion 与 oneshot 发送失败都静默返回空列表，
+/// 不失败请求——桥只是给引擎补 Cookie，罐子本身仍是权威。
+#[cfg(target_os = "ios")]
+pub(crate) async fn read_webview_cookies_async(
+    window: &WebviewWindow,
+    url: &Url,
+) -> Vec<RawWebViewCookie> {
+    use objc2::MainThreadMarker;
+    use objc2_foundation::{NSArray, NSHTTPCookie};
+    use objc2_web_kit::WKWebsiteDataStore;
+    use std::ptr::NonNull;
+
+    let target_host = url.domain().map(str::to_string);
+    let target_scheme = url.scheme().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<RawWebViewCookie>>();
+    let posted = window
+        .run_on_main_thread(move || {
+            let Some(mtm) = MainThreadMarker::new() else {
+                let _ = tx.send(Vec::new());
+                return;
+            };
+            // SAFETY：闭包跑在主线程上（run_on_main_thread 保证），
+            // defaultDataStore 要求主线程标记；getAllCookies 只注册
+            // 回调、立即返回，不阻塞主线程、不转 run loop。
+            let store = unsafe { WKWebsiteDataStore::defaultDataStore(mtm) };
+            let cookie_store = unsafe { store.httpCookieStore() };
+            let block = block2::RcBlock::new(
+                move |cookies: NonNull<NSArray<NSHTTPCookie>>| {
+                    let list = unsafe { cookies.as_ref() }
+                        .to_vec()
+                        .into_iter()
+                        .filter_map(|c| raw_cookie(&c, &target_host, &target_scheme))
+                        .collect::<Vec<_>>();
+                    let _ = tx.send(list);
+                },
+            );
+            unsafe { cookie_store.getAllCookies(&block) };
+        })
+        .is_ok();
+    if !posted {
+        return Vec::new();
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(2), rx).await {
+        Ok(Ok(list)) => list,
+        _ => Vec::new(),
+    }
+}
+
+/// 从 WebHome 窗口的 Cookie 存储里读 `url` 的 Cookie（v0.0.86 桥与
+/// v0.0.87 加宽桥共用）。读不到时返回空列表——调用方照样记 `0 个`
+/// （桥跑了、窗口里没有该 URL 的 Cookie），与桥没跑是两回事。
+/// iOS（v0.0.91）：走异步 `read_webview_cookies_async`，同步读会在主线
+/// 程上转嵌套 run loop、重入 tao 的事件循环而 panic。
+#[cfg(target_os = "ios")]
+async fn read_webview_cookies(window: &WebviewWindow, url: &Url) -> Vec<hghub_hpp::WebViewCookie> {
+    read_webview_cookies_async(window, url)
+        .await
+        .into_iter()
+        .map(|c| hghub_hpp::WebViewCookie {
+            name: c.name,
+            value: c.value,
+            // 与旧转换一致：去前导点、小写；host_only 恒为 false
+            //（wry 的转换里 domain 一定有值，见 RawWebViewCookie）。
+            domain: c.domain.trim_start_matches('.').to_ascii_lowercase(),
+            path: c.path,
+            host_only: false,
+            secure: c.secure,
+            http_only: c.http_only,
+            expires_at: c.expires_at,
+        })
+        .collect()
+}
+
 /// 从 WebHome 窗口的 Cookie 存储里读 `url` 的 Cookie（v0.0.86 桥与
 /// v0.0.87 加宽桥共用）：`cookies_for_url` 是阻塞调用（等主线程回
 /// 消息），放 spawn_blocking 里。读不到时返回空列表——调用方照样记
 /// `0 个`（桥跑了、窗口里没有该 URL 的 Cookie），与桥没跑是两回事。
+/// 非 iOS 沿用这条路（tao 的 InUserCallback 重入 panic 只在 iOS 上）。
+#[cfg(not(target_os = "ios"))]
 async fn read_webview_cookies(window: &WebviewWindow, url: &Url) -> Vec<hghub_hpp::WebViewCookie> {
     let w = window.clone();
     let u = url.clone();
