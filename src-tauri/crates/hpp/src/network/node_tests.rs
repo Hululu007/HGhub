@@ -75,12 +75,26 @@ async fn start_mock_node() -> (String, Arc<MockNode>, MockServer) {
     });
     let health = state.clone();
     let request = state.clone();
+    let diagnose = state.clone();
     let router = Router::new()
         .route(
             "/health",
             get(move || {
                 let _ = health;
                 async { Json(json!({"ok": true, "node": "v18.20.4"})) }
+            }),
+        )
+        .route(
+            "/diagnose",
+            post(move |Json(body): Json<Value>| {
+                let state = diagnose.clone();
+                async move {
+                    *state.last.lock().unwrap() = Some(body.clone());
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({"report": "网络诊断 2026/11/24（代理：直连）\nexample.test：系统 1 个 [93.184.216.34]；DoH 2 个 [104.17.255.47, 172.66.199.198]\n  93.184.216.34：TCP 通，TLS 通（TLSv1.3 / TLS_AES_256_GCM_SHA384，ALPN 无 ALPN，10ms）；HTTP 200，非挑战页\n出口 IP：1.2.3.4（colo=HKG，cloudflare trace）"})),
+                    )
+                }
             }),
         )
         .route(
@@ -321,6 +335,45 @@ async fn node_tried_suffix_passes_through_with_resolved_count() {
     assert!(
         err.message.contains("共 1 个地址）"),
         "Rust 后缀应带解析总数：{}",
+        err.message
+    );
+    node_server.shutdown().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn node_doh_suffix_passes_through_with_resolved_count() {
+    // v0.0.80：Node 侧 DoH 补充后的已试后缀（已试: <系统地址>；DoH:
+    // <DoH 地址>；共 n 个地址）由 Rust 原样透传，Rust 再 append 自
+    // 己的（解析: …；共 n 个地址）——真机测试能直接读出系统与 DoH
+    // 各试了哪几个地址。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let (upstream, _, upstream_server) = start_mock_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = node_network(dir.path(), Arc::new(FixedBootstrap { base: node_base }));
+    *node.direct_error.lock().unwrap() = Some(
+        "Client network socket disconnected before secure TLS connection was established（已试: 198.20.0.19；DoH: 104.17.255.47, 172.66.199.198；共 3 个地址）"
+            .to_string(),
+    );
+    let err = network
+        .fetch(
+            Transfer::from_json(json!({"url": format!("{upstream}/x"), "responseType": "text"})),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "NETWORK");
+    let node_suffix = err
+        .message
+        .find("（已试: 198.20.0.19；DoH: 104.17.255.47, 172.66.199.198；共 3 个地址）")
+        .expect("Node 的 DoH 已试后缀应原样透传");
+    let rust_suffix = err
+        .message
+        .find("（解析: 127.0.0.1:")
+        .expect("Rust 的解析后缀应 append 在后");
+    assert!(
+        node_suffix < rust_suffix,
+        "Node 后缀应在 Rust 后缀之前：{}",
         err.message
     );
     node_server.shutdown().await;
@@ -962,6 +1015,54 @@ async fn proxy_decision_is_logged_to_ext_log() {
     );
     node_server.shutdown().await;
     upstream_server.abort();
+}
+
+#[tokio::test]
+async fn network_diagnose_returns_report_and_logs_it_to_ext_log() {
+    // v0.0.80：探针走 Node 边车 /diagnose，报告返回给调用方，同
+    // 时写进 ext.log（requestId "net"）；请求体里带 4 个玩偶域名、
+    // 代理描述与出口查询地址。
+    let (node_base, node, node_server) = start_mock_node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let network = fallback_network(dir.path(), node_base, crate::proxy::Mode::Off, None);
+    let logs: crate::native::Logs = Default::default();
+    network.set_logs(logs.clone());
+    let report = network.diagnose(&CancellationToken::new()).await.unwrap();
+    assert!(report.starts_with("网络诊断 "), "{report}");
+    assert!(report.contains("出口 IP：1.2.3.4"), "{report}");
+    let body = node
+        .last
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应调过 /diagnose");
+    let domains: Vec<String> = serde_json::from_value(body["domains"].clone()).unwrap();
+    assert_eq!(
+        domains,
+        vec![
+            "woggpan.888484.xyz",
+            "www.wogg.net",
+            "woggpan.xxooo.cf",
+            "wogg.xxooo.cf"
+        ]
+    );
+    assert_eq!(body["proxyDesc"].as_str().unwrap(), "直连");
+    assert!(
+        body["egressUrls"].as_array().unwrap().len() == 2,
+        "应带 2 个出口查询地址：{body}"
+    );
+    let entries = logs.lock().unwrap().snapshot();
+    let line = entries
+        .iter()
+        .find(|e| e["requestId"] == "net")
+        .expect("应有一条 requestId 为 net 的日志");
+    assert_eq!(line["level"], "info");
+    assert!(
+        line["text"].as_str().unwrap().contains("网络诊断 "),
+        "日志应含完整探针报告：{}",
+        line["text"]
+    );
+    node_server.shutdown().await;
 }
 
 #[test]

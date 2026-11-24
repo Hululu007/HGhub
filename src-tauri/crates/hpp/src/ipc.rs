@@ -42,6 +42,9 @@ pub async fn dispatch(
         )
         .await
         .map_err(PluginError::invalid)?,
+        // 网络诊断探针（v0.0.80）：只读，报告文本直接返回（设置页
+        // 展示），同时写进所用插件的 ext.log；见 Network::diagnose。
+        "net.diagnose" => json!(manager.network_diagnose().await?),
         "list" => json!(manager.list().await),
         "updates.state" => json!(manager.refresh_update_state().await?),
         "updates.policy.set" => json!(manager.update_policy_set(

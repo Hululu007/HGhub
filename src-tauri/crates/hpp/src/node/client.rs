@@ -36,6 +36,9 @@ pub struct NodeResponse {
     pub status: u16,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
+    /// v0.0.80：边车 DoH 使用情况（主机名、补充几个地址）；没有
+    /// 查过 DoH 时为 None。只用于写 ext.log，不进响应体。
+    pub doh: Option<String>,
 }
 
 #[derive(Clone)]
@@ -175,7 +178,7 @@ impl NodeClient {
             // host.js 的 500 带 code：上游超时/连接失败/TLS 失败按
             // NETWORK / TIMEOUT 映射（与 wreq 路径的错误码一致，
             // fetch 的 GET 重试只认 NETWORK / TIMEOUT）。
-            return Err(match v.get("code").and_then(Value::as_str) {
+            let mut err = match v.get("code").and_then(Value::as_str) {
                 Some("TIMEOUT") => PluginError::timeout(),
                 Some("NETWORK") => {
                     PluginError::new("NETWORK", format!("Node 边车请求失败：{message}"))
@@ -184,7 +187,13 @@ impl NodeClient {
                     PluginError::new("UPSTREAM_ERROR", format!("Node 边车请求失败：{message}"))
                 }
                 _ => PluginError::new("INTERNAL", format!("Node 边车请求失败：{message}")),
-            });
+            };
+            // v0.0.80：host.js 500 的 doh 字段（DoH 使用情况）放进
+            // details，供 network/api.rs 写 ext.log；不进错误正文。
+            if let Some(doh) = v.get("doh").and_then(Value::as_str) {
+                err.details = Some(json!({ "doh": doh }));
+            }
+            return Err(err);
         }
         let status = v
             .get("status")
@@ -229,7 +238,38 @@ impl NodeClient {
             status,
             headers: out_headers,
             body,
+            // v0.0.80：host.js 200 的 doh 字段（DoH 使用情况），
+            // 只用于写 ext.log；没有查过 DoH 时为 None。
+            doh: v.get("doh").and_then(Value::as_str).map(str::to_string),
         })
+    }
+
+    /// 网络诊断探针（v0.0.80）：POST /diagnose，返回报告文本。
+    /// 边车内部 60 秒截止；本侧超时放 65 秒，让边车先收尾回报告。
+    pub async fn diagnose(&self, body: Value) -> Result<String> {
+        let rsp = self
+            .post_json("/diagnose", body, Duration::from_secs(65))
+            .await?;
+        let status = rsp.status();
+        let v: Value = rsp.json().await.map_err(|e| {
+            PluginError::new("INTERNAL", format!("Node 边车 /diagnose 返回无效：{e}"))
+        })?;
+        if !status.is_success() {
+            let message = v
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("网络诊断失败");
+            return Err(PluginError::new(
+                "INTERNAL",
+                format!("网络诊断失败：{message}"),
+            ));
+        }
+        v.get("report")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                PluginError::new("INTERNAL", "Node 边车 /diagnose 未返回报告")
+            })
     }
 }
 
@@ -274,6 +314,24 @@ mod tests {
                                     Json(json!({"error": "connect ECONNREFUSED boom"})),
                                 );
                             }
+                            // v0.0.80：doh 字段随 200 与 500 带回。
+                            if body["url"].as_str() == Some("https://doh.example/") {
+                                return (
+                                    axum::http::StatusCode::OK,
+                                    Json(json!({
+                                        "status": 200,
+                                        "headers": {"content-type": "text/plain"},
+                                        "bodyBase64": BASE64.encode("node-body"),
+                                        "doh": "doh.example：补充 5 个地址",
+                                    })),
+                                );
+                            }
+                            if body["url"].as_str() == Some("https://doh-fail.example/") {
+                                return (
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(json!({"error": "tls reset", "code": "NETWORK", "doh": "doh-fail.example：补充 2 个地址"})),
+                                );
+                            }
                             // 回显：上游状态/头/体按协议原样返回。
                             (
                                 axum::http::StatusCode::OK,
@@ -288,6 +346,25 @@ mod tests {
                             )
                         }
                     }
+                }),
+            )
+            // v0.0.80：网络诊断探针。
+            .route(
+                "/diagnose",
+                post(|Json(body): Json<Value>| async move {
+                    if body["domains"]
+                        .as_array()
+                        .is_some_and(|d| d.iter().any(|x| x.as_str() == Some("boom.invalid")))
+                    {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "boom"})),
+                        );
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({"report": "网络诊断 2026/11/24（代理：直连）\nexample.test：系统 1 个 [93.184.216.34]；DoH 2 个 [104.17.255.47, 172.66.199.198]\n出口 IP：1.2.3.4（colo=HKG，cloudflare trace）"})),
+                    )
                 }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -348,6 +425,52 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, "INTERNAL");
         assert!(err.message.contains("ECONNREFUSED"), "{}", err.message);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn request_carries_doh_field_on_success_and_error() {
+        // v0.0.80：边车 200 的 doh 字段进 NodeResponse.doh；500 的
+        // doh 字段进错误 details（供 network/api.rs 写 ext.log）。
+        let (base, _state, server) = serve_mock().await;
+        let client = NodeClient::new(base).unwrap();
+        let rsp = client
+            .request(request("https://doh.example/"))
+            .await
+            .unwrap();
+        assert_eq!(rsp.doh.as_deref(), Some("doh.example：补充 5 个地址"));
+        let err = client
+            .request(request("https://doh-fail.example/"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "NETWORK");
+        assert_eq!(
+            err.details
+                .as_ref()
+                .and_then(|d| d.get("doh"))
+                .and_then(Value::as_str),
+            Some("doh-fail.example：补充 2 个地址"),
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn diagnose_returns_report_and_maps_failure() {
+        // v0.0.80：/diagnose 200 回报告文本；500 转 INTERNAL 错误。
+        let (base, _state, server) = serve_mock().await;
+        let client = NodeClient::new(base).unwrap();
+        let report = client
+            .diagnose(json!({"domains": ["example.test"]}))
+            .await
+            .unwrap();
+        assert!(report.contains("网络诊断"), "{report}");
+        assert!(report.contains("出口 IP：1.2.3.4"), "{report}");
+        let err = client
+            .diagnose(json!({"domains": ["boom.invalid"]}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "INTERNAL");
+        assert!(err.message.contains("boom"), "{}", err.message);
         server.abort();
     }
 

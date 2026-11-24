@@ -16,11 +16,30 @@
 // 先解析再按顺序布坏/好端点，不硬编码顺序）；证书 SAN 因此同时
 // 含 myhost.test 与 localhost。IP 字面量 URL 只回 1 个地址，
 // 测“仅 1 个地址，无处可换”的诊断。
+// v0.0.80：DoH 取全量边缘地址 + 轮换（系统列表不够用时才查，
+// mock DoH 端点由 HG_DOH_BASE_URL 注入；DoH 答案过放行校验，
+// 127/8 全拒，所以轮换用例用本机可绑的非保留 IP 做“好地址”，
+// 见下面 findUsableIp）；网络诊断探针（POST /diagnose，
+// port 参数只给测试指临时端口，生产永远 443）。
+// 轮换用例在测试进程内直接调 doFetch（不在 spawned 边车子进程
+// 里跑）：沙箱会拦截跨进程发往非 loopback 地址的 TCP，子进程
+// 连不上 DoH 给的非保留 IP；且沙箱拦截一切发往非 loopback 的
+// TCP（同进程、即使本机有监听也一样，直连公网 IP 则黑洞），
+// 所以 DoH 的“好地址”在本机永远不可达——“补充地址→成功”用
+// 例显式跳过，成功路径由 v0.0.80 真机验收验证；可测的部分是
+// DoH 查询、过滤、轮换尝试（全失败用例的后缀证明 6 个地址都
+// 被试了）、_doh 字段与 60 秒缓存（缓存用例用两次失败请求，
+// 不依赖好服务器）。doFetch 因此导出（见 host.js 末尾注释）。
+// 懒加载 getHost() 必须在“默认端口被占时落临时端口”用例之后第
+// 一次调用——require host.js 会在测试进程内占 55101。
+// DoH 缓存按主机名记在模块级内存里：轮换用例各用一个主机名
+// （doh-allfail/doh-cache.test），避免缓存串用例。
 //
 // 跑：node --test src-tauri/node-sidecar/tests/test_host.mjs
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -34,6 +53,19 @@ const HOST = path.join(SIDECAR, 'host.js');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-node-test-'));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 懒加载 host.js：require 会在测试进程内起一个边车服务器（占
+// 55101 或自愈到随机端口；无 HG_NODE_INFO_PATH 时不写 info 文件）。
+// 必须在“默认端口被占时落临时端口”用例跑完之后才第一次调用——
+// 那用例要占 55101，若测试进程已占住它，occupier.listen 永远不
+// 回调。DoH 进程内用例定义在它之后，node:test 按定义顺序串行跑，
+// 所以第一次调用一定在它之后。只供 DoH 轮换用例调 doFetch。
+const requireHost = createRequire(import.meta.url);
+let hostMod = null;
+function getHost() {
+  if (!hostMod) hostMod = requireHost(HOST);
+  return hostMod;
+}
 
 async function startHost(extraEnv = {}) {
   const infoPath = path.join(TMP, `node-sidecar-${Date.now()}-${Math.random()}.json`);
@@ -72,6 +104,54 @@ async function postRequest(base, body) {
     body: JSON.stringify(body),
   });
   return r.json();
+}
+
+async function postDiagnose(base, body) {
+  const r = await fetch(`${base}/diagnose`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+// mock DoH 端点（v0.0.80）：按 type 回 A/AAAA 记录，记调用次数。
+// failStatus 非 0 时回该 HTTP 状态（测 DoH 端点不可用/失败）。
+function startMockDoh({ a = [], aaaa = [], status = 0, failStatus = 0 } = {}) {
+  const hits = { total: 0, a: 0, aaaa: 0 };
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    if (u.pathname !== '/resolve') { res.writeHead(404); res.end(); return; }
+    hits.total += 1;
+    const type = u.searchParams.get('type');
+    if (type === 'A') hits.a += 1; else if (type === 'AAAA') hits.aaaa += 1;
+    if (failStatus) { res.writeHead(failStatus); res.end(); return; }
+    const ips = type === 'A' ? a : aaaa;
+    const answer = ips.map((ip) => ({ name: 'example.test.', type: type === 'A' ? 1 : 28, TTL: 60, data: ip }));
+    res.writeHead(200, { 'content-type': 'application/dns-json' });
+    res.end(JSON.stringify({ Status: status, Answer: answer }));
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, hits, port: server.address().port })));
+}
+
+// mock 出口 IP 端点（v0.0.80）：/cdn-cgi/trace 回 trace 文本，
+// /ip 回裸 IP；traceStatus 非 200 时 trace 端点回该状态（测回落）。
+function startMockEgress({ traceIp = '1.2.3.4', colo = 'HKG', ip = '5.6.7.8', traceStatus = 200 } = {}) {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/cdn-cgi/trace') {
+      if (traceStatus !== 200) { res.writeHead(traceStatus); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(`fl=1\nip=${traceIp}\nloc=CN\ncolo=${colo}\n`);
+      return;
+    }
+    if (req.url === '/ip') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(ip);
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port })));
 }
 
 // 从 socket 上精确读 n 字节的缓冲读取器（mock 代理握手用）。
@@ -164,7 +244,10 @@ before(() => {
   certs.cert = fs.readFileSync(path.join(dir, 'cert.pem'));
 });
 
-after(() => {
+after(async () => {
+  // 进程内 require 过 host.js 时（DoH 轮换用例），先关掉它起的
+  // 监听服务器，否则测试进程退不出、node --test 一直等。
+  if (hostMod) await hostMod.closeServer();
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
@@ -416,7 +499,9 @@ test('TLS 握手被断时只试一次：单个地址无处可换（v0.0.79）', 
     assert.equal(result.code, 'NETWORK');
     assert.match(result.error, /Client network socket disconnected before secure TLS connection was established/);
     assert.equal(hits.clientHellos, 1, '单个地址无处可换，坏端点只应被试一次');
-    assert.match(result.error, /已试: 127\.0\.0\.2；仅 1 个地址，无处可换/);
+    // v0.0.80：系统列表耗尽后会查一次 DoH（无可用地址），后缀如
+    // 实写明 DoH 无结果。
+    assert.match(result.error, /已试: 127\.0\.0\.2；DoH 无结果；仅 1 个地址，无处可换/);
   } finally {
     stopHost(child);
     bad.close();
@@ -510,8 +595,8 @@ test('全部地址都 TLS 失败时报错带已试地址与总数（v0.0.79）',
     assert.equal(result.code, 'NETWORK');
     assert.match(result.error, /Client network socket disconnected before secure TLS connection was established/);
     assert.ok(
-      result.error.includes(`（已试: ${addrs[0].address}, ${addrs[1].address}；共 2 个地址）`),
-      `报错应带全部已试地址与解析总数：${result.error}`,
+      result.error.includes(`（已试: ${addrs[0].address}, ${addrs[1].address}；DoH 无结果；共 2 个地址）`),
+      `报错应带全部已试地址、DoH 无结果与解析总数：${result.error}`,
     );
     assert.ok(hits1.clientHellos >= 1, '第一个坏端点应被试过');
     assert.ok(hits2.clientHellos >= 1, '第二个坏端点也应被试过');
@@ -621,6 +706,353 @@ test('resolveAddrs：系统顺序、不重排、解析失败回空列表（v0.0.
   // 顺序以系统为准，不硬编码；但两个族都要在，不应被重排丢掉。
   assert.deepEqual(JSON.parse(line('IP ')), [{ address: '127.0.0.2', family: 4 }]);
   assert.deepEqual(JSON.parse(line('BAD ')), []);
+});
+
+// ---------------------------------------------------------------------------
+// v0.0.80：DoH 取全量边缘地址 + 轮换、网络诊断探针。
+//
+// DoH 端到端用例需要一个“过放行校验且本机可绑”的 IP（DoH 答案里的
+// 内网/保留地址会被滤掉，127/8 全拒）：运行时从本机网卡找一个
+// 非内网 IPv4（本机是 198.19.0.2，属放行的 FakeIP 段）。找不到时
+// 相关用例跳过（环境限制，不是代码问题）；其余 DoH 用例（失败
+// 退回、缓存、私网过滤、isAllowedIp 单元）不依赖它。
+// ---------------------------------------------------------------------------
+function findUsableIp() {
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      // Node 18.4+ 的 family 是字符串 'IPv4'，老版本是数字 4。
+      if ((a.family !== 4 && a.family !== 'IPv4') || a.internal) continue;
+      const [o1, o2, o3] = a.address.split('.').map(Number);
+      if (o1 === 10 || o1 === 127 || o1 >= 224) continue;
+      if (o1 === 100 && o2 >= 64 && o2 <= 127) continue;
+      if (o1 === 169 && o2 === 254) continue;
+      if (o1 === 172 && o2 >= 16 && o2 <= 31) continue;
+      if (o1 === 192 && o2 === 168) continue;
+      if (o1 === 192 && o2 === 0 && (o3 === 0 || o3 === 2)) continue;
+      if (o1 === 192 && o2 === 88 && o3 === 99) continue;
+      if (o1 === 198 && o2 === 51 && o3 === 100) continue;
+      if (o1 === 203 && o2 === 0 && o3 === 113) continue;
+      return a.address;
+    }
+  }
+  return null;
+}
+const usableIp = findUsableIp();
+if (!usableIp) console.log('注意：本机无可用非保留 IP，DoH 轮换端到端用例将跳过');
+
+test('DoH 补充地址：系统 1 个坏地址 + DoH 回 5 个、其中 1 个好 → 成功（v0.0.80）', {
+  // 本机不可测，显式跳过：沙箱拦截一切发往非 loopback 地址的
+  // TCP（同进程、即使本机有监听也一样；直连公网 IP 则黑洞），
+  // DoH 给的非保留地址永远到不了本地“好服务器”——明文 HTTP
+  // 直连 198.19.0.2 也被网关截获（Parse Error），TLS 更不用说。
+  // 而 loopback 地址又过不了 isAllowedIp 放行校验，两者无交集。
+  // 成功路径（DoH 地址通 → 200）由 v0.0.80 真机验收验证：
+  // 直连模式玩偶分类能出来即证明轮换成功。可测的部分（DoH 查
+  // 询、过滤、轮换尝试、后缀、缓存）由其余用例覆盖。
+  skip: '本机沙箱拦截非 loopback TCP，DoH 好地址不可达；成功路径由真机验收验证',
+}, () => {});
+
+test('DoH 全部失败时报错列出系统与 DoH 两组地址及总数（v0.0.80）', { timeout: 30000, skip: !usableIp }, async () => {
+  // 进程内调 doFetch。系统 1 个坏地址 + DoH 5 个坏地址（首个是
+  // 本机 IP 上的坏 TLS 端点，其余 4 个是真实 Cloudflare 边缘
+  // IP——本机沙箱会拦截发往它们的 TCP 并回明文拒绝或 RST，TLS
+  // 报 wrong version number 或被断，同样是无字节发出的 NETWORK
+  // 失败，轮换会一路试完）：报错应是首个错误，附两组已试地址与总数。
+  // 不断言 DoH 坏端点的 clientHellos：沙箱在 TLS 层拦截，ClientHello
+  // 到不了本机坏服务器；后缀已证明该地址被试过。
+  const { server: bad1, hits: hits1 } = await startBadTlsServer('127.0.0.2', 0);
+  const port = bad1.address().port;
+  const { server: bad2 } = await startBadTlsServer(usableIp, port);
+  const doh = await startMockDoh({ a: [usableIp, '104.17.255.47', '172.66.199.198', '104.20.56.211', '172.66.194.190'] });
+  const prevDoh = process.env.HG_DOH_BASE_URL;
+  process.env.HG_DOH_BASE_URL = `http://127.0.0.1:${doh.port}`;
+  try {
+    let err = null;
+    try {
+      await getHost().doFetch({
+        url: `https://doh-allfail.test:${port}/x`,
+        method: 'GET',
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        timeoutMs: 10000,
+        proxyUrl: null,
+        pinnedAddrs: [`127.0.0.2:${port}`],
+      });
+    } catch (e) { err = e; }
+    assert.ok(err, '应抛出错误');
+    assert.equal(err.code, 'NETWORK');
+    assert.match(err.message, /Client network socket disconnected before secure TLS connection was established/);
+    assert.ok(
+      err.message.includes(`（已试: 127.0.0.2；DoH: ${usableIp}, 104.17.255.47, 172.66.199.198, 104.20.56.211, 172.66.194.190；共 6 个地址）`),
+      `报错应带系统与 DoH 两组地址及总数：${err.message}`,
+    );
+    assert.equal(err._doh, 'doh-allfail.test：补充 5 个地址');
+    assert.ok(hits1.clientHellos >= 1, '系统坏端点应被试过');
+  } finally {
+    if (prevDoh === undefined) delete process.env.HG_DOH_BASE_URL;
+    else process.env.HG_DOH_BASE_URL = prevDoh;
+    bad1.close();
+    bad2.close();
+    doh.server.close();
+  }
+});
+
+test('DoH 端点不可达时静默退回系统错误（v0.0.80）', { timeout: 20000 }, async () => {
+  // DoH 端点直接连不上：不报错、不阻塞，报错仍是系统那 1 个地址
+  // 的 TLS 失败，后缀写明 DoH 无结果。
+  const dead = await new Promise((resolve) => {
+    const s = http.createServer();
+    s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close(() => resolve(port)); });
+  });
+  const { server: bad, hits } = await startBadTlsServer('127.0.0.2', 0);
+  const port = bad.address().port;
+  const { child, base } = await startHost({ HG_DOH_BASE_URL: `http://127.0.0.1:${dead}` });
+  try {
+    const result = await postRequest(base, {
+      url: `https://myhost.test:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [`127.0.0.2:${port}`],
+    });
+    assert.equal(result.code, 'NETWORK');
+    assert.match(result.error, /Client network socket disconnected before secure TLS connection was established/);
+    assert.match(result.error, /已试: 127\.0\.0\.2；DoH 无结果；仅 1 个地址，无处可换/);
+    assert.equal(result.doh, 'myhost.test：查询失败');
+    assert.equal(hits.clientHellos, 1, '系统坏端点只应被试一次');
+  } finally {
+    stopHost(child);
+    bad.close();
+  }
+});
+
+test('同一主机 60 秒内第二次请求不重复查 DoH（v0.0.80）', { timeout: 30000, skip: !usableIp }, async () => {
+  // 进程内调 doFetch。两次请求同一主机（都失败——好地址在本机
+  // 不可达，见成功用例的跳过原因）：第一次查 DoH（A+AAAA 各
+  // 1 次），第二次走内存缓存，不再发 DoH 查询；两次报错都应带
+  // 同样的 _doh，证明第二次确实用了缓存里的地址轮换。
+  const { server: bad } = await startBadTlsServer('127.0.0.2', 0);
+  const port = bad.address().port;
+  const doh = await startMockDoh({ a: [usableIp, '104.17.255.47', '172.66.199.198', '104.20.56.211', '172.66.194.190'] });
+  const prevDoh = process.env.HG_DOH_BASE_URL;
+  process.env.HG_DOH_BASE_URL = `http://127.0.0.1:${doh.port}`;
+  const body = {
+    url: `https://doh-cache.test:${port}/x`,
+    method: 'GET',
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    timeoutMs: 10000,
+    proxyUrl: null,
+    pinnedAddrs: [`127.0.0.2:${port}`],
+  };
+  const runOnce = async () => {
+    try {
+      await getHost().doFetch(body);
+      return null;
+    } catch (e) { return e; }
+  };
+  try {
+    const first = await runOnce();
+    assert.ok(first, '第一次请求应失败（好地址不可达）');
+    assert.equal(first.code, 'NETWORK');
+    assert.equal(first._doh, 'doh-cache.test：补充 5 个地址');
+    const second = await runOnce();
+    assert.ok(second, '第二次请求也应失败');
+    assert.equal(second.code, 'NETWORK');
+    assert.equal(second._doh, 'doh-cache.test：补充 5 个地址');
+    assert.equal(doh.hits.a, 1, '第二次请求不应重复查 DoH（A）');
+    assert.equal(doh.hits.aaaa, 1, '第二次请求不应重复查 DoH（AAAA）');
+  } finally {
+    if (prevDoh === undefined) delete process.env.HG_DOH_BASE_URL;
+    else process.env.HG_DOH_BASE_URL = prevDoh;
+    bad.close();
+    doh.server.close();
+  }
+});
+
+test('DoH 回内网地址时被滤掉不试（v0.0.80）', { timeout: 20000 }, async () => {
+  // DoH 只回内网地址：全部被放行校验滤掉，报错里不出现它们，
+  // 后缀写明 DoH 无结果。
+  const { server: bad } = await startBadTlsServer('127.0.0.2', 0);
+  const port = bad.address().port;
+  const doh = await startMockDoh({ a: ['10.0.0.1', '192.168.1.1'] });
+  const { child, base } = await startHost({ HG_DOH_BASE_URL: `http://127.0.0.1:${doh.port}` });
+  try {
+    const result = await postRequest(base, {
+      url: `https://myhost.test:${port}/x`,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeoutMs: 10000,
+      proxyUrl: null,
+      pinnedAddrs: [`127.0.0.2:${port}`],
+    });
+    assert.equal(result.code, 'NETWORK');
+    assert.match(result.error, /DoH 无结果/);
+    assert.ok(!result.error.includes('10.0.0.1'), '内网地址不应被试、不应出现在报错里');
+    assert.ok(!result.error.includes('192.168.1.1'), '内网地址不应被试、不应出现在报错里');
+    assert.equal(result.doh, 'myhost.test：无可用地址');
+  } finally {
+    stopHost(child);
+    bad.close();
+    doh.server.close();
+  }
+});
+
+test('isAllowedIp：与 Rust allowed_ip 同款放行校验（v0.0.80）', () => {
+  const script = `
+    const { isAllowedIp } = require(${JSON.stringify(HOST)});
+    const cases = [
+      ['104.17.255.47', true], ['172.66.199.198', true], ['8.8.8.8', true],
+      ['198.18.25.104', true], ['198.19.0.1', true],
+      ['10.0.0.1', false], ['127.0.0.1', false], ['192.168.1.1', false],
+      ['172.16.0.1', false], ['172.31.255.255', false], ['172.32.0.1', true],
+      ['100.64.0.1', false], ['100.127.255.255', false], ['100.128.0.1', true],
+      ['169.254.1.1', false], ['0.0.0.0', false], ['224.0.0.1', false],
+      ['192.0.0.1', false], ['192.0.2.1', false], ['192.0.1.1', true],
+      ['192.88.99.1', false], ['198.51.100.1', false], ['203.0.113.1', false],
+      ['2606:4700:4700::1111', true], ['::1', false], ['fe80::1', false],
+      ['2001:db8::1', false], ['2002::1', false], ['3fff::1', false],
+      ['::ffff:104.17.255.47', true], ['::ffff:10.0.0.1', false],
+      ['not-an-ip', false],
+    ];
+    for (const [ip, want] of cases) {
+      const got = isAllowedIp(ip);
+      if (got !== want) { console.error('FAIL ' + ip + ' got ' + got + ' want ' + want); process.exit(1); }
+    }
+    console.log('OK');
+    process.exit(0);
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  // require host.js 会先打一行启动日志（Node sidecar starting…），
+  // 只看最后一行。
+  assert.equal(out.trim().split('\n').pop(), 'OK');
+});
+
+test('probeTls：TCP 不通时报 refused（v0.0.80）', () => {
+  // 探针 TCP/TLS 区分的最小单元：127.0.0.1:443 本机无监听，应是
+  // TCP 不通（connect ECONNREFUSED），而不是 TLS 失败。
+  const script = `
+    const { probeTls } = require(${JSON.stringify(HOST)});
+    (async () => {
+      const r = await probeTls('example.test', '127.0.0.1', 5000);
+      console.log(JSON.stringify(r));
+      process.exit(0);
+    })();
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+  // require host.js 会先打一行启动日志，只解析最后一行 JSON。
+  const r = JSON.parse(out.trim().split('\n').pop());
+  assert.equal(r.tcpOk, false);
+  assert.equal(r.tlsOk, false);
+  assert.match(r.error, /ECONNREFUSED/);
+});
+
+test('网络诊断探针：两组 DNS 地址、握手区分、出口 IP（v0.0.80）', { timeout: 30000, skip: !usableIp }, async () => {
+  // localhost 系统解析 2 个地址：坏 TLS 端点放第一个、好端点放
+  // 第二个（同一端口）；DoH 回本机可用 IP（过放行校验；该端口无
+  // 监听，应报 TCP 不通——三种握手结果一次齐）；出口走 mock trace 端点。
+  const addrs = await resolveLocalhost();
+  assert.ok(addrs.length >= 2, `localhost 应至少解析出 2 个地址，实际：${JSON.stringify(addrs)}`);
+  const { server: bad, hits } = await startBadTlsServer(addrs[0].address, 0);
+  const port = bad.address().port;
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('secure-ok');
+  });
+  await new Promise((resolve) => good.listen(port, addrs[1].address, resolve));
+  const doh = await startMockDoh({ a: [usableIp] });
+  const egress = await startMockEgress({});
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca, HG_DOH_BASE_URL: `http://127.0.0.1:${doh.port}` });
+  try {
+    const result = await postDiagnose(base, {
+      domains: ['localhost'],
+      proxyUrl: null,
+      proxyDesc: '直连',
+      port,
+      egressUrls: [`http://127.0.0.1:${egress.port}/cdn-cgi/trace`, `http://127.0.0.1:${egress.port}/ip`],
+    });
+    assert.ok(result.report, `应返回报告：${JSON.stringify(result)}`);
+    const lines = result.report.split('\n');
+    assert.match(lines[0], /^网络诊断 .*（代理：直连）$/);
+    assert.ok(
+      result.report.includes(`localhost：系统 2 个 [${addrs[0].address}, ${addrs[1].address}]；DoH 1 个 [${usableIp}]`),
+      `DNS 对照行应列出系统与 DoH 两组地址：${result.report}`,
+    );
+    assert.ok(
+      result.report.includes(`${addrs[0].address}：TCP 通，TLS 失败（Client network socket disconnected before secure TLS connection was established，`),
+      `坏端点应报 TLS 失败：${result.report}`,
+    );
+    assert.match(result.report, new RegExp(`${addrs[1].address.replace(/\./g, '\\.')}：TCP 通，TLS 通\\（TLSv1\\.3[^）]*，ALPN 无 ALPN，\\d+ms\\）；HTTP 200，非挑战页`));
+    // DoH 给的地址在真机上应报 TCP 不通（无监听）；但本机沙箱会
+    // 拦截发往非 loopback 的 TCP、替它回一段明文，于是报成
+    // “TCP 通，TLS 失败（wrong version number）”。这里不断言它
+    // 的具体结果，只断言这一行存在——TCP 不通分支由 probeTls
+    // 单元测试覆盖。
+    assert.ok(
+      result.report.includes(`${usableIp}：`),
+      `DoH 地址应有一行握手结果：${result.report}`,
+    );
+    assert.ok(result.report.includes('出口 IP：1.2.3.4（colo=HKG，cloudflare trace）'), `出口 IP 应来自 trace：${result.report}`);
+    assert.equal(lines.length, 6, `报告应为 6 行（标题 + DNS + 3 握手 + 出口），实际：${result.report}`);
+    assert.ok(hits.clientHellos >= 1, '坏端点应被试过');
+  } finally {
+    stopHost(child);
+    bad.close();
+    good.close();
+    doh.server.close();
+    egress.server.close();
+  }
+});
+
+test('网络诊断探针：出口 trace 不可用时回落到备用地址（v0.0.80）', { timeout: 30000 }, async () => {
+  const egress = await startMockEgress({ traceStatus: 500, ip: '5.6.7.8' });
+  const { child, base } = await startHost();
+  try {
+    const result = await postDiagnose(base, {
+      domains: [],
+      proxyUrl: null,
+      proxyDesc: '直连',
+      egressUrls: [`http://127.0.0.1:${egress.port}/cdn-cgi/trace`, `http://127.0.0.1:${egress.port}/ip`],
+    });
+    assert.ok(result.report, `应返回报告：${JSON.stringify(result)}`);
+    assert.ok(result.report.includes('出口 IP：5.6.7.8（127.0.0.1）'), `trace 失败时应回落到备用地址：${result.report}`);
+    assert.ok(!result.report.includes('未知'), `回落后不应写未知：${result.report}`);
+  } finally {
+    stopHost(child);
+    egress.server.close();
+  }
+});
+
+test('网络诊断探针：握手通的边缘返回挑战页时标出（v0.0.80）', { timeout: 30000 }, async () => {
+  // 好端点返回 Cloudflare 挑战页：HTTP 行应标“挑战页”，而不是
+  // “非挑战页”。::1 上无监听，应报 TCP 不通。
+  const addrs = await resolveLocalhost();
+  assert.ok(addrs.length >= 2);
+  const good = https.createServer({ key: certs.key, cert: certs.cert }, (req, res) => {
+    res.writeHead(403, { 'content-type': 'text/html' });
+    res.end('<html><head><title>Just a moment...</title></head><body>cf-browser-verification</body></html>');
+  });
+  await new Promise((resolve) => good.listen(0, '127.0.0.1', resolve));
+  const port = good.address().port;
+  const doh = await startMockDoh({});
+  const egress = await startMockEgress({});
+  const { child, base } = await startHost({ NODE_EXTRA_CA_CERTS: certs.ca, HG_DOH_BASE_URL: `http://127.0.0.1:${doh.port}` });
+  try {
+    const result = await postDiagnose(base, {
+      domains: ['localhost'],
+      proxyUrl: null,
+      proxyDesc: '直连',
+      port,
+      egressUrls: [`http://127.0.0.1:${egress.port}/cdn-cgi/trace`],
+    });
+    assert.ok(result.report, `应返回报告：${JSON.stringify(result)}`);
+    assert.ok(result.report.includes('HTTP 403，挑战页'), `挑战页应被标出：${result.report}`);
+    assert.ok(result.report.includes('TCP 不通'), `无监听的地址应报 TCP 不通：${result.report}`);
+  } finally {
+    stopHost(child);
+    good.close();
+    doh.server.close();
+    egress.server.close();
+  }
 });
 
 test('CONNECT 代理握手：请求行、认证、200 后发 TLS ClientHello', { timeout: 20000 }, async () => {

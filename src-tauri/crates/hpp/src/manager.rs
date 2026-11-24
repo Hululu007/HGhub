@@ -988,6 +988,28 @@ impl PluginManager {
         self.network(id).await?.set_clearance(cookie);
         Ok(())
     }
+
+    /// 网络诊断探针（v0.0.80）：只读诊断，见 `Network::diagnose`。
+    /// 走首个已启用 WebHome 插件的 Network（探针量的就是 WebHome
+    /// 那条路；代理决议与 Node 边车全局共享，换哪个插件结果相同，
+    /// 差别只在报告写进哪个插件的 ext.log）；没有 WebHome 插件时
+    /// 走首个已启用插件的 Network；没有可用插件时报错。
+    pub async fn network_diagnose(&self) -> Result<String> {
+        let plugins = self.list().await;
+        let target = plugins
+            .iter()
+            .filter(|p| p.enabled)
+            .find(|p| p.meta.webhome.is_some())
+            .or_else(|| plugins.iter().find(|p| p.enabled))
+            .map(|p| p.meta.id.clone());
+        let Some(id) = target else {
+            return Err(PluginError::new("UNSUPPORTED", "没有可用的插件网络"));
+        };
+        let network = self.network(&id).await?;
+        network
+            .diagnose(&tokio_util::sync::CancellationToken::new())
+            .await
+    }
     /// WebHome 缓存与插件共用同一份存储（store.rs），不是另一份副本。
     pub(crate) async fn store(&self, id: &str) -> Result<Arc<Store>> {
         let p = self.get(id).await?;

@@ -391,15 +391,19 @@ impl Network {
                 r = client.request(request.clone()) => r,
             }
         };
+        // v0.0.80：边车 DoH 使用情况写进 ext.log（成功/失败各记一行）。
+        self.log_doh_usage(&first);
         match first {
             Ok(v) => Ok(v),
             Err(e) if Self::is_node_connect(&e) => {
                 if self.refresh_node_client(cancel).await.is_ok() {
                     let client = self.node_client(cancel).await?;
-                    tokio::select! {
+                    let second = tokio::select! {
                         _ = cancel.cancelled() => Err(PluginError::cancelled()),
                         r = client.request(request) => r,
-                    }
+                    };
+                    self.log_doh_usage(&second);
+                    second
                 } else {
                     Err(e)
                 }
@@ -558,6 +562,75 @@ impl Network {
             "net",
             None,
         );
+    }
+
+    /// 边车 DoH 使用情况写进 ext.log（v0.0.80）：主机名、补充几个
+    /// 地址、成功/失败。`doh` 来自边车响应/错误的 doh 字段（见
+    /// node/client.rs）；没查过 DoH 时不记。没绑日志面板时不记。
+    fn log_doh_usage(&self, result: &Result<NodeResponse>) {
+        let doh = match result {
+            Ok(v) => v.doh.as_deref().map(|d| (d, true)),
+            Err(e) => e
+                .details
+                .as_ref()
+                .and_then(|d| d.get("doh"))
+                .and_then(Value::as_str)
+                .map(|d| (d, false)),
+        };
+        let Some((doh, ok)) = doh else {
+            return;
+        };
+        let Some(logs) = self.logs.lock().unwrap().clone() else {
+            return;
+        };
+        logs.lock().unwrap().push(
+            "info",
+            &format!(
+                "net.request DoH：{doh}；结果：{}",
+                if ok { "成功" } else { "失败" }
+            ),
+            "net",
+            None,
+        );
+    }
+
+    /// 网络诊断探针的目标域名（v0.0.80）：当前 WebHome 失败的玩偶站
+    /// 4 个域名。只用于诊断（net.diagnose），不进任何请求逻辑——
+    /// 探针要对照的正是这 4 个域名的系统解析与 DoH 答案。
+    const DIAGNOSE_DOMAINS: [&'static str; 4] = [
+        "woggpan.888484.xyz",
+        "www.wogg.net",
+        "woggpan.xxooo.cf",
+        "wogg.xxooo.cf",
+    ];
+
+    /// 出口 IP 查询地址（v0.0.80）：cloudflare trace 优先（顺带记
+    /// colo），不可用时边车换下一个。
+    const DIAGNOSE_EGRESS_URLS: [&'static str; 2] = [
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "https://api.ipify.org",
+    ];
+
+    /// 网络诊断探针（v0.0.80）：走 Node 边车，与真实请求同一条路、
+    /// 同一代理决议（已保存的设置）。只读：不改 net.request、回落、
+    /// clearance、代理决议，不碰 Cookie 罐，不存持久化结果。
+    /// 报告返回给设置页展示，同时写进 ext.log（requestId "net"）。
+    pub async fn diagnose(&self, cancel: &CancellationToken) -> Result<String> {
+        let (mode, proxy_url) = self.proxy_decision();
+        let proxy_desc = describe_proxy(mode, &proxy_url);
+        let client = self.node_client(cancel).await?;
+        let report = client
+            .diagnose(json!({
+                "domains": Self::DIAGNOSE_DOMAINS,
+                "proxyUrl": proxy_url,
+                "proxyDesc": proxy_desc,
+                "egressUrls": Self::DIAGNOSE_EGRESS_URLS,
+            }))
+            .await?;
+        if let Some(logs) = self.logs.lock().unwrap().clone() {
+            logs.lock().unwrap().push("info", &report, "net", None);
+        }
+        Ok(report)
     }
 
     async fn read_hop_wreq(

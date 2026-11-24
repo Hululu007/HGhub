@@ -205,6 +205,40 @@ function ipv6Bytes(ip) {
   return out;
 }
 
+// 与 Rust network_policy.rs 的 allowed_ip 同款放行校验（v0.0.80，
+// DoH 答案也要过这一关）：内网/保留地址拒绝、FakeIP 198.18.0.0/15
+// 放行。IPv4 映射的 IPv6（::ffff:a.b.c.d）按 IPv4 规则；其他内嵌
+// IPv4 的形式不在全局单播内，直接拒绝。
+function isAllowedIp(ip) {
+  const family = net.isIP(ip);
+  if (family === 4) {
+    const [a, b, c] = ip.split('.').map(Number);
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    return !(a === 0 || a === 10 || a === 127 || a >= 224
+      || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 192 && b === 0 && (c === 0 || c === 2))
+      || (a === 192 && b === 88 && c === 99)
+      || (a === 198 && b === 51 && c === 100)
+      || (a === 203 && b === 0 && c === 113));
+  }
+  if (family === 6) {
+    const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+    if (mapped) return isAllowedIp(mapped[1]);
+    if (ip.includes('.')) return false;
+    const bytes = ipv6Bytes(ip);
+    const seg = [];
+    for (let i = 0; i < 8; i++) seg.push(bytes.readUInt16BE(i * 2));
+    return (seg[0] & 0xe000) === 0x2000
+      && seg[0] !== 0x2002
+      && !(seg[0] === 0x2001 && (seg[1] < 0x0200 || seg[1] === 0x0db8))
+      && !(seg[0] === 0x3fff && seg[1] < 0x1000);
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP(S) 代理：CONNECT 隧道（只用于 https 目标；http 目标走绝对 URI）。
 // ---------------------------------------------------------------------------
@@ -485,6 +519,89 @@ function resolveAddrs(hostname) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// DoH 补充地址（v0.0.80）。背景：v0.0.79 真机证明手机系统解析器对
+// 玩偶域名只回 1 个地址（198.20.0.19，06:25/06:33/07:27/07:36 四次
+// 全相同），轮换无处可换；但公开 DNS（Google DoH）对同一域名回 5 个
+// A 记录（104.17.255.47、172.66.199.198、104.20.56.211、
+// 172.66.194.190、172.66.133.214，另有 5 个 AAAA）。DoH 只在系统
+// 列表不够用时才查（见 doFetch），查到就补进轮换列表；查不到、
+// 失败、超时都静默退回，不报错、不阻塞。答案按主机名在内存里缓存
+// 60 秒，同一 burst 里多次请求不重复查。查询走当次请求的同一代理
+// 设置（直连就直连——触发只在直连路径；跟随系统就走代理）。
+// 测试用环境变量 HG_DOH_BASE_URL 可改 DoH 端点（默认 dns.google）。
+// ---------------------------------------------------------------------------
+const DOH_CACHE_TTL_MS = 60000;
+const dohCache = new Map(); // hostname -> { addrs, expiresAt }
+
+function dohBaseUrl() {
+  return (process.env.HG_DOH_BASE_URL || 'https://dns.google').replace(/\/+$/, '');
+}
+
+// 一次 DoH 查询（JSON API）：ok 表示 DoH 服务正常应答（Status 为
+// 数字，含 NXDOMAIN 等无记录的回答）；ips 只取目标类型的 data。
+async function queryDoh(hostname, type, timeoutMs, proxyUrl) {
+  try {
+    const url = `${dohBaseUrl()}/resolve?name=${encodeURIComponent(hostname)}&type=${type}`;
+    const res = await fetchOnce(
+      { url, method: 'GET', headers: { accept: 'application/dns-json' }, timeoutMs, proxyUrl: proxyUrl || null, pinnedAddrs: [] },
+      [],
+      timeoutMs,
+    );
+    if (res.status !== 200) return { ok: false, ips: [] };
+    const json = JSON.parse(Buffer.from(res.bodyBase64 || '', 'base64').toString('utf8'));
+    if (!json || typeof json.Status !== 'number' || !Array.isArray(json.Answer)) return { ok: false, ips: [] };
+    const want = type === 'A' ? 1 : 28;
+    return {
+      ok: true,
+      ips: json.Answer.filter((a) => a && a.type === want && typeof a.data === 'string').map((a) => a.data),
+    };
+  } catch {
+    return { ok: false, ips: [] };
+  }
+}
+
+// A + AAAA 并行查，过放行校验、去重；state：ok（有可用地址，
+// 60 秒缓存）、empty（服务应答但无可用地址）、failed（查不到）。
+async function fetchDohAddrs(hostname, body, deadline) {
+  const cached = dohCache.get(hostname);
+  if (cached && cached.expiresAt > Date.now()) return { state: 'ok', addrs: cached.addrs };
+  const budget = Math.max(1, Math.min(5000, deadline - Date.now()));
+  const [a, aaaa] = await Promise.all([
+    queryDoh(hostname, 'A', budget, body.proxyUrl),
+    queryDoh(hostname, 'AAAA', budget, body.proxyUrl),
+  ]);
+  const seen = new Set();
+  const addrs = [];
+  for (const ip of [...a.ips, ...aaaa.ips]) {
+    if (typeof ip !== 'string' || !net.isIP(ip) || seen.has(ip) || !isAllowedIp(ip)) continue;
+    seen.add(ip);
+    addrs.push({ address: ip, family: net.isIP(ip) });
+  }
+  if (addrs.length > 0) {
+    dohCache.set(hostname, { addrs, expiresAt: Date.now() + DOH_CACHE_TTL_MS });
+    return { state: 'ok', addrs };
+  }
+  return { state: a.ok || aaaa.ok ? 'empty' : 'failed', addrs: [] };
+}
+
+// 已试地址后缀（v0.0.80）：区分系统列表与 DoH 列表；DoH 没用过时
+// 与 v0.0.79 逐字相同。DoH 查过但没拿到可用地址时写明“DoH 无结果”。
+function triedSuffix({ sysAddrs, dohAddrs, tried, dohQueried }) {
+  const sysTried = tried.filter((a) => !dohAddrs.some((d) => d.address === a));
+  const dohTried = tried.filter((a) => dohAddrs.some((d) => d.address === a));
+  const sysList = sysTried.length > 0 ? sysTried : sysAddrs.map((a) => a.address);
+  const dohList = dohTried.length > 0 ? dohTried : dohAddrs.map((a) => a.address);
+  const total = sysAddrs.length + dohAddrs.length;
+  const parts = [];
+  if (sysList.length > 0) parts.push(`已试: ${sysList.join(', ')}`);
+  if (dohList.length > 0) parts.push(`DoH: ${dohList.join(', ')}`);
+  if (dohQueried && dohAddrs.length === 0) parts.push('DoH 无结果');
+  if (parts.length === 0) return '';
+  const count = total === 1 ? '仅 1 个地址，无处可换' : `共 ${total} 个地址`;
+  return `（${parts.join('；')}；${count}）`;
+}
+
 // 直连时：首个地址 TCP 接通后 TLS 被断，Node 不会试下一个
 // （握手失败不是 Happy Eyeballs 的回落条件——v0.0.74 的真机报错与之
 // 一字不差，见 tests/test_host.mjs 的 TLS 回落用例）。所以这里显式
@@ -505,12 +622,19 @@ async function doFetch(body) {
   // 就用它；否则自己 dns.lookup（生产路径，Rust 自 v0.0.76 起传空）。
   // 两个来源都是系统顺序，不重排。
   const pinned = (body.pinnedAddrs || []).map(parsePinnedAddr).filter(Boolean);
-  const addrs = direct
+  let addrs = direct
     ? (pinned.length > 0 ? pinned : await resolveAddrs(url.hostname))
     : [];
+  // 系统列表（DoH 追加后 addrs 会变长，sysAddrs 保持原始系统答案）。
+  const sysAddrs = addrs;
   const excluded = new Set();
   const tried = [];
   let firstError = null;
+  // v0.0.80：DoH 补充状态（只直连路径用；dohSummary 随响应/错误带
+  // 回 Rust，写进 ext.log——主机名、拿到几个地址、成功/失败）。
+  let dohAddrs = [];
+  let dohQueried = false;
+  let dohSummary = null;
   for (;;) {
     const remaining = addrs.filter((a) => !excluded.has(a.address));
     const budget = deadline - Date.now();
@@ -519,7 +643,9 @@ async function doFetch(body) {
     }
     const attempt = remaining.length > 0 ? [remaining[0]] : [];
     try {
-      return await fetchOnce(body, attempt, Math.max(1, budget));
+      const result = await fetchOnce(body, attempt, Math.max(1, budget));
+      if (dohSummary) result.doh = dohSummary;
+      return result;
     } catch (e) {
       if (!firstError) firstError = e;
       const attempted = attempt.length > 0 ? attempt[0].address : null;
@@ -532,18 +658,37 @@ async function doFetch(body) {
         && attempted
         && remaining.length > 1;
       if (!retryable) {
+        // v0.0.80：系统列表已无未试地址（进到这里时 retryable 只可能
+        // 因 remaining <= 1 而失败），且失败是无字节发出的 NETWORK
+        // 失败时，向 DoH 补地址再轮换——只查一次，系统列表永远先试。
+        // DoH 查不到/无结果时静默退回，只记后缀与 doh 字段，不阻塞。
+        if (direct && !dohQueried && e && e.code === 'NETWORK' && !e._responded && noBytesSent) {
+          dohQueried = true;
+          const doh = await fetchDohAddrs(url.hostname, body, deadline);
+          const fresh = doh.addrs.filter((a) => !addrs.some((x) => x.address === a.address) && !excluded.has(a.address));
+          if (fresh.length > 0) {
+            if (attempted) excluded.add(attempted);
+            dohAddrs = fresh;
+            addrs = [...addrs, ...fresh];
+            dohSummary = `${url.hostname}：补充 ${fresh.length} 个地址`;
+            continue;
+          }
+          dohSummary = doh.state === 'ok'
+            ? `${url.hostname}：无新地址`
+            : doh.state === 'empty'
+              ? `${url.hostname}：无可用地址`
+              : `${url.hostname}：查询失败`;
+        }
         // 报错里带上已试地址与解析总数，下次真机测试能区分“一个坏
         // 边缘”与“全部都坏”；只回一个地址时直接说明无处可换；没接
         // 通过任何地址时列出全部解析地址（v0.0.75 同款规则）。
         // Rust 层还会再 append（解析: …）——那是预检的答案，与这里
         // Node 自己解析的答案互相印证（DNS 轮换时两者可能不同）。
-        if (direct && addrs.length > 0 && firstError && firstError.code === 'NETWORK') {
-          const list = (tried.length > 0 ? tried : addrs.map((a) => a.address)).join(', ');
-          const count = addrs.length === 1
-            ? '仅 1 个地址，无处可换'
-            : `共 ${addrs.length} 个地址`;
-          firstError.message = `${firstError.message}（已试: ${list}；${count}）`;
+        if (direct && firstError && firstError.code === 'NETWORK') {
+          const suffix = triedSuffix({ sysAddrs, dohAddrs, tried, dohQueried });
+          if (suffix) firstError.message = `${firstError.message}${suffix}`;
         }
+        if (dohSummary) firstError._doh = dohSummary;
         throw firstError;
       }
       excluded.add(attempted);
@@ -703,6 +848,165 @@ function readJsonBody(req) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 网络诊断探针（v0.0.80）。只读：不改 net.request、回落、clearance、
+// 代理决议，不碰 Cookie 罐，结果不持久化。入口是设置页的“网络诊断”
+// 按钮（hpp 命令 net.diagnose → Rust Network::diagnose → POST
+// /diagnose）。与真实请求同一条路、同一代理决议（proxyUrl 由 Rust
+// 按已保存的设置传进来）；DoH 对照直接调 fetchDohAddrs，不受
+// doFetch“系统列表不够用才查”的限制——探针就是要对照两边。
+// ---------------------------------------------------------------------------
+const DIAGNOSE_TLS_TIMEOUT_MS = 5000;
+const DIAGNOSE_HTTP_TIMEOUT_MS = 10000;
+const DIAGNOSE_DEADLINE_MS = 60000;
+const CHALLENGE_RE = /just a moment|cf-browser|access denied|attention required|cf_chl/i;
+
+// 单个边缘的 TLS 握手：SNI=域名、host=IP。'connect' 表示 TCP 通，
+// 'secureConnect' 表示 TLS 通（实测：RST 只触发 error、黑洞触发
+// timeout；见 tests/test_host.mjs 的探针用例）。port 默认 443；
+// 测试用 port 参数指到本机临时端口（Rust 侧不传，永远是 443）。
+// 探针报告每地址只占一行：错误信息（尤其 OpenSSL 的，尾部常带
+// 换行）先压成单行再拼进报告。
+function oneLine(s) {
+  return String(s ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function probeTls(host, ip, timeoutMs, port = 443) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    let tcpOk = false;
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      resolve({ ip, ms: Date.now() - started, ...result });
+    };
+    const socket = tls.connect({ host: ip, port, servername: host, timeout: timeoutMs });
+    socket.on('connect', () => { tcpOk = true; });
+    socket.on('secureConnect', () => {
+      const cipher = socket.getCipher() || {};
+      finish({ tcpOk: true, tlsOk: true, cipher: `${cipher.version || '?'} / ${cipher.name || '?'}`, alpn: socket.alpnProtocol || null });
+      socket.destroy();
+    });
+    socket.on('timeout', () => {
+      finish({ tcpOk, tlsOk: false, error: tcpOk ? 'TLS 握手超时' : 'TCP 连接超时' });
+      socket.destroy();
+    });
+    socket.on('error', (e) => {
+      finish({ tcpOk, tlsOk: false, error: oneLine((e && e.message) || String(e)) });
+    });
+    socket.on('close', () => {
+      finish({ tcpOk, tlsOk: false, error: '连接被关闭' });
+    });
+  });
+}
+
+// 握手通的边缘再发一次 HTTPS GET（钉死该 IP，与真实请求同款
+// UA/头）：记状态码与 body 是否挑战页。
+async function probeHttp(host, ip, port, proxyUrl, deadline) {
+  const timeoutMs = Math.max(1, Math.min(DIAGNOSE_HTTP_TIMEOUT_MS, deadline - Date.now()));
+  try {
+    const res = await fetchOnce(
+      { url: `https://${host}${port === 443 ? '' : `:${port}`}/`, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', accept: 'text/html,application/xhtml+xml' }, timeoutMs, proxyUrl: proxyUrl || null, pinnedAddrs: [`${ip}:${port}`] },
+      [{ address: ip, family: net.isIP(ip) }],
+      timeoutMs,
+    );
+    const body = Buffer.from(res.bodyBase64 || '', 'base64').toString('utf8');
+    return `${res.status}，${CHALLENGE_RE.test(body) ? '挑战页' : '非挑战页'}`;
+  } catch (e) {
+    return `失败（${oneLine((e && e.message) || String(e))}）`;
+  }
+}
+
+// 一个域名：系统解析与 DoH 各查一遍（并行），去重后逐边缘握手
+// （并行），握手通的再发 HTTPS GET（并行）。
+async function diagnoseDomain(host, proxyUrl, port, deadline) {
+  const lines = [];
+  const [sys, doh] = await Promise.all([
+    resolveAddrs(host),
+    fetchDohAddrs(host, { proxyUrl }, deadline),
+  ]);
+  const fmt = (addrs) => addrs.map((a) => a.address).join(', ');
+  let dnsLine = `${host}：系统 ${sys.length} 个 [${fmt(sys)}]`;
+  if (sys.length === 0) dnsLine += '（无记录）';
+  dnsLine += `；DoH ${doh.addrs.length} 个 [${fmt(doh.addrs)}]`;
+  if (doh.state === 'failed') dnsLine += '（查询失败）';
+  else if (doh.state === 'empty') dnsLine += '（无记录）';
+  lines.push(dnsLine);
+  const seen = new Set();
+  const ips = [];
+  for (const a of [...sys, ...doh.addrs]) {
+    if (!seen.has(a.address)) { seen.add(a.address); ips.push(a.address); }
+  }
+  if (ips.length === 0) {
+    lines.push('  无可用地址，未做握手');
+    return lines;
+  }
+  const handshakes = await Promise.all(ips.map((ip) => probeTls(host, ip, DIAGNOSE_TLS_TIMEOUT_MS, port)));
+  const httpResults = new Map();
+  await Promise.all(handshakes.filter((h) => h.tlsOk).map(async (h) => {
+    httpResults.set(h.ip, await probeHttp(host, h.ip, port, proxyUrl, deadline));
+  }));
+  for (const h of handshakes) {
+    if (!h.tcpOk) lines.push(`  ${h.ip}：TCP 不通（${h.error}，${h.ms}ms）`);
+    else if (!h.tlsOk) lines.push(`  ${h.ip}：TCP 通，TLS 失败（${h.error}，${h.ms}ms）`);
+    else lines.push(`  ${h.ip}：TCP 通，TLS 通（${h.cipher}，ALPN ${h.alpn || '无 ALPN'}，${h.ms}ms）；HTTP ${httpResults.get(h.ip)}`);
+  }
+  return lines;
+}
+
+// 出口 IP：cloudflare trace 优先（顺带记 colo），不可用时换下一个。
+async function diagnoseEgress(egressUrls, proxyUrl, deadline) {
+  for (const url of egressUrls) {
+    const timeoutMs = Math.max(1, Math.min(DIAGNOSE_HTTP_TIMEOUT_MS, deadline - Date.now()));
+    try {
+      const res = await fetchOnce(
+        { url, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', accept: 'text/plain' }, timeoutMs, proxyUrl: proxyUrl || null, pinnedAddrs: [] },
+        [],
+        timeoutMs,
+      );
+      if (res.status !== 200) continue;
+      const text = Buffer.from(res.bodyBase64 || '', 'base64').toString('utf8');
+      if (url.includes('cdn-cgi/trace')) {
+        const ip = /ip=([^\r\n]+)/.exec(text)?.[1]?.trim();
+        const colo = /colo=([^\r\n]+)/.exec(text)?.[1]?.trim();
+        if (ip) return `出口 IP：${ip}${colo ? `（colo=${colo}，cloudflare trace）` : '（cloudflare trace）'}`;
+      } else {
+        const ip = text.trim();
+        if (net.isIP(ip)) return `出口 IP：${ip}（${new URL(url).hostname}）`;
+      }
+    } catch {
+      // 换下一个出口查询地址。
+    }
+  }
+  return '出口 IP：未知（出口查询失败）';
+}
+
+async function diagnose(body) {
+  const proxyUrl = (body && body.proxyUrl) || null;
+  const proxyDesc = (body && body.proxyDesc) || '未知';
+  const domains = Array.isArray(body && body.domains) ? body.domains.filter((d) => typeof d === 'string' && d) : [];
+  const egressUrls = Array.isArray(body && body.egressUrls) ? body.egressUrls.filter((u) => typeof u === 'string' && u) : [];
+  // port 只给测试用（本机临时端口）；生产永远是 443（Rust 不传）。
+  const port = body && Number(body.port) > 0 ? Math.floor(Number(body.port)) : 443;
+  const deadline = Date.now() + DIAGNOSE_DEADLINE_MS;
+  const lines = [`网络诊断 ${new Date().toLocaleString('zh-CN', { hour12: false })}（代理：${proxyDesc}）`];
+  const perDomain = await Promise.all(domains.map((d) => diagnoseDomain(d, proxyUrl, port, deadline)));
+  for (const part of perDomain) lines.push(...part);
+  lines.push(await diagnoseEgress(egressUrls, proxyUrl, deadline));
+  return lines.join('\n');
+}
+
+async function handleDiagnose(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const report = await diagnose(body || {});
+    sendJson(res, 200, { report });
+  } catch (e) {
+    sendJson(res, 500, { error: (e && e.message) || String(e), code: 'INTERNAL' });
+  }
+}
+
 async function handleRequest(req, res) {
   try {
     const body = await readJsonBody(req);
@@ -716,8 +1020,11 @@ async function handleRequest(req, res) {
     const code = e && e.code ? e.code : 'NETWORK';
     const message = e && e.message ? e.message : String(e);
     // 超时、连接失败、TLS 失败、DNS 失败都走 500 + {error, code}，
-    // 绝不把传输失败伪装成 HTTP 状态码。
-    sendJson(res, 500, { error: message, code });
+    // 绝不把传输失败伪装成 HTTP 状态码。v0.0.80：doFetch 的 DoH
+    // 使用情况随 doh 字段带回（Rust 写进 ext.log）。
+    const payload = { error: message, code };
+    if (e && e._doh) payload.doh = e._doh;
+    sendJson(res, 500, payload);
   }
 }
 
@@ -730,6 +1037,13 @@ function onRequest(req, res) {
   if (req.method === 'POST' && pathname === '/request') {
     handleRequest(req, res).catch((e) => {
       console.error(`handleRequest failed: ${e && e.stack || e}`);
+      if (!res.headersSent) sendJson(res, 500, { error: 'Node 边车内部错误', code: 'NETWORK' });
+    });
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/diagnose') {
+    handleDiagnose(req, res).catch((e) => {
+      console.error(`handleDiagnose failed: ${e && e.stack || e}`);
       if (!res.headersSent) sendJson(res, 500, { error: 'Node 边车内部错误', code: 'NETWORK' });
     });
     return;
@@ -770,6 +1084,16 @@ process.on('unhandledRejection', (reason) => {
 log(`Node sidecar starting (node ${process.version}, cwd ${process.cwd()})`);
 startServer(DEFAULT_PORT);
 
+// 测试用：关闭进程内边车服务器。集成测试 require host.js 后监听
+// socket 会拖住测试进程退出（node --test 等不到进程结束）；
+// after 里调一次。只关当前在监听的 server（健康时一定在监听）。
+function closeServer() {
+  return new Promise((resolve) => {
+    if (!server || !server.listening) { resolve(); return; }
+    server.close(() => resolve());
+  });
+}
+
 // 供集成测试直接覆盖 lookup 契约（见 tests/test_host.mjs）：本机 Node 24
 // 默认 autoSelectFamily 为 true，端到端测不到 Node 18 的 all:false 路径，
 // 只能把 makeLookup 导出后单独调。requestOptions 也导出：v0.0.76 的
@@ -777,5 +1101,8 @@ startServer(DEFAULT_PORT);
 // resolveAddrs 也导出：v0.0.79 的轮换地址列表（系统顺序）要能被测试
 // 直接断言（本机 localhost 回 2 个地址；顺序以系统解析器为准，测试
 // 里不硬编码顺序）。
-// 入口运行时无影响。
-module.exports = { makeLookup, parsePinnedAddr, requestOptions, resolveAddrs };
+// doFetch 也导出：v0.0.80 的 DoH 轮换要在测试进程内直接调——沙箱会
+// 拦截跨进程发往非 loopback 地址的 TCP（即使本机有监听；同进程内
+// 直达），spawned 边车子进程连不上 DoH 给的非保留 IP。入口运行时
+// 无影响。
+module.exports = { makeLookup, parsePinnedAddr, requestOptions, resolveAddrs, isAllowedIp, probeTls, doFetch, closeServer };
