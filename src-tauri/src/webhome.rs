@@ -205,10 +205,13 @@ fn enable_back_forward_gestures(window: &WebviewWindow, app: &AppHandle) {
     if let Err(e) = window.as_ref().with_webview(|webview| {
         let ptr = webview.inner();
         // SAFETY：inner() 返回的是活着的 WKWebView；with_webview 的闭包
-        // 在主线程上跑，WKWebView 的属性设置要求主线程。
+        // 在主线程上跑，WKWebView 的属性设置要求主线程。objc2-web-kit
+        // 0.3.2 的 WKWebView 类型只在 macOS 定义（super 是 NSView），
+        // iOS 上没有对应类型（wry 在 iOS 用自己的 WKWebView 绑定）——
+        // 直接用 msg_send 发 setter，不经过那个类型。
         unsafe {
-            let wk = &*(ptr as *const objc2_web_kit::WKWebView);
-            wk.setAllowsBackForwardNavigationGestures(true);
+            let obj = &*(ptr as *const objc2::runtime::AnyObject);
+            let _: () = objc2::msg_send![obj, setAllowsBackForwardNavigationGestures: true];
         }
     }) {
         debug_log(app, &format!("[webhome] 手势开启失败：{e}"));
