@@ -6,6 +6,7 @@ import { usePluginRequests } from "../plugins/usePluginRequests";
 import { openWebhome } from "../plugins/webhome";
 import PluginForms from "../plugins/PluginForms";
 import PluginDistribution from "../plugins/PluginDistribution";
+import CatSources from "../plugins/CatSources";
 import { useHost } from "../plugins/HostContext";
 import { isMobile } from "../environment";
 import { registerBackHandler } from "../back";
@@ -20,10 +21,12 @@ function PluginManagement({ plugins, reload, focusId = "", onBack }: { plugins: 
   const request = usePluginRequests();
   const [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const [options, setOptions] = useState<string | null>(focusId || null);
-  const [tab, setTab] = useState<"installed" | "import">("installed");
+  const [tab, setTab] = useState<"installed" | "import" | "cat">("installed");
   const [confirmRemove, setConfirmRemove] = useState(false);
   useEffect(() => { setConfirmRemove(false); }, [options]);
   useEffect(() => { if (focusId) { setOptions(focusId); setTab("installed"); } }, [focusId]);
+  const installedPlugins = plugins.filter(p => p.meta.runtime !== "cat");
+  const catCount = plugins.length - installedPlugins.length;
   const perform = async (action: string, params: Record<string, unknown>) => { setBusy(true); setError(""); try { await request(action, params); await reload(); } catch (e) { setError(pluginError(e)); } finally { setBusy(false); } };
   const selectedPlugin=plugins.find(p=>p.meta.id===options);
   useEffect(() => {
@@ -31,7 +34,7 @@ function PluginManagement({ plugins, reload, focusId = "", onBack }: { plugins: 
   }, [selectedPlugin, tab]);
   const [filter,setFilter]=useState("");
   const [kindFilter,setKindFilter]=useState("all");
-  const visible = plugins.filter(p => (kindFilter==="all"||(p.meta.kind==="resolver"?"resolver":"source")===kindFilter) && (!filter || p.meta.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase())));
+  const visible = installedPlugins.filter(p => (kindFilter==="all"||(p.meta.kind==="resolver"?"resolver":"source")===kindFilter) && (!filter || p.meta.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase())));
   const [batch, setBatch] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmBatch, setConfirmBatch] = useState(false);
@@ -86,26 +89,39 @@ function PluginManagement({ plugins, reload, focusId = "", onBack }: { plugins: 
     },
     onTouchCancel: () => { dragRef.current=null; setSwipeDx(0); setDraggingId(null); },
   });
+  // “已安装”内按源类型分组（互斥，按此顺序判定）；猫源不在此列，只在“猫源”分栏管理。
+  const sourceGroups = [
+    { key: "python", title: "Python", kind: "source" as const, match: (p: InstalledPlugin) => p.meta.runtime === "python" },
+    { key: "html", title: "HTML", kind: "source" as const, match: (p: InstalledPlugin) => !!p.meta.webhome?.localPage },
+    { key: "webhome", title: "WebHome", kind: "source" as const, match: (p: InstalledPlugin) => !!p.meta.webhome?.homePage && !p.meta.webhome?.localPage },
+    { key: "js", title: "其他 JS 插件", kind: "source" as const, match: (p: InstalledPlugin) => (p.meta.runtime ?? "js") === "js" && !p.meta.webhome },
+  ];
+  const pluginSections = [
+    ...sourceGroups.map(g => ({ ...g, total: installedPlugins.filter(p => p.meta.kind !== "resolver" && g.match(p)).length, items: visible.filter(p => p.meta.kind !== "resolver" && g.match(p)) })),
+    { key: "resolver", title: "解析器", kind: "resolver" as const, total: installedPlugins.filter(p => p.meta.kind === "resolver").length, items: visible.filter(p => p.meta.kind === "resolver") },
+  ];
   return <><header className="hpp-header"><button aria-label="返回" onClick={()=>isMobile&&selectedPlugin&&tab==="installed"?setOptions(null):onBack()}><IBack size={20}/></button><div><h1>{isMobile&&selectedPlugin&&tab==="installed"?selectedPlugin.meta.name:"插件中心"}</h1>{!isMobile&&<p>管理内容来源、解析器、站点线路与 HPP 协议声明的插件界面</p>}</div>{isMobile&&<button className="plugin-mobile-import" aria-label="导入插件" onClick={()=>setTab("import")}><IPlus size={22}/></button>}</header><nav className="hpp-provider-tabs" aria-label="插件中心分栏" hidden={isMobile&&!!selectedPlugin&&tab==="installed"}>
     <div className="plugin-management-segments">
-      <button aria-pressed={tab === "installed"} onClick={() => setTab("installed")}>{isMobile?`已安装 ${plugins.length}`:`已安装插件 (${plugins.length})`}</button>
+      <button aria-pressed={tab === "installed"} onClick={() => setTab("installed")}>{isMobile?`已安装 ${installedPlugins.length}`:`已安装插件 (${installedPlugins.length})`}</button>
       <button aria-pressed={tab === "import"} onClick={() => setTab("import")}>{isMobile?"导入与订阅":"导入与列表订阅"}</button>
+      <button aria-pressed={tab === "cat"} onClick={() => setTab("cat")}>{isMobile?`猫源 ${catCount}`:`猫源 (${catCount})`}</button>
     </div>
     <button className="primary plugin-quick-import" onClick={()=>{setTab("import");requestAnimationFrame(()=>document.querySelector<HTMLInputElement>(".hpp-distribution-location input")?.focus());}}><IPlus size={15}/>快速导入</button>
   </nav><div className="hpp-scroll"><div className="hpp-content">
-    <div hidden={tab !== "import"} className="plugin-import-layout"><PluginDistribution plugins={plugins} reload={reload} /></div>
+    <div hidden={tab !== "import"} className="plugin-import-layout"><PluginDistribution plugins={installedPlugins} reload={reload} /></div>
+    <div hidden={tab !== "cat"}><CatSources reload={reload} /></div>
     <div hidden={tab !== "installed"}>
     <div className={`refined-plugin-workspace${selectedPlugin?" has-selection":""}`}><div className="refined-plugin-list"><input className="refined-plugin-filter" aria-label="筛选插件名称" placeholder="筛选插件名称…" value={filter} onChange={e=>setFilter(e.target.value)}/>
-    <nav className="plugin-kind-tabs" aria-label="插件类型">{[["all","全部"],["source","内容源"],["resolver","解析器"]].map(([id,label])=><button key={id} aria-pressed={kindFilter===id} onClick={()=>setKindFilter(id)}>{label} <small>{plugins.filter(p=>id==="all"||(p.meta.kind==="resolver"?"resolver":"source")===id).length}</small></button>)}</nav>
-    {!!plugins.length && <div className="hpp-distribution-buttons" style={{marginBottom:12}}>{!batch ? <button onClick={enterBatch}>批量管理</button> : <><button onClick={()=>setSelected(new Set(visible.map(p=>p.meta.id)))}>全选</button><button onClick={()=>setSelected(old=>{const next=new Set(old);for(const p of visible){if(next.has(p.meta.id))next.delete(p.meta.id);else next.add(p.meta.id);}return next;})}>反选</button><button className="danger" disabled={busy||!selected.size} onClick={()=>void batchRemove()}>{confirmBatch?`确认删除 ${selected.size} 个？`:`删除所选（${selected.size}）`}</button><button onClick={exitBatch}>取消</button></>}</div>}
+    <nav className="plugin-kind-tabs" aria-label="插件类型">{[["all","全部"],["source","内容源"],["resolver","解析器"]].map(([id,label])=><button key={id} aria-pressed={kindFilter===id} onClick={()=>setKindFilter(id)}>{label} <small>{installedPlugins.filter(p=>id==="all"||(p.meta.kind==="resolver"?"resolver":"source")===id).length}</small></button>)}</nav>
+    {!!installedPlugins.length && <div className="hpp-distribution-buttons" style={{marginBottom:12}}>{!batch ? <button onClick={enterBatch}>批量管理</button> : <><button onClick={()=>setSelected(new Set(visible.map(p=>p.meta.id)))}>全选</button><button onClick={()=>setSelected(old=>{const next=new Set(old);for(const p of visible){if(next.has(p.meta.id))next.delete(p.meta.id);else next.add(p.meta.id);}return next;})}>反选</button><button className="danger" disabled={busy||!selected.size} onClick={()=>void batchRemove()}>{confirmBatch?`确认删除 ${selected.size} 个？`:`删除所选（${selected.size}）`}</button><button onClick={exitBatch}>取消</button></>}</div>}
     <ErrorMessage error={error} />
 
-    {!plugins.length && <div className="hpp-empty"><ICpu size={40}/><h2>还没有安装插件</h2><p>导入数据源开始观看，或添加解析器拓展播放能力。</p><button className="primary" onClick={() => setTab("import")}>导入插件</button></div>}
-    {(["source","resolver"] as const).map(kind => <section className="hpp-plugin-group" key={kind}>{plugins.some(p => (p.meta.kind === "resolver") === (kind === "resolver") && (kindFilter==="all"||kindFilter===kind)) && <h2>{kind === "source" ? "数据源" : "解析器"}<small>{plugins.filter(p => (p.meta.kind === "resolver") === (kind === "resolver")).length}</small></h2>}<div className="hpp-installed">{visible.filter(p => (p.meta.kind === "resolver") === (kind === "resolver")).map(p => <article className={`hpp-plugin ${options===p.meta.id?"is-selected":""}`} key={p.meta.id} style={{position:"relative", overflow:"hidden"}}>
+    {!installedPlugins.length && <div className="hpp-empty"><ICpu size={40}/><h2>还没有安装插件</h2><p>导入数据源开始观看，或添加解析器拓展播放能力。</p><button className="primary" onClick={() => setTab("import")}>导入插件</button></div>}
+    {pluginSections.map(section => <section className="hpp-plugin-group" key={section.key}>{section.total > 0 && (kindFilter === "all" || kindFilter === section.kind) && <h2>{section.title}<small>{section.total}</small></h2>}<div className="hpp-installed">{section.items.map(p => <article className={`hpp-plugin ${options===p.meta.id?"is-selected":""}`} key={p.meta.id} style={{position:"relative", overflow:"hidden"}}>
       {!batch && <button className="danger" aria-label={`删除 ${p.meta.name}`} disabled={busy} style={{position:"absolute", right:0, top:0, bottom:0, width:swipeWidth(p.meta.id), background:"var(--p-danger)", color:"var(--p-on-danger)", border:0, borderRadius:0, fontSize:12, padding:"0 8px"}} onClick={()=>{if(confirmSwipeId!==p.meta.id){setConfirmSwipeId(p.meta.id);setSwipedId(p.meta.id);return;}setConfirmSwipeId(null);setSwipedId(null);void perform("remove",{id:p.meta.id});}}>{confirmSwipeId===p.meta.id?`确认删除「${p.meta.name}」？`:"删除"}</button>}
       <div style={{display:"flex", alignItems:"center", gap:6, width:"100%", minHeight:60, background:options===p.meta.id?"var(--p-tint)":"var(--p-s1)", transform:`translateX(${rowDx(p.meta.id)}px)`, transition:draggingId===p.meta.id?"none":"transform .18s ease", touchAction:"pan-y"}} {...(!batch?swipeHandlers(p):{})}>
       {batch && <input type="checkbox" aria-label={`选择 ${p.meta.name}`} checked={selected.has(p.meta.id)} onChange={()=>toggleSelect(p.meta.id)} />}
-      <button className="hpp-plugin-heading plugin-select" aria-label={"查看 "+p.meta.name+" 的设置与日志"} aria-pressed={options===p.meta.id} onClick={()=>{if(batch){toggleSelect(p.meta.id);return;}if(swipedId===p.meta.id){setSwipedId(null);setConfirmSwipeId(null);return;}setOptions(p.meta.id);}}><span className="hpp-plugin-icon refined-glyph">{p.meta.name.slice(0,1)}</span><div><h3>{p.meta.name}</h3><p>v{p.meta.version} · {p.meta.kind==="resolver"?"解析器":"内容源"}{p.meta.runtime==="python"?" · Python":""}</p></div><span className={`hpp-status ${p.status}`}>{statuses[p.status]}</span></button>
+      <button className="hpp-plugin-heading plugin-select" aria-label={"查看 "+p.meta.name+" 的设置与日志"} aria-pressed={options===p.meta.id} onClick={()=>{if(batch){toggleSelect(p.meta.id);return;}if(swipedId===p.meta.id){setSwipedId(null);setConfirmSwipeId(null);return;}setOptions(p.meta.id);}}><span className="hpp-plugin-icon refined-glyph">{p.meta.name.slice(0,1)}</span><div><h3>{p.meta.name}</h3><p>v{p.meta.version} · {p.meta.kind==="resolver"?"解析器":"内容源"}{p.meta.runtime==="python"?" · Python":p.meta.webhome?.localPage?" · HTML":p.meta.webhome?.homePage?" · WebHome":""}</p></div><span className={`hpp-status ${p.status}`}>{statuses[p.status]}</span></button>
       <button className="plugin-enable-switch" role="switch" aria-checked={p.enabled} aria-label={"启用 "+p.meta.name} disabled={busy} onClick={()=>{if(swipedId===p.meta.id){setSwipedId(null);setConfirmSwipeId(null);return;}void perform("enable",{id:p.meta.id,enabled:!p.enabled});}}><span/></button>
       </div>
     </article>)}</div></section>)}

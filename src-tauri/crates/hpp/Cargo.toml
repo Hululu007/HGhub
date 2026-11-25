@@ -25,6 +25,8 @@ encoding_rs = "0.8"
 sha2 = "0.10"
 sha1 = "0.10"
 md-5 = "0.10"
+# 猫源 ZIP 导入：只支持 stored + deflate，其他压缩方式解压时报明错。
+zip = { version = "2", default-features = false, features = ["deflate"] }
 hmac = "0.12"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }

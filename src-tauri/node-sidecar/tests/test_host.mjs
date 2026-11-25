@@ -1359,3 +1359,182 @@ test('SOCKS4 握手：送固定 IP 与用户名', { timeout: 20000 }, async () =
     proxy.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 猫源 /cat/*（见 docs/developers/cat-source.md §5）：边车加载用户 JS
+// 模块、调 start(config)、探活端口、回站点列表。mock 猫源模块是
+// CommonJS，导出 {start, stop}；start 里用 http 起服务监听
+// process.env.DEV_HTTP_PORT，GET /test 回 200、GET /config 回站点
+// 列表；stop 关服务。start 收到的 config 与当时的环境变量写进同
+// 目录的 env.json（供测试断言 start({}) 与 NODE_PATH/端口）；stop
+// 被调过写 stopped.json。
+// ---------------------------------------------------------------------------
+async function postCat(base, pathname, body) {
+  const r = await fetch(`${base}${pathname}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { status: r.status, json: await r.json() };
+}
+
+async function getCatList(base) {
+  const r = await fetch(`${base}/cat/list`);
+  return r.json();
+}
+
+function writeMockCat(dir, siteKey, siteName) {
+  fs.mkdirSync(dir, { recursive: true });
+  const code = `
+    'use strict';
+    const http = require('http');
+    const fs = require('fs');
+    const path = require('path');
+    let server = null;
+    async function start(config) {
+      fs.writeFileSync(path.join(__dirname, 'env.json'), JSON.stringify({
+        config,
+        devHttpPort: process.env.DEV_HTTP_PORT,
+        nodePath: process.env.NODE_PATH,
+      }));
+      const port = Number(process.env.DEV_HTTP_PORT || 9988);
+      server = http.createServer((req, res) => {
+        if (req.url === '/test') { res.writeHead(200); res.end('ok'); return; }
+        if (req.url === '/config') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ video: { sites: [{ key: ${JSON.stringify(siteKey)}, name: ${JSON.stringify(siteName)}, type: 3, api: '/spider/${siteKey}/3' }] } }));
+          return;
+        }
+        res.writeHead(404); res.end();
+      });
+      await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+    }
+    async function stop() {
+      fs.writeFileSync(path.join(__dirname, 'stopped.json'), JSON.stringify({ stopped: true }));
+      if (!server) return;
+      await new Promise((resolve) => server.close(() => resolve()));
+      server = null;
+    }
+    module.exports = { start, stop };
+  `;
+  fs.writeFileSync(path.join(dir, 'plugin.js'), code);
+  return path.join(dir, 'plugin.js');
+}
+
+test('猫源 /cat/load：加载成功回 port/baseUrl/sites，/cat/list 可见', { timeout: 20000 }, async () => {
+  const dir = path.join(TMP, 'cat-a');
+  const file = writeMockCat(dir, 'site-a', '站点 A');
+  const { child, base } = await startHost();
+  try {
+    const { status, json } = await postCat(base, '/cat/load', { key: 'cat-a', file, configFile: null });
+    assert.equal(status, 200);
+    assert.equal(json.success, true);
+    assert.ok(Number.isInteger(json.port) && json.port > 0);
+    assert.equal(json.baseUrl, `http://127.0.0.1:${json.port}`);
+    assert.deepEqual(json.sites, [{ key: 'site-a', name: '站点 A', type: 3, api: '/spider/site-a/3' }]);
+    // start 收到的环境：端口与数据目录（plugin.js 所在目录下的 data）。
+    const env = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8'));
+    assert.equal(Number(env.devHttpPort), json.port);
+    assert.equal(env.nodePath, path.join(dir, 'data'));
+    assert.ok(fs.existsSync(path.join(dir, 'data')), '边车应创建数据目录');
+    // /test 探活过的服务确实在跑。
+    const probe = await fetch(`${json.baseUrl}/test`);
+    assert.equal(probe.status, 200);
+    const list = await getCatList(base);
+    assert.deepEqual(list.sources, ['cat-a']);
+  } finally {
+    stopHost(child);
+  }
+});
+
+test('猫源 /cat/load：同 key 重新加载覆盖旧源', { timeout: 20000 }, async () => {
+  const dirA = path.join(TMP, 'cat-a2');
+  const fileA = writeMockCat(dirA, 'site-a', '站点 A');
+  const dirB = path.join(TMP, 'cat-b2');
+  const fileB = writeMockCat(dirB, 'site-b', '站点 B');
+  const { child, base } = await startHost();
+  try {
+    const first = await postCat(base, '/cat/load', { key: 'dup', file: fileA, configFile: null });
+    assert.equal(first.json.success, true);
+    const second = await postCat(base, '/cat/load', { key: 'dup', file: fileB, configFile: null });
+    assert.equal(second.json.success, true);
+    assert.deepEqual(second.json.sites, [{ key: 'site-b', name: '站点 B', type: 3, api: '/spider/site-b/3' }]);
+    // 旧源的 stop 被调过（写了 stopped.json），list 里 key 只出现一次。
+    assert.ok(fs.existsSync(path.join(dirA, 'stopped.json')), '重新加载时应先停掉旧源');
+    const list = await getCatList(base);
+    assert.deepEqual(list.sources, ['dup']);
+  } finally {
+    stopHost(child);
+  }
+});
+
+test('猫源 /cat/load：文件不存在报明错', { timeout: 20000 }, async () => {
+  const { child, base } = await startHost();
+  try {
+    const { status, json } = await postCat(base, '/cat/load', { key: 'nope', file: path.join(TMP, 'no-such', 'plugin.js'), configFile: null });
+    assert.equal(status, 500);
+    assert.equal(json.success, false);
+    assert.match(json.error, /猫源文件不存在/);
+    const list = await getCatList(base);
+    assert.deepEqual(list.sources, []);
+  } finally {
+    stopHost(child);
+  }
+});
+
+test('猫源 /cat/unload：卸载后 list 里没有，重复卸载也成功', { timeout: 20000 }, async () => {
+  const dir = path.join(TMP, 'cat-c');
+  const file = writeMockCat(dir, 'site-c', '站点 C');
+  const { child, base } = await startHost();
+  try {
+    const loaded = await postCat(base, '/cat/load', { key: 'cat-c', file, configFile: null });
+    assert.equal(loaded.json.success, true);
+    const un = await postCat(base, '/cat/unload', { key: 'cat-c' });
+    assert.equal(un.status, 200);
+    assert.equal(un.json.success, true);
+    assert.ok(fs.existsSync(path.join(dir, 'stopped.json')), '卸载应调 stop()');
+    const list = await getCatList(base);
+    assert.deepEqual(list.sources, []);
+    // key 不存在时卸载也静默成功。
+    const un2 = await postCat(base, '/cat/unload', { key: 'cat-c' });
+    assert.equal(un2.status, 200);
+    assert.equal(un2.json.success, true);
+  } finally {
+    stopHost(child);
+  }
+});
+
+test('猫源 /cat/load：configFile 不存在时 start({}) 不报错', { timeout: 20000 }, async () => {
+  const dir = path.join(TMP, 'cat-d');
+  const file = writeMockCat(dir, 'site-d', '站点 D');
+  const { child, base } = await startHost();
+  try {
+    const { status, json } = await postCat(base, '/cat/load', {
+      key: 'cat-d', file, configFile: path.join(dir, 'index.config.js'),
+    });
+    assert.equal(status, 200);
+    assert.equal(json.success, true);
+    const env = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8'));
+    assert.deepEqual(env.config, {});
+  } finally {
+    stopHost(child);
+  }
+});
+
+test('猫源 /cat/load：configFile 存在时配置对象传给 start', { timeout: 20000 }, async () => {
+  const dir = path.join(TMP, 'cat-e');
+  const file = writeMockCat(dir, 'site-e', '站点 E');
+  fs.writeFileSync(path.join(dir, 'index.config.js'), 'module.exports = { marker: "cfg-ok" };\n');
+  const { child, base } = await startHost();
+  try {
+    const { status, json } = await postCat(base, '/cat/load', {
+      key: 'cat-e', file, configFile: path.join(dir, 'index.config.js'),
+    });
+    assert.equal(status, 200);
+    assert.equal(json.success, true);
+    const env = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8'));
+    assert.deepEqual(env.config, { marker: 'cfg-ok' });
+  } finally {
+    stopHost(child);
+  }
+});

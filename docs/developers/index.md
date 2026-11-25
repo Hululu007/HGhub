@@ -13,6 +13,7 @@ HGhub 管理界面、播放、网络、隔离与本地片库；插件负责站�
 5. [让 Agent 协助开发](agent.md)：安装公开技能包与复制提示词。
 6. [WebHome 页面（HTML 源）](webhome.md)：给源加一个可交互的网页首页。
 7. [Python 蜘蛛（TVBox .py 源）](python-spiders.md)：在 iOS 上导入并运行 Python 爬虫源。
+8. [Node 猫源（CatVod/Node JS 源）](cat-source.md)：设计文档，未实现——订阅管理、Node 边车扩展与站源接口映射，先接 CatPawPlay 验证。
 
 当前应用 **0.0.4 / HPP 1.0.0-dev**。协议为草案，开发前阅读[当前支持状态](status.md)。
 

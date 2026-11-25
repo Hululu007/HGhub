@@ -163,6 +163,9 @@ beautifulsoup4/soupsieve、httpx）；`lxml` / `pyquery` / `pycryptodome` 含 C 
 v1 不带——`base.spider.html()` 在缺 `lxml` 时报明错。导入按内容识别（不认扩展名），
 文件存为插件目录里的 `plugin.py`，meta 派生为 `py.<词干>` / 版本恒 `1.0.0` /
 `runtime: "python"`；文件选择器加了 `py` 筛选，插件中心给 Python 源标 `Python`。
+猫源：源文件存为插件目录里的 `plugin.js`、配置为 `index.config.js`，meta 为 `cat.<订阅>` /
+版本恒 `1.0.0` / `runtime: "cat"`，订阅记录在 App 数据目录的 `cat-sources.json` 里，
+在插件中心“猫源”分栏管理（见开发者文档《Node 猫源》）。
 演示源 `examples/demo-spider.py`（Mux 与 BipBop 公开测试流，home/category/detail/search/play 全通）。
 hpp 集成测试 `tests/python_spider.rs` 5 项通过（导入与调用、必需方法缺失报明错、
 形状错误与蜘蛛异常为 INTERNAL、非蜘蛛拒绝与 JS 优先、无 init 仍可初始化）；

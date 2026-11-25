@@ -66,6 +66,7 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "block2",
   "WKWebsiteDataStore",
+  "WKWebsiteDataRecord",
   "WKHTTPCookieStore",
 ] }
 block2 = "0.6"

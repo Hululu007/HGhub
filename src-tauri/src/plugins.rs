@@ -57,6 +57,7 @@ pub async fn pick_plugin_directory(app: tauri::AppHandle) -> Result<Value> {
 /// tmp/...-Inbox），也可能在选择器关闭后失效；选完立刻拷进应用自己的
 /// plugin-imports 目录再返回，后面的预览与安装读的都是这份拷贝。
 const STAGE_LIMIT: usize = 2 * 1024 * 1024; // 与 hpp 的 JS_LIMIT 一致
+const CAT_ZIP_STAGE_LIMIT: usize = 32 * 1024 * 1024; // 猫源 ZIP 可能更大，单列上限
 const STAGE_KEEP_SECS: u64 = 7 * 24 * 3600;
 
 #[tauri::command]
@@ -79,7 +80,44 @@ pub async fn pick_plugin_files(app: tauri::AppHandle) -> Result<Vec<String>> {
             .unwrap_or(0);
         let mut out = Vec::new();
         for (i, file) in picked.into_iter().enumerate() {
-            let bytes = read_picked(&app, &file)?;
+            let bytes = read_picked(&app, &file, STAGE_LIMIT, "插件文件")?;
+            let name = staged_name(&file.to_string(), i, stamp);
+            let target = staging.join(name);
+            std::fs::write(&target, &bytes).map_err(|e| {
+                hghub_hpp::PluginError::internal(format!("无法暂存所选文件：{e}"))
+            })?;
+            out.push(target.to_string_lossy().into_owned());
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|_| hghub_hpp::PluginError::internal("无法打开文件选择器"))?
+}
+
+/// 猫源 ZIP 导入的文件选择：与 pick_plugin_files 同款做法（选完立刻拷进
+/// 应用自己的 plugin-imports 暂存目录再返回路径），只筛 .zip，暂存上限
+/// 32 MiB（CatPawPlay 的 ZIP 是 1.7 MiB，但别的源可能更大）。
+#[tauri::command]
+pub async fn pick_cat_zip(app: tauri::AppHandle) -> Result<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = app
+            .dialog()
+            .file()
+            .add_filter("猫源 ZIP", &["zip"])
+            .blocking_pick_files()
+            .unwrap_or_default();
+        if picked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let staging = stage_dir(&app)?;
+        prune_staging(&staging);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut out = Vec::new();
+        for (i, file) in picked.into_iter().enumerate() {
+            let bytes = read_picked(&app, &file, CAT_ZIP_STAGE_LIMIT, "猫源 ZIP 文件")?;
             let name = staged_name(&file.to_string(), i, stamp);
             let target = staging.join(name);
             std::fs::write(&target, &bytes).map_err(|e| {
@@ -210,7 +248,7 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn read_picked(app: &tauri::AppHandle, file: &tauri_plugin_fs::FilePath) -> Result<Vec<u8>> {
+fn read_picked(app: &tauri::AppHandle, file: &tauri_plugin_fs::FilePath, limit: usize, what: &str) -> Result<Vec<u8>> {
     use std::io::Read;
     let mut bytes = Vec::new();
     let mut options = tauri_plugin_fs::OpenOptions::new();
@@ -223,11 +261,14 @@ fn read_picked(app: &tauri::AppHandle, file: &tauri_plugin_fs::FilePath) -> Resu
         }
     })?;
     opened
-        .take((STAGE_LIMIT + 1) as u64)
+        .take((limit + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| hghub_hpp::PluginError::internal(format!("无法读取所选文件：{e}")))?;
-    if bytes.len() > STAGE_LIMIT {
-        return Err(hghub_hpp::PluginError::invalid("插件文件超过 2 MiB"));
+    if bytes.len() > limit {
+        return Err(hghub_hpp::PluginError::invalid(format!(
+            "{what}超过 {} MiB",
+            limit / 1024 / 1024
+        )));
     }
     Ok(bytes)
 }

@@ -7,14 +7,17 @@
 //!
 //! 模块分工：
 //! - `client`：边车 HTTP 客户端（`/health`、`/request`）；
+//! - `cat_client`：猫源边车客户端（`/cat/load`、`/cat/unload`、`/cat/list`）；
 //! - 本模块：`NodeBootstrap` 引导 trait 与 `UnavailableNode` 桩。
 //!
 //! Node 18 已 EOL、nodejs-mobile 实际停滞（见
 //! docs/developers/node-engine.md §3.4）：本版是 pin 死 v18.20.4
 //! 的假设检验，不是长期运行时承诺，不要把 Node 说成长期方案。
+pub mod cat_client;
 pub mod client;
 
 use crate::{PluginError, Result};
+pub use cat_client::{CatClient, CatLoadInfo, CatSite};
 pub use client::{
     DiagnoseDomainSummary, DiagnoseOutcome, DiagnoseSummary, NodeClient, NodeRequest, NodeResponse,
 };

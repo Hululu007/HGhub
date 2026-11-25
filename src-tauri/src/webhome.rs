@@ -852,6 +852,118 @@ pub async fn clear_webhome_data(
 
 /// `WebviewWindow` 的本地包装：hpp 的 `WebHomeDataWindow` trait 与
 /// `WebviewWindow` 都不在本 crate 里，直接 impl 会撞孤儿规则（E0117），
+/// iOS：按源划界清 WebView 浏览数据（缓存清理第 2 步）。
+///
+/// 背景：主窗口与 WebHome 窗口共用默认 `WKWebsiteDataStore`；wry 的
+/// `clear_all_browsing_data` 调 `removeDataOfTypes(allTypes, since 1970)`，
+/// 全类型、全量——主窗口 localStorage 里的 `hpp.*` 设置键（主题、音量、
+/// 播放引擎等）也被清掉，设置回到初始值（真机实测）。这里改走
+/// `fetchDataRecordsOfTypes` + `removeDataOfTypes:forDataRecords:`：
+/// 只删 displayName 不是 App 自身源的记录（远端站源的 Cookie、缓存、
+/// localStorage、IndexedDB 等全类型照清），App 自身源（主窗口，
+/// `tauri://localhost`，host 为 `localhost`）的记录一概保留；保留规则
+/// 见 hpp `webhome_data::keep_website_data_record`。
+/// 仍是 fire-and-forget（与原来一致）：主线程上取记录、删记录，调完即
+/// 返回、不等删完；重载可能跑在删除完成之前。删完记一行 debug 日志
+/// （删了哪些源、保留了哪个源），供真机诊断；取记录/删记录本身失败也
+/// 只记日志——设置保住是底线，远端数据漏清一回下次还能再清。
+/// 用 `defaultDataStore`（与 v0.0.91 异步 Cookie 读同款，全部窗口共用
+/// 的就是这一个存储）。
+#[cfg(target_os = "ios")]
+fn clear_browsing_data_scoped(window: &WebviewWindow) -> Result<(), String> {
+    use block2::RcBlock;
+    use objc2::MainThreadMarker;
+    use objc2_foundation::NSArray;
+    use objc2_web_kit::{WKWebsiteDataRecord, WKWebsiteDataStore};
+    use std::ptr::NonNull;
+
+    // 保留 App 自身源：主窗口 URL 的 host（发布版 tauri://localhost、开发
+    // 版 http://localhost:1420，都是 localhost）；拿不到主窗口或 host 为
+    // 空时回落到 "localhost"。
+    let keep_host = window
+        .app_handle()
+        .get_webview_window("main")
+        .and_then(|w| w.url().ok())
+        .and_then(|u| u.host_str().map(str::to_string))
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let app = window.app_handle().clone();
+    let posted = window
+        .run_on_main_thread(move || {
+            let Some(mtm) = MainThreadMarker::new() else {
+                debug_log(&app, "[webhome] 缓存清理划界：不在主线程，跳过");
+                return;
+            };
+            // SAFETY：闭包跑在主线程上（run_on_main_thread 保证）；
+            // defaultDataStore / allWebsiteDataTypes 要求主线程标记。
+            let store = unsafe { WKWebsiteDataStore::defaultDataStore(mtm) };
+            let all_types = unsafe { WKWebsiteDataStore::allWebsiteDataTypes(mtm) };
+            let store_for_remove = store.clone();
+            let types_for_remove = all_types.clone();
+            let fetch_block = RcBlock::new(
+                move |records: NonNull<NSArray<WKWebsiteDataRecord>>| {
+                    // SAFETY：取回的记录只在本回调（主线程）内使用；
+                    // displayName 只读名字，不改记录。
+                    let records = unsafe { records.as_ref() }.to_vec();
+                    let mut delete = Vec::new();
+                    let mut delete_names: Vec<String> = Vec::new();
+                    for record in &records {
+                        let name = unsafe { record.displayName() }.to_string();
+                        if !hghub_hpp::webhome_data::keep_website_data_record(
+                            &name, &keep_host,
+                        ) {
+                            delete_names.push(name);
+                            delete.push(record.clone());
+                        }
+                    }
+                    if delete.is_empty() {
+                        debug_log(
+                            &app,
+                            &format!(
+                                "[webhome] 缓存清理划界：无远端站源数据可删，保留 App 源 {keep_host}"
+                            ),
+                        );
+                        return;
+                    }
+                    let array = NSArray::from_retained_slice(&delete);
+                    let done_block = RcBlock::new({
+                        let app = app.clone();
+                        let keep_host = keep_host.clone();
+                        move || {
+                            debug_log(
+                                &app,
+                                &format!(
+                                    "[webhome] 缓存清理划界：已删远端站源 {} 个（{}），保留 App 源 {}",
+                                    delete_names.len(),
+                                    delete_names.join("、"),
+                                    keep_host
+                                ),
+                            );
+                        }
+                    });
+                    // SAFETY：array 是本回调内持有的数据；remove 只按
+                    // 记录删数据，不改调用方状态。
+                    unsafe {
+                        store_for_remove
+                            .removeDataOfTypes_forDataRecords_completionHandler(
+                                &types_for_remove,
+                                &array,
+                                &done_block,
+                            );
+                    }
+                },
+            );
+            unsafe {
+                store.fetchDataRecordsOfTypes_completionHandler(&all_types, &fetch_block);
+            }
+        })
+        .is_ok();
+    if !posted {
+        return Err("清除浏览数据失败：未能投递到主线程".to_string());
+    }
+    Ok(())
+}
+
 /// 所以包一层本地类型再实现。方法体调的都是 `WebviewWindow` 自带的
 /// inherent 方法（inherent 方法优先于 trait 方法，不会递归到自己）。
 struct WebHomeWindow(WebviewWindow);
@@ -864,7 +976,10 @@ impl hghub_hpp::webhome_data::WebHomeDataWindow for WebHomeWindow {
     }
 
     fn clear_browsing_data(&self) -> Result<(), String> {
-        self.0.clear_all_browsing_data().map_err(|e| e.to_string())
+        #[cfg(target_os = "ios")]
+        return clear_browsing_data_scoped(&self.0);
+        #[cfg(not(target_os = "ios"))]
+        return self.0.clear_all_browsing_data().map_err(|e| e.to_string());
     }
 
     fn reload_page(&self) -> Result<(), String> {

@@ -17,8 +17,8 @@ export interface PluginMeta {
   allowInsecureHttp?: boolean; mature?: boolean; settings?: Setting[];
   /** WebHome 首页声明（06 §18）：有它表示该源提供一个 WebHome 页面。 */
   webhome?: { homePage?: string; localPage?: string };
-  /** 运行时（02 Python 运行时一节）：不填即 "js"。Python 源恒为 kind "source"。 */
-  runtime?: "js" | "python";
+  /** 运行时（02 Python 运行时一节）：不填即 "js"。Python 源恒为 kind "source"。"cat" 是 Node 猫源。 */
+  runtime?: "js" | "python" | "cat";
 }
 export type MediaType = "movie" | "series" | "anime" | "variety" | "documentary" | "short" | "live" | "other";
 export type Codec = "h264" | "hevc" | "av1";

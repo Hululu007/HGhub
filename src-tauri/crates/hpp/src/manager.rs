@@ -1,9 +1,16 @@
 use crate::{
+    cat::{
+        subscriptions::{
+            derive_plugin_id_from_stem, derive_plugin_id_from_url, extract_zip,
+            fetch_subscription, md5_hex, CatSourceRecord, CatStore,
+        },
+        worker::CatWorker,
+    },
     model::{self, Meta},
     native::Logs,
     network::Network,
     network::{ClearanceCookie, WebViewCookie},
-    node::{NodeBootstrap, UnavailableNode},
+    node::{NodeBootstrap, NodeClient, UnavailableNode},
     python::{PyWorker, PythonBootstrap, RuntimeWorker, UnavailablePython},
     runtime::{self, Worker},
     store::{atomic_write, Store},
@@ -16,9 +23,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[path = "distribution.rs"]
@@ -84,6 +91,10 @@ pub struct PluginManager {
     /// 边车代理入口的实际地址（/health 返回；9978 被占时会换临时端口），
     /// 供回环取流时识别自家代理地址用。
     py_proxy_base: Mutex<Option<String>>,
+    /// 猫源订阅记录文件（App 数据目录的 `cat-sources.json`，与
+    /// `node-sidecar.json` 同一目录层级）。
+    cat_sources_path: PathBuf,
+    cat_store: Mutex<CatStore>,
     plugins: tokio::sync::RwLock<BTreeMap<String, Arc<tokio::sync::Mutex<Installed>>>>,
     mutation: tokio::sync::Mutex<()>,
     strict: Option<bool>,
@@ -113,13 +124,19 @@ impl PluginManager {
         for mut entry in index {
             let indexed = Meta::parse(serde_json::to_value(&entry.meta).unwrap())?;
             // 启动恢复：JS 读 plugin.js 做完整检查；Python 读 plugin.py
-            // 只做静态扫描（名字与 id 已在索引里，不从代码重新派生）。
+            // 只做静态扫描（名字与 id 已在索引里，不从代码重新派生）；
+            // 猫源读 plugin.js，文件存在即保留索引里的 meta（猫源 JS
+            // 没有 manifest，不跑 runtime::inspect）。
             let recovered = if indexed.runtime == "python" {
                 std::fs::read_to_string(root.join(&indexed.id).join("plugin.py"))
                     .map_err(PluginError::from)
                     .and_then(|code| {
                         crate::python::scan_source(&code).map(|_| indexed.clone())
                     })
+            } else if indexed.runtime == "cat" {
+                std::fs::read_to_string(root.join(&indexed.id).join("plugin.js"))
+                    .map_err(PluginError::from)
+                    .map(|_| indexed.clone())
             } else {
                 std::fs::read_to_string(root.join(&indexed.id).join("plugin.js"))
                     .map_err(PluginError::from)
@@ -148,6 +165,13 @@ impl PluginManager {
         let resolver_preferences = crate::resolver_preferences::ResolverPreferences::open(
             root.join("resolver-preferences.json"),
         )?;
+        // 猫源订阅记录：App 数据目录的 cat-sources.json（root 的父目录，
+        // 与 node-sidecar.json 同一层级；父目录不存在时回落到 root 内）。
+        let cat_sources_path = root
+            .parent()
+            .map(|p| p.join("cat-sources.json"))
+            .unwrap_or_else(|| root.join("cat-sources.json"));
+        let cat_store = CatStore::load(&cat_sources_path)?;
         Ok(Self {
             media_capabilities: Default::default(),
             root,
@@ -156,6 +180,8 @@ impl PluginManager {
             python_bootstrap: Arc::new(UnavailablePython),
             node_bootstrap: Arc::new(UnavailableNode),
             py_proxy_base: Default::default(),
+            cat_sources_path,
+            cat_store: Mutex::new(cat_store),
             plugins: tokio::sync::RwLock::new(plugins),
             mutation: tokio::sync::Mutex::new(()),
             strict,
@@ -205,6 +231,15 @@ impl PluginManager {
     }
     pub fn with_document_reader(mut self, reader: Arc<dyn DocumentReader>) -> Self {
         self.document_reader = Some(reader);
+        self
+    }
+    /// 测试覆盖：改用另一份猫源订阅记录文件（同时重读它；读不出时保留
+    /// 现有记录）。
+    pub fn with_cat_sources_path(mut self, path: PathBuf) -> Self {
+        self.cat_sources_path = path.clone();
+        if let Ok(store) = CatStore::load(&path) {
+            self.cat_store = Mutex::new(store);
+        }
         self
     }
     pub async fn configure_media(
@@ -403,6 +438,39 @@ impl PluginManager {
             .await?;
             self.set_py_proxy_base(proxy_base);
             let w = RuntimeWorker::Py(py);
+            p.worker = Some(w.clone());
+            p.error = None;
+            p.entry.usable = true;
+            return Ok(w);
+        }
+        // 猫源运行时：读 plugin.js（index.config.js 存在时一并传），
+        // 走 Node 边车加载（CatWorker），不走 QuickJS。
+        if p.entry.meta.runtime == "cat" {
+            let dir = self.root.join(&p.entry.meta.id);
+            let file = std::fs::canonicalize(dir.join("plugin.js"))
+                .unwrap_or_else(|_| dir.join("plugin.js"));
+            let config_path = dir.join("index.config.js");
+            let config_file = if config_path.exists() {
+                Some(
+                    std::fs::canonicalize(&config_path)
+                        .unwrap_or(config_path)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else {
+                None
+            };
+            let media_caps = self.media_capabilities.lock().unwrap().clone();
+            let worker = CatWorker::spawn(
+                p.entry.meta.id.clone(),
+                file.to_string_lossy().into_owned(),
+                config_file,
+                media_caps,
+                &self.node_bootstrap,
+                p.entry.meta.budget("media.getDetail"),
+            )
+            .await?;
+            let w = RuntimeWorker::Cat(worker);
             p.worker = Some(w.clone());
             p.error = None;
             p.entry.usable = true;
@@ -790,6 +858,14 @@ impl PluginManager {
     pub async fn remove(&self, id: &str) -> Result<()> {
         let _mutation = self.mutation.lock().await;
         let p = self.get(id).await?;
+        // 猫源：先删订阅记录（失败时直接返回错误，插件不动，避免
+        // “列表里没了但记录还在”或反过来的不一致）。
+        if p.lock().await.entry.meta.runtime == "cat" {
+            let mut store = self.cat_store.lock().unwrap();
+            if store.remove(id) {
+                store.save()?;
+            }
+        }
         {
             let p = p.lock().await;
             if let Some(w) = &p.worker {
@@ -808,6 +884,443 @@ impl PluginManager {
         std::fs::remove_dir_all(target)?;
         Ok(())
     }
+    /// 猫源 worker 的第一个 type-3 站点名（导入成功后用作插件显示名）。
+    fn cat_first_site_name(worker: &RuntimeWorker) -> Option<String> {
+        if let RuntimeWorker::Cat(w) = worker {
+            w.sites()
+                .first()
+                .map(|s| s.name.clone())
+                .filter(|n| !n.trim().is_empty())
+        } else {
+            None
+        }
+    }
+
+    /// 写猫源插件目录文件（plugin.js、index.config.js、附带文件）。
+    /// 附带文件的相对路径必须安全（不含 `..`、不是绝对路径）。
+    fn write_cat_files(
+        dir: &Path,
+        plugin_js: &[u8],
+        config: Option<&[u8]>,
+        extra: &[(String, Vec<u8>)],
+    ) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        atomic_write(&dir.join("plugin.js"), plugin_js)?;
+        if let Some(config) = config {
+            atomic_write(&dir.join("index.config.js"), config)?;
+        }
+        for (rel, bytes) in extra {
+            let rel_path = Path::new(rel);
+            if rel_path.is_absolute()
+                || rel_path.components().any(|c| {
+                    matches!(c, std::path::Component::ParentDir)
+                })
+            {
+                return Err(PluginError::invalid("猫源附带文件路径无效"));
+            }
+            atomic_write(&dir.join(rel_path), bytes)?;
+        }
+        Ok(())
+    }
+
+    /// 猫源导入的公共尾巴：写插件目录 → 建索引条目 → 初始化（失败留错）
+    /// → 成功时用第一个 type-3 站点名重命名 → 保存索引。顺序照抄
+    /// `install_code`。`temp_name` 是导入时的临时名。
+    async fn cat_install(
+        &self,
+        id: &str,
+        temp_name: &str,
+        source: Option<String>,
+        plugin_js: &[u8],
+        config: Option<&[u8]>,
+        extra: &[(String, Vec<u8>)],
+    ) -> Result<PluginInfo> {
+        let _mutation = self.mutation.lock().await;
+        let existing = self.plugins.read().await.get(id).cloned();
+        if let Some(p) = &existing {
+            if p.lock().await.entry.meta.runtime != "cat" {
+                return Err(PluginError::invalid("该 ID 已被非猫源插件占用"));
+            }
+        }
+        let dir = self.root.join(id);
+        let is_new_dir = !dir.exists();
+        let old_code = std::fs::read(dir.join("plugin.js")).ok();
+        if let Err(e) = Self::write_cat_files(&dir, plugin_js, config, extra) {
+            if is_new_dir {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            return Err(e);
+        }
+        let name: String = temp_name.chars().take(60).collect();
+        let name = if name.trim().is_empty() {
+            id.to_string()
+        } else {
+            name
+        };
+        let meta = Meta::parse(json!({
+            "id": id,
+            "name": name,
+            "version": "1.0.0",
+            "protocol": 1,
+            "kind": "source",
+            "runtime": "cat",
+        }))?;
+        let entry = IndexEntry {
+            meta,
+            enabled: true,
+            source,
+            origin: None,
+            usable: false,
+            settings: BTreeMap::new(),
+            endpoint: Value::Null,
+        };
+        let mut old_guard = match &existing {
+            Some(old) => Some(old.lock().await),
+            None => None,
+        };
+        if let Some(old) = old_guard.as_mut() {
+            if let Some(w) = old.worker.take() {
+                w.stop_and_wait().await?;
+            }
+        }
+        let mut p = Self::installed(
+            dir.clone(),
+            entry,
+            self.strict,
+            self.cooldown.clone(),
+            self.node_bootstrap.clone(),
+        )?;
+        if let Some(old) = old_guard.as_ref() {
+            p.store = old.store.clone();
+        }
+        if let Some(old) = old_guard.as_mut() {
+            old.retired = true;
+        }
+        drop(old_guard);
+        self.sessions.release_plugin(id);
+        if p.entry.enabled {
+            match self.initialize(&mut p, true).await {
+                Ok(w) => {
+                    if let Some(site_name) = Self::cat_first_site_name(&w) {
+                        p.entry.meta.name = site_name.chars().take(60).collect();
+                    }
+                }
+                Err(e) => {
+                    p.error = Some(e);
+                }
+            }
+        }
+        let mut info = Self::info(&p);
+        info.can_restore = dir.join("plugin.previous.json").exists();
+        self.plugins
+            .write()
+            .await
+            .insert(id.to_string(), Arc::new(tokio::sync::Mutex::new(p)));
+        if let Err(e) = self.save().await {
+            if let Some(new) = self.plugins.write().await.remove(id) {
+                if let Some(w) = new.lock().await.worker.take() {
+                    w.stop();
+                }
+            }
+            if let Some(bytes) = old_code {
+                let _ = atomic_write(&dir.join("plugin.js"), &bytes);
+            } else if is_new_dir {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            if let Some(old) = existing {
+                old.lock().await.retired = false;
+                self.plugins.write().await.insert(id.to_string(), old);
+            }
+            return Err(e);
+        }
+        Ok(info)
+    }
+
+    /// 猫源列表：Node 运行状态（读 `node-sidecar.json` 的 apiBase，
+    /// 健康检查 2 秒，`v18` 开头即运行中）与全部订阅记录；每条记录用
+    /// 同 id 插件的信息覆盖 `enabled` 与 `status`（插件不存在时
+    /// `status: "unloaded"`）。
+    pub async fn cat_list(&self) -> Result<Value> {
+        let mut node = json!({"running": false});
+        let info_path = self.cat_sources_path.with_file_name("node-sidecar.json");
+        if let Ok(text) = std::fs::read_to_string(&info_path) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(api_base) = v.get("apiBase").and_then(Value::as_str) {
+                    if let Ok(client) = NodeClient::new(api_base.to_string()) {
+                        if let Ok(version) = client.health(Duration::from_secs(2)).await {
+                            node = json!({"running": true, "version": version});
+                        }
+                    }
+                }
+            }
+        }
+        let plugins = self.list().await;
+        let records = self.cat_store.lock().unwrap().list();
+        let mut sources = vec![];
+        for record in records {
+            let mut v = serde_json::to_value(&record)
+                .map_err(|_| PluginError::internal("猫源订阅记录序列化失败"))?;
+            if let Some(p) = plugins.iter().find(|p| p.meta.id == record.id) {
+                v["enabled"] = json!(p.enabled);
+                v["status"] = json!(p.status);
+            } else {
+                v["status"] = json!("unloaded");
+            }
+            sources.push(v);
+        }
+        Ok(json!({"node": node, "sources": sources}))
+    }
+
+    /// 网络导入：拉订阅 → 派生 id → 写插件目录并初始化 → 写订阅记录。
+    /// 下载/校验/写文件失败时不留坏记录、不留残留文件。
+    pub async fn cat_import_url(
+        &self,
+        url: &str,
+        name: Option<String>,
+    ) -> Result<Value> {
+        let (published_md5, js) = fetch_subscription(url).await?;
+        let id = derive_plugin_id_from_url(url)?;
+        let temp_name = name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| {
+                url::Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string))
+                    .unwrap_or_else(|| id.clone())
+            });
+        let info = self
+            .cat_install(&id, &temp_name, Some(url.to_string()), &js, None, &[])
+            .await?;
+        let record = CatSourceRecord {
+            id: id.clone(),
+            name: info.meta.name.clone(),
+            source_type: "url".into(),
+            url: Some(url.to_string()),
+            md5: published_md5.unwrap_or_else(|| md5_hex(&js)),
+            enabled: info.enabled,
+            updated_at: crate::store::now() as i64,
+        };
+        {
+            let mut store = self.cat_store.lock().unwrap();
+            store.upsert(record.clone());
+            store.save()?;
+        }
+        Ok(json!({"source": record, "plugin": info}))
+    }
+
+    /// ZIP 导入：读 ZIP → 解压校验 → 派生 id → 写插件目录并初始化 →
+    /// 写订阅记录。失败时清掉新建的插件目录、不留记录。
+    pub async fn cat_import_zip(
+        &self,
+        path: &str,
+        name: Option<String>,
+    ) -> Result<Value> {
+        let bytes = std::fs::read(path).map_err(|_| PluginError::invalid("无法读取 ZIP 文件"))?;
+        let extracted = extract_zip(&bytes)?;
+        let stem = Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let id = derive_plugin_id_from_stem(stem)?;
+        let temp_name = name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| stem.to_string());
+        let info = self
+            .cat_install(
+                &id,
+                &temp_name,
+                None,
+                &extracted.index_js,
+                extracted.config.as_deref(),
+                &extracted.files,
+            )
+            .await?;
+        let record = CatSourceRecord {
+            id: id.clone(),
+            name: info.meta.name.clone(),
+            source_type: "zip".into(),
+            url: None,
+            md5: extracted.index_js_md5.clone(),
+            enabled: info.enabled,
+            updated_at: crate::store::now() as i64,
+        };
+        {
+            let mut store = self.cat_store.lock().unwrap();
+            store.upsert(record.clone());
+            store.save()?;
+        }
+        Ok(json!({"source": record, "plugin": info}))
+    }
+
+    /// 检查更新（仅网络导入的源）：重新拉同一订阅 URL，md5 没变返回
+    /// `{changed: false}`；变了覆盖 `plugin.js`、更新记录、重新初始化。
+    /// 初始化失败时恢复旧版文件与旧记录，只报失败。
+    pub async fn cat_check_update(&self, id: &str) -> Result<Value> {
+        let record = self
+            .cat_store
+            .lock()
+            .unwrap()
+            .get(id)
+            .ok_or_else(|| PluginError::invalid("猫源订阅不存在"))?;
+        if record.source_type != "url" {
+            return Err(PluginError::invalid(
+                "ZIP 导入的源没有订阅地址，请重新导入 ZIP",
+            ));
+        }
+        let url = record
+            .url
+            .clone()
+            .ok_or_else(|| PluginError::invalid("该订阅没有订阅地址"))?;
+        let (published_md5, js) = fetch_subscription(&url).await?;
+        let new_md5 = published_md5.unwrap_or_else(|| md5_hex(&js));
+        if new_md5 == record.md5 {
+            return Ok(json!({"changed": false, "source": record}));
+        }
+        let _mutation = self.mutation.lock().await;
+        let plugin = self.get(id).await?;
+        let dir = self.root.join(id);
+        let old_js = std::fs::read(dir.join("plugin.js"))?;
+        let mut new_record = record.clone();
+        new_record.md5 = new_md5;
+        new_record.updated_at = crate::store::now() as i64;
+        atomic_write(&dir.join("plugin.js"), &js)?;
+        {
+            let mut store = self.cat_store.lock().unwrap();
+            store.upsert(new_record.clone());
+            if let Err(e) = store.save() {
+                let _ = atomic_write(&dir.join("plugin.js"), &old_js);
+                return Err(e);
+            }
+        }
+        let outcome = {
+            let mut p = plugin.lock().await;
+            if p.entry.enabled {
+                match self.initialize(&mut p, true).await {
+                    Ok(w) => {
+                        if let Some(site_name) = Self::cat_first_site_name(&w) {
+                            p.entry.meta.name = site_name.chars().take(60).collect();
+                            new_record.name = p.entry.meta.name.clone();
+                        }
+                        Ok(Self::info(&p))
+                    }
+                    Err(e) => {
+                        let _ = atomic_write(&dir.join("plugin.js"), &old_js);
+                        let mut store = self.cat_store.lock().unwrap();
+                        store.upsert(record.clone());
+                        let _ = store.save();
+                        p.error = Some(e.clone());
+                        Err(e)
+                    }
+                }
+            } else {
+                Ok(Self::info(&p))
+            }
+        };
+        match outcome {
+            Ok(_info) => {
+                {
+                    let mut store = self.cat_store.lock().unwrap();
+                    store.upsert(new_record.clone());
+                    store.save()?;
+                }
+                self.save().await?;
+                Ok(json!({"changed": true, "source": new_record}))
+            }
+            Err(e) => {
+                self.save().await?;
+                Err(e)
+            }
+        }
+    }
+
+    /// 重新导入 ZIP（仅 ZIP 导入的源，也可用于覆盖同一订阅）：覆盖插件
+    /// 目录（新 ZIP 没有 `index.config.js` 时保留旧的配置文件，不删
+    /// 用户凭证；有则覆盖）→ 更新记录 → 重新初始化。初始化失败时文件
+    /// 已覆盖、插件留标错（与 `import_code` 的形态一致）。
+    pub async fn cat_reimport_zip(&self, id: &str, path: &str) -> Result<Value> {
+        let record = self
+            .cat_store
+            .lock()
+            .unwrap()
+            .get(id)
+            .ok_or_else(|| PluginError::invalid("猫源订阅不存在"))?;
+        let bytes = std::fs::read(path).map_err(|_| PluginError::invalid("无法读取 ZIP 文件"))?;
+        let extracted = extract_zip(&bytes)?;
+        let _mutation = self.mutation.lock().await;
+        let plugin = self.get(id).await?;
+        let dir = self.root.join(id);
+        Self::write_cat_files(
+            &dir,
+            &extracted.index_js,
+            extracted.config.as_deref(),
+            &extracted.files,
+        )?;
+        let mut new_record = record.clone();
+        new_record.md5 = extracted.index_js_md5.clone();
+        new_record.updated_at = crate::store::now() as i64;
+        {
+            let mut store = self.cat_store.lock().unwrap();
+            store.upsert(new_record.clone());
+            store.save()?;
+        }
+        let info = {
+            let mut p = plugin.lock().await;
+            if p.entry.enabled {
+                match self.initialize(&mut p, true).await {
+                    Ok(w) => {
+                        if let Some(site_name) = Self::cat_first_site_name(&w) {
+                            p.entry.meta.name = site_name.chars().take(60).collect();
+                            new_record.name = p.entry.meta.name.clone();
+                        }
+                    }
+                    Err(e) => {
+                        p.error = Some(e);
+                    }
+                }
+            }
+            Self::info(&p)
+        };
+        {
+            let mut store = self.cat_store.lock().unwrap();
+            store.upsert(new_record.clone());
+            store.save()?;
+        }
+        self.save().await?;
+        Ok(json!({"source": new_record, "plugin": info}))
+    }
+
+    /// 导入配置：把 `path` 的文件拷进插件目录为 `index.config.js`
+    ///（覆盖旧的），再重新初始化使新配置生效。只要求文件存在、非空、
+    /// ≤2 MiB；真正的配置错误在初始化时由 `/cat/load` 报。
+    /// 不读配置内容（可能含凭证）。
+    pub async fn cat_import_config(&self, id: &str, path: &str) -> Result<Value> {
+        let _record = self
+            .cat_store
+            .lock()
+            .unwrap()
+            .get(id)
+            .ok_or_else(|| PluginError::invalid("猫源订阅不存在"))?;
+        let bytes = std::fs::read(path).map_err(|_| PluginError::invalid("无法读取配置文件"))?;
+        if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+            return Err(PluginError::invalid("配置文件为空或过大（上限 2 MiB）"));
+        }
+        let _mutation = self.mutation.lock().await;
+        let plugin = self.get(id).await?;
+        let dir = self.root.join(id);
+        atomic_write(&dir.join("index.config.js"), &bytes)?;
+        let info = {
+            let mut p = plugin.lock().await;
+            if p.entry.enabled {
+                if let Err(e) = self.initialize(&mut p, true).await {
+                    p.error = Some(e);
+                }
+            }
+            Self::info(&p)
+        };
+        self.save().await?;
+        Ok(json!({"plugin": info}))
+    }
+
     pub async fn call_transfer(
         &self,
         id: &str,

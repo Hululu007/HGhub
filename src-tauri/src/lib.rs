@@ -133,6 +133,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             plugins::hpp_manage,
             plugins::pick_plugin_files,
+            plugins::pick_cat_zip,
             plugins::pick_plugin_directory,
             commands::app_boot,
             commands::security_set,

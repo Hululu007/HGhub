@@ -27,6 +27,7 @@ const net = require('net');
 const tls = require('tls');
 const dns = require('dns');
 const fs = require('fs');
+const path = require('path');
 
 const DEFAULT_PORT = 55101;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -816,7 +817,186 @@ function requestOptions(body, timeoutMs, addrs) {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP 服务：/health、/request。
+// 猫源（Node 猫源，见 docs/developers/cat-source.md §5）：加载用户 JS
+// 模块并调它的 start(config)，发现它起的 HTTP 服务端口，管生命周期。
+// 内容调用不经过边车（不设 /cat/call）：Rust 侧直接调源的 HTTP 服务。
+// 配置对象只在内存里传给 start，绝不记日志；GET /config 的原始响应
+// 只取站点列表（key、name、type、api），绝不整体返回、不记日志。
+// ---------------------------------------------------------------------------
+const catSources = new Map(); // key -> { module, port, baseUrl }
+
+// 取一个空闲端口：临时 net.Server 绑端口 0，读到端口后关闭。
+function allocFreePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const port = s.address().port;
+      s.close(() => resolve(port));
+    });
+  });
+}
+
+// 向源的 HTTP 服务 GET 一条路径（2 秒超时）：收到任何响应即算通。
+function probeCat(port, pathname) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: '127.0.0.1', port, path: pathname, timeout: 2000 },
+      (res) => {
+        res.resume();
+        resolve(true);
+      },
+    );
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
+}
+
+// GET /config，解析 JSON；拿不到或解析失败回 null。
+function fetchCatConfig(port) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: '127.0.0.1', port, path: '/config', timeout: 2000 },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
+async function handleCatLoad(req, res) {
+  const fail = (message) => sendJson(res, 500, { success: false, error: message });
+  try {
+    const body = await readJsonBody(req);
+    const key = body && body.key;
+    const file = body && body.file;
+    const configFile = body && body.configFile;
+    if (typeof key !== 'string' || !key || typeof file !== 'string' || !file) {
+      fail('缺少猫源 key 或文件路径');
+      return;
+    }
+    if (!fs.existsSync(file)) {
+      fail('猫源文件不存在');
+      return;
+    }
+    // 同 key 已加载时先停掉旧的（尽力而为、抛错也继续），再覆盖。
+    const old = catSources.get(key);
+    if (old) {
+      catSources.delete(key);
+      try {
+        if (old.module && typeof old.module.stop === 'function') await old.module.stop();
+      } catch {
+        // 停旧源失败也不阻塞新加载。
+      }
+    }
+    // 空闲端口 + 数据目录（plugin.js 所在目录下的 data 子目录）。
+    const port = await allocFreePort();
+    const dataDir = path.join(path.dirname(file), 'data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    // 调 start 前设好：JsonDB 在 start() 内创建，位置由 NODE_PATH 定；
+    // 先于 require 设，覆盖 JsonDB 万一在顶层创建的情况。
+    process.env.DEV_HTTP_PORT = String(port);
+    process.env.NODE_PATH = dataDir;
+    let mod;
+    try {
+      delete require.cache[require.resolve(file)];
+      mod = require(file);
+    } catch (e) {
+      // 缺模块是最常见的加载失败（源 require 了未提供的第三方包），
+      // 单独给明错；其他加载失败（语法错等）带原始文案另报。
+      if (e && e.code === 'MODULE_NOT_FOUND') {
+        fail(`该源依赖未提供的模块：${e.message}`);
+      } else {
+        fail(`猫源文件加载失败：${(e && e.message) || String(e)}`);
+      }
+      return;
+    }
+    if (!mod || typeof mod.start !== 'function') {
+      fail('该文件不是猫源：缺少 start');
+      return;
+    }
+    // 配置：有文件就 require 得对象，否则空对象；只在内存里传给 start。
+    let config = {};
+    if (typeof configFile === 'string' && configFile && fs.existsSync(configFile)) {
+      try {
+        delete require.cache[require.resolve(configFile)];
+        config = require(configFile);
+      } catch (e) {
+        fail(`配置文件读取失败：${(e && e.message) || String(e)}`);
+        return;
+      }
+    }
+    if (!config || typeof config !== 'object') config = {};
+    try {
+      await mod.start(config);
+    } catch (e) {
+      fail(`猫源启动失败：${(e && e.message) || String(e)}`);
+      return;
+    }
+    // 探活：/test 不通试 /config；仍不通按 EADDRINUSE 重试逻辑向后探 +1…+5。
+    let actualPort = 0;
+    for (let p = port; p <= port + 5; p++) {
+      if (await probeCat(p, '/test') || await probeCat(p, '/config')) {
+        actualPort = p;
+        break;
+      }
+    }
+    if (!actualPort) {
+      fail('猫源服务未启动');
+      return;
+    }
+    // 拿站点列表：只保留 key、name、type、api 四个字段；原始响应不返回、不记日志。
+    const raw = await fetchCatConfig(actualPort);
+    const sites = raw && raw.video && Array.isArray(raw.video.sites)
+      ? raw.video.sites.map((s) => ({ key: s.key, name: s.name, type: s.type, api: s.api }))
+      : [];
+    if (sites.length === 0) {
+      fail('该源没有可用站点');
+      return;
+    }
+    const baseUrl = `http://127.0.0.1:${actualPort}`;
+    catSources.set(key, { module: mod, port: actualPort, baseUrl });
+    sendJson(res, 200, { success: true, port: actualPort, baseUrl, sites });
+  } catch (e) {
+    sendJson(res, 500, { success: false, error: (e && e.message) || String(e) });
+  }
+}
+
+async function handleCatUnload(req, res) {
+  try {
+    const body = await readJsonBody(req);
+    const key = body && body.key;
+    const entry = typeof key === 'string' ? catSources.get(key) : undefined;
+    if (entry) {
+      catSources.delete(key);
+      try {
+        if (entry.module && typeof entry.module.stop === 'function') await entry.module.stop();
+      } catch {
+        // 尽力而为：stop 抛错也静默成功。
+      }
+    }
+  } catch {
+    // 尽力而为：请求体读失败也静默成功。
+  }
+  sendJson(res, 200, { success: true });
+}
+
+function handleCatList(req, res) {
+  sendJson(res, 200, { sources: [...catSources.keys()] });
+}
+
+// ---------------------------------------------------------------------------
+// HTTP 服务：/health、/request、/diagnose、/cat/*。
 // ---------------------------------------------------------------------------
 function sendJson(res, status, value) {
   const text = JSON.stringify(value);
@@ -1059,6 +1239,24 @@ function onRequest(req, res) {
       console.error(`handleDiagnose failed: ${e && e.stack || e}`);
       if (!res.headersSent) sendJson(res, 500, { error: 'Node 边车内部错误', code: 'NETWORK' });
     });
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/cat/load') {
+    handleCatLoad(req, res).catch((e) => {
+      console.error(`handleCatLoad failed: ${e && e.stack || e}`);
+      if (!res.headersSent) sendJson(res, 500, { success: false, error: 'Node 边车内部错误' });
+    });
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/cat/unload') {
+    handleCatUnload(req, res).catch((e) => {
+      console.error(`handleCatUnload failed: ${e && e.stack || e}`);
+      if (!res.headersSent) sendJson(res, 200, { success: true });
+    });
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/cat/list') {
+    handleCatList(req, res);
     return;
   }
   sendJson(res, 404, { error: 'not found' });

@@ -309,6 +309,7 @@ impl PyWorker {
 pub enum RuntimeWorker {
     Js(crate::runtime::Worker),
     Py(PyWorker),
+    Cat(crate::cat::worker::CatWorker),
 }
 
 impl RuntimeWorker {
@@ -316,6 +317,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => &w.methods,
             RuntimeWorker::Py(w) => w.methods(),
+            RuntimeWorker::Cat(w) => w.methods(),
         }
     }
 
@@ -323,6 +325,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => &w.media,
             RuntimeWorker::Py(w) => w.media(),
+            RuntimeWorker::Cat(w) => w.media(),
         }
     }
 
@@ -330,6 +333,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => w.closed(),
             RuntimeWorker::Py(w) => w.closed(),
+            RuntimeWorker::Cat(w) => w.closed(),
         }
     }
 
@@ -337,6 +341,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => w.fault(),
             RuntimeWorker::Py(w) => w.fault(),
+            RuntimeWorker::Cat(w) => w.fault(),
         }
     }
 
@@ -344,6 +349,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => w.stop(),
             RuntimeWorker::Py(w) => w.stop(),
+            RuntimeWorker::Cat(w) => w.stop(),
         }
     }
 
@@ -351,6 +357,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => w.stop_and_wait().await,
             RuntimeWorker::Py(w) => w.stop_and_wait().await,
+            RuntimeWorker::Cat(w) => w.stop_and_wait().await,
         }
     }
 
@@ -358,6 +365,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => w.cancel(id),
             RuntimeWorker::Py(w) => w.cancel(id),
+            RuntimeWorker::Cat(w) => w.cancel(id),
         }
     }
 
@@ -371,6 +379,7 @@ impl RuntimeWorker {
         match self {
             RuntimeWorker::Js(w) => w.call(id, method, params, budget).await,
             RuntimeWorker::Py(w) => w.call(id, method, params, budget).await,
+            RuntimeWorker::Cat(w) => w.call(id, method, params, budget).await,
         }
     }
 
@@ -387,6 +396,9 @@ impl RuntimeWorker {
                 w.call_scoped(id, method, params, budget, user_auth).await
             }
             RuntimeWorker::Py(w) => {
+                w.call_scoped(id, method, params, budget, user_auth).await
+            }
+            RuntimeWorker::Cat(w) => {
                 w.call_scoped(id, method, params, budget, user_auth).await
             }
         }

@@ -48,6 +48,10 @@ export default function (hg) {
 - **Python 蜘蛛**（`meta.runtime` 为 `"python"`）不直接声明 JS 能力命名空间，
   能力面按 [§19](#19-python-蜘蛛tvbox) 从蜘蛛方法映射；v1 必需 `detailContent` +
   `playerContent`，纯直播源暂不支持。
+- **猫源**（`meta.runtime` 为 `"cat"`）与 Python 蜘蛛同款：不直接声明 JS 能力命名空间，
+  能力面是内容源方法面（`catalog.getCategories` / `home.getSections` / `feed.list` /
+  `catalog.list` / `search.search` / `media.getDetail` / `media.resolvePlayback`），
+  不声明 `localProxy` / `init` / `action` 等非 v1 方法。
 - **解析器**（`meta.kind` 为 `resolver`）只需要 `resolver` 和 `meta.matches`。
 - 宿主在初始化时校验每个命名空间的必需方法，并记录可选方法是否存在，界面按具体方法显示按钮；
   不能仅因存在空 `interact` 对象就显示全部交互。工厂应保持能力集合稳定，不随登录态改变；登录限制用错误码表达。
@@ -596,6 +600,8 @@ dispose?(): void
 （`.py` 文件，见 [01 §3](01-plugin-file.md)）。宿主把它跑在 CPython 边车里
 （见 [02 §11](02-runtime.md)），按本节的表把 HPP 能力方法翻译成蜘蛛方法调用，
 再把蜘蛛返回的 TVBox 形状转成 HPP 形状。蜘蛛写法与基类见 [04 §15](04-host-api.md)。
+猫源（`runtime: "cat"`）的方法面与 Python 蜘蛛一致，都是内容源方法面，映射见开发者文档
+《Node 猫源》§6.1；同样不声明 `localProxy` / `init` / `action` 等非 v1 方法。
 
 ### 19.1 方法映射
 

@@ -171,7 +171,9 @@ slug 后只剩回退值（如纯中文名）时 id 为 `py.spider-<8 位十六�
 不同中文名得到不同 id；
 版本恒为 `1.0.0`，`runtime` 为 `"python"`，`kind` 恒为 `source`。Python 源没有可信的版本字段，
 更新靠手动重导：重复导入同一文件覆盖同一个插件。Python 蜘蛛不声明 `meta.settings`、
-不声明 WebHome 首页。
+不声明 WebHome 首页。猫源（Node 猫源）同款：版本恒为 `1.0.0`、`kind` 恒为 `source`、
+`runtime` 为 `"cat"`，源文件存为插件目录里的 `plugin.js`、配置为 `index.config.js`，
+订阅记录在 App 数据目录的 `cat-sources.json` 里（见开发者文档《Node 猫源》）。
 
 导入单个插件的流程：
 

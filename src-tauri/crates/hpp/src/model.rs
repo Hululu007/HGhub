@@ -12,8 +12,9 @@ pub struct Meta {
     pub protocol: u32,
     #[serde(default = "source_kind")]
     pub kind: String,
-    /// 运行时：`"js"`（默认，QuickJS 插件）或 `"python"`（TVBox Python 蜘蛛，
-    /// 走 CPython 边车）。旧索引无此字段的一律按 `"js"` 读。
+    /// 运行时：`"js"`（默认，QuickJS 插件）、`"python"`（TVBox Python 蜘蛛，
+    /// 走 CPython 边车）或 `"cat"`（Node 猫源，走 Node 边车）。旧索引无此字段的
+    /// 一律按 `"js"` 读。
     #[serde(default = "js_runtime")]
     pub runtime: String,
     #[serde(default)]
@@ -163,7 +164,7 @@ impl Meta {
             return Err(PluginError::invalid("插件类型或解析器 matches 无效"));
         }
         // Python 运行时 v1：蜘蛛恒为内容源，不声明 WebHome（WebHome 包装是 JS 形态）。
-        if !matches!(m.runtime.as_str(), "js" | "python") {
+        if !matches!(m.runtime.as_str(), "js" | "python" | "cat") {
             return Err(PluginError::invalid("插件运行时无效"));
         }
         if m.runtime == "python" {
@@ -172,6 +173,15 @@ impl Meta {
             }
             if m.webhome.is_some() {
                 return Err(PluginError::invalid("Python 蜘蛛不能声明 WebHome 首页"));
+            }
+        }
+        // 猫源 v1：与 Python 蜘蛛同款约束，恒为内容源，不声明 WebHome。
+        if m.runtime == "cat" {
+            if m.kind != "source" {
+                return Err(PluginError::invalid("猫源只能是内容源"));
+            }
+            if m.webhome.is_some() {
+                return Err(PluginError::invalid("猫源不能声明 WebHome 首页"));
             }
         }
         let mut keys = std::collections::HashSet::new();

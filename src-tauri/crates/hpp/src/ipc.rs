@@ -57,6 +57,28 @@ pub async fn dispatch(
                 .await?
         ),
         "list" => json!(manager.list().await),
+        "cat.list" => json!(manager.cat_list().await?),
+        "cat.import_url" => json!(
+            manager
+                .cat_import_url(text(p, "url")?, p["name"].as_str().map(String::from))
+                .await?
+        ),
+        "cat.import_zip" => json!(
+            manager
+                .cat_import_zip(text(p, "path")?, p["name"].as_str().map(String::from))
+                .await?
+        ),
+        "cat.check_update" => json!(manager.cat_check_update(text(p, "id")?).await?),
+        "cat.reimport_zip" => json!(
+            manager
+                .cat_reimport_zip(text(p, "id")?, text(p, "path")?)
+                .await?
+        ),
+        "cat.import_config" => json!(
+            manager
+                .cat_import_config(text(p, "id")?, text(p, "path")?)
+                .await?
+        ),
         "updates.state" => json!(manager.refresh_update_state().await?),
         "updates.policy.set" => json!(manager.update_policy_set(
             serde_json::from_value(p.clone()).map_err(|_| PluginError::invalid(

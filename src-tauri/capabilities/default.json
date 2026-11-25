@@ -18,6 +18,7 @@
     "core:window:allow-set-fullscreen",
     "allow-hpp-manage",
     "allow-pick-plugin-files",
+    "allow-pick-cat-zip",
     "allow-pick-plugin-directory",
     "allow-app-boot",
     "allow-security-set",

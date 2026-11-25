@@ -4,9 +4,10 @@
 //! 顺序：
 //! 1. 在 webhome 窗口里跑 JS，删三个 localStorage 键（监控快照、
 //!    域名缓存、手动覆盖），取回每键清理前是否存在；
-//! 2. `WebviewWindow::clear_all_browsing_data` 清 WebView 全部浏览数据
-//!    （页面缓存、全部 localStorage/sessionStorage、Cookie、IndexedDB、
-//!    Service Worker 缓存等）；
+//! 2. 清 WebView 浏览数据（页面缓存、全部 localStorage/sessionStorage、
+//!    Cookie、IndexedDB、Service Worker 缓存等）——iOS 上按源划界：只删
+//!    远端站源的记录，App 自身源（主窗口，`tauri://localhost`）的数据
+//!    一概保留；其余平台仍走 wry 的全量清除；
 //! 3. 中间步骤（调用方传进来的 `clear_middle`）：全部插件的 Rust 请求
 //!    Cookie 罐（内存 + 落盘的 cookies.json）、Network 响应缓存、
 //!    `webhome:` 前缀的存储键；全部会话的媒体预加载缓存；插件目录下
@@ -26,10 +27,11 @@
 //!   调完立即返回、不等删完；重载可能跑在删除完成之前。但第 1 步的
 //!   三个键是 JS 同步删掉并经回调确认的，所以重载后页面读到的域名
 //!   列表不受影响；其余浏览数据的清除在后台完成。
-//! - 第 2 步清的是 WebView 的共享数据存储（Tauri 文档原话：
-//!   "clears the WKWebsiteDataStore of this webview"；未配自定义
-//!   `data_store_identifier` 的窗口共享默认存储），主窗口的本地偏好
-//!   也可能一并恢复默认。
+//! - 第 2 步清的是 WebView 的共享数据存储（未配自定义
+//!   `data_store_identifier` 的窗口共享默认存储）；iOS 上按源划界后
+//!   主窗口的本地偏好不再受影响。旧的全量清除（wry 的
+//!   `clear_all_browsing_data`，全类型、全量）曾把主窗口 localStorage
+//!   里的设置一并清掉（真机实测），已修。
 //! - 不碰：App 设置（代理模式、自定义代理地址等）、导入的插件及插件
 //!   文件、插件存储里非 `webhome:` 的键、下载好的视频、插件源文件
 //!   （*.py、*.js、manifest）、HTML 源文件（localPage 的 *.html）。
@@ -111,6 +113,19 @@ pub trait WebHomeDataWindow: Send {
     fn eval_js(&self, js: String, callback: Box<dyn Fn(String) + Send>) -> Result<(), String>;
     fn clear_browsing_data(&self) -> Result<(), String>;
     fn reload_page(&self) -> Result<(), String>;
+}
+
+/// 划界清除时某条网站数据记录是否属于 App 自身源、应当保留（iOS）。
+///
+/// `display_name` 是 `WKWebsiteDataRecord.displayName`（通常是域名）；
+/// `keep_host` 是主窗口 URL 的 host（发布版 `tauri://localhost`、开发
+/// 版 `http://localhost:1420`，都是 `localhost`）。保留规则：名字为空
+/// （无法认出是远端站源，宁可保留）或与 App 自身 host 相等（域名不区分
+/// 大小写）；其余一律删除。调用方（app crate 的 iOS 实现）按此规则过滤
+/// `fetchDataRecordsOfTypes` 取回的记录，再调
+/// `removeDataOfTypes:forDataRecords:`。
+pub fn keep_website_data_record(display_name: &str, keep_host: &str) -> bool {
+    display_name.is_empty() || display_name.eq_ignore_ascii_case(keep_host)
 }
 
 /// 删键脚本：逐键记清理前是否存在、删掉，返回
@@ -690,5 +705,15 @@ mod tests {
             .cookies("get", json!({"url": "https://example.com/"}))
             .unwrap();
         assert_eq!(reloaded.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn keep_website_data_record_keeps_app_host_and_empty_name() {
+        assert!(keep_website_data_record("localhost", "localhost"));
+        assert!(keep_website_data_record("LOCALHOST", "localhost"));
+        assert!(keep_website_data_record("", "localhost"));
+        assert!(!keep_website_data_record("wo.vivas.cc.cd", "localhost"));
+        assert!(!keep_website_data_record("www.wogg.net", "localhost"));
+        assert!(!keep_website_data_record("localhost.example.com", "localhost"));
     }
 }

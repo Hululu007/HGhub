@@ -192,28 +192,36 @@
   window.fongmiClient = { mode: "webhome", isLeanback: false };
 
   // 小房子：WebHome 窗口的源切换与关闭控件（04 §14、08 §10）。
-  // 右侧中部一个常显的圆形房子按钮（白房子图标、半透明深色底）；
-  // 点它直接弹出源面板（列已装的 WebHome 源，点一个切过去，下面一行
-  // “关闭”回主界面）；几秒不用面板自己收起，按钮一直留着。窗口常驻
-  // 不销毁，× 由此控件代替。
+  // 平时只在右边中部露出一个“‹”；点它展开成白房子按钮；点白房子
+  // 按钮弹出源面板（列已装的 WebHome 源，点一个切过去，下面一行
+  // “关闭”回主界面）；几秒不用自动收回右边。窗口常驻不销毁，× 由此控件代替。
+  var houseTab = document.createElement("button");
+  houseTab.id = "hg-webhome-tab";
+  houseTab.type = "button";
+  houseTab.setAttribute("aria-label", "展开");
+  houseTab.textContent = "‹";
+  houseTab.style.cssText = "position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483647;width:18px;height:48px;border:none;border-radius:8px 0 0 8px;background:rgba(0,0,0,.55);color:#fff;font-size:18px;line-height:1;padding:0;cursor:pointer;";
   var houseBtn = document.createElement("button");
   houseBtn.id = "hg-webhome-btn";
   houseBtn.type = "button";
   houseBtn.setAttribute("aria-label", "源切换");
   houseBtn.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff" aria-hidden="true"><path d="M12 3 2 12h3v8h6v-6h2v6h6v-8h3L12 3z"/></svg>';
-  houseBtn.style.cssText = "position:fixed;right:8px;top:50%;transform:translateY(-50%);z-index:2147483647;width:44px;height:44px;border:none;border-radius:50%;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;cursor:pointer;";
+  houseBtn.style.cssText = "position:fixed;right:8px;top:50%;transform:translateY(-50%);z-index:2147483647;width:40px;height:40px;border:none;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:19px;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;";
   var housePanel = document.createElement("div");
   housePanel.id = "hg-webhome-panel";
-  housePanel.style.cssText = "position:fixed;right:60px;top:50%;transform:translateY(-50%);z-index:2147483647;width:230px;max-height:60vh;overflow-y:auto;border-radius:12px;background:rgba(20,20,24,.92);color:#fff;box-shadow:0 4px 24px rgba(0,0,0,.4);padding:6px;display:none;";
+  housePanel.style.cssText = "position:fixed;right:56px;top:50%;transform:translateY(-50%);z-index:2147483647;width:230px;max-height:60vh;overflow-y:auto;border-radius:12px;background:rgba(20,20,24,.92);color:#fff;box-shadow:0 4px 24px rgba(0,0,0,.4);padding:6px;display:none;";
   var houseErr = document.createElement("div");
   houseErr.style.cssText = "display:none;padding:6px 10px;color:#ff8a80;font-size:12px;line-height:1.4;";
   var houseTimer = null;
   var houseRoot = document.body || document.documentElement;
+  houseRoot.appendChild(houseTab);
   houseRoot.appendChild(houseBtn);
   houseRoot.appendChild(housePanel);
   function houseCollapse() {
     houseTimer = null;
     housePanel.style.display = "none";
+    houseBtn.style.display = "none";
+    houseTab.style.display = "";
   }
   function houseArm() {
     if (houseTimer) clearTimeout(houseTimer);
@@ -267,6 +275,11 @@
       houseShowError(e && e.message ? e.message : "加载失败");
     });
   }
+  houseTab.addEventListener("click", function () {
+    houseTab.style.display = "none";
+    houseBtn.style.display = "flex";
+    houseArm();
+  });
   houseBtn.addEventListener("click", function () {
     if (housePanel.style.display === "block") {
       housePanel.style.display = "none";
@@ -275,7 +288,7 @@
       houseOpenPanel();
     }
   });
-  // 点面板外面只收起面板，小房子留着，4 秒后面板自己收起。
+  // 点面板外面只收起面板，小房子留着，4 秒后自己收回。
   document.addEventListener("click", function (e) {
     if (housePanel.style.display !== "block") return;
     var t = e.target;
@@ -283,18 +296,66 @@
     housePanel.style.display = "none";
     houseArm();
   }, true);
+  // 搜索钮 #aggBtn 图标去重：页面有时把图标写两份（箭头重叠），点一下
+  // 才恢复。只留第一份图标元素与第一份文本节点；页面合法切换图标时
+  // innerHTML 本就是单份，这里是空操作，不干扰切换。
+  function normalizeAggBtn() {
+    var b = document.getElementById("aggBtn");
+    if (!b) return;
+    // 图标只留一份：同种图标元素（svg/img）出现两次就是重叠的根源，
+    // 留第一个、删其余；页面合法切换图标时 innerHTML 本就是单份，
+    // 这里是空操作，不干扰切换。
+    var icons = b.querySelectorAll("svg, img");
+    var seenIcon = {};
+    for (var i = 0; i < icons.length; i++) {
+      var tag = (icons[i].tagName || "").toLowerCase();
+      if (seenIcon[tag]) {
+        if (icons[i].parentNode) icons[i].parentNode.removeChild(icons[i]);
+      } else {
+        seenIcon[tag] = true;
+      }
+    }
+    // 文本图标重复时也只留一份。
+    var seenTx = {};
+    var nodes = [];
+    for (var j = 0; j < b.childNodes.length; j++) nodes.push(b.childNodes[j]);
+    nodes.forEach(function (n) {
+      if (n.nodeType !== 3) return;
+      var t = n.textContent.trim();
+      if (!t) return;
+      if (seenTx[t]) {
+        if (n.parentNode) n.parentNode.removeChild(n);
+      } else {
+        seenTx[t] = true;
+      }
+    });
+  }
   window.__hgWebHome = {
     setToolbar: function (visible) {
       if (visible === false) {
         if (houseTimer) { clearTimeout(houseTimer); houseTimer = null; }
+        houseTab.style.display = "none";
         houseBtn.style.display = "none";
         housePanel.style.display = "none";
       } else {
-        houseBtn.style.display = "flex";
         houseCollapse();
       }
     },
   };
+  function setupAggBtnGuard() {
+    var b = document.getElementById("aggBtn");
+    if (!b) return;
+    normalizeAggBtn();
+    if (typeof MutationObserver === "function") {
+      var ob = new MutationObserver(function () { normalizeAggBtn(); });
+      try { ob.observe(b, { childList: true, subtree: true }); } catch (e) {}
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupAggBtnGuard);
+  } else {
+    setupAggBtnGuard();
+  }
 
   try {
     if (window.document && window.document.documentElement) window.document.documentElement.classList.add("fm-native");
