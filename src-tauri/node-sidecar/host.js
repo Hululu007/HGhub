@@ -825,6 +825,13 @@ function requestOptions(body, timeoutMs, addrs) {
 // ---------------------------------------------------------------------------
 const catSources = new Map(); // key -> { module, port, baseUrl }
 
+// 宿主提供的全局：CatPaw 系猫源的 start() 里以
+// `{serverFactory: catServerFactory}` 创建 Fastify 服务，期望宿主在
+// 加载前提供该全局（见 docs/developers/cat-source.md §5.3）。等价于
+// Fastify 的默认工厂：接请求处理函数、返回一个 http.Server；
+// Fastify 调它时可能多传一个 opts 参数，直接忽略。
+globalThis.catServerFactory = (handler) => http.createServer(handler);
+
 // 取一个空闲端口：临时 net.Server 绑端口 0，读到端口后关闭。
 function allocFreePort() {
   return new Promise((resolve, reject) => {
@@ -937,11 +944,21 @@ async function handleCatLoad(req, res) {
       }
     }
     if (!config || typeof config !== 'object') config = {};
+    // start() 本身没超时：源内部一旦挂住（等网络等），这个 handler 永不
+    // 回，Rust 侧只能等预算超时。30 秒还没起就按失败报。
+    let startTimer;
     try {
-      await mod.start(config);
+      await Promise.race([
+        mod.start(config),
+        new Promise((_, reject) => {
+          startTimer = setTimeout(() => reject(new Error('猫源启动超时（30 秒）')), 30000);
+        }),
+      ]);
     } catch (e) {
       fail(`猫源启动失败：${(e && e.message) || String(e)}`);
       return;
+    } finally {
+      if (startTimer) clearTimeout(startTimer);
     }
     // 探活：/test 不通试 /config；仍不通按 EADDRINUSE 重试逻辑向后探 +1…+5。
     let actualPort = 0;

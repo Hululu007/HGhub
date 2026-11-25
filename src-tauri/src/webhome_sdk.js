@@ -200,16 +200,19 @@
   houseTab.type = "button";
   houseTab.setAttribute("aria-label", "展开");
   houseTab.textContent = "‹";
-  houseTab.style.cssText = "position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483647;width:18px;height:48px;border:none;border-radius:8px 0 0 8px;background:rgba(0,0,0,.55);color:#fff;font-size:18px;line-height:1;padding:0;cursor:pointer;";
+  houseTab.style.cssText = "position:fixed!important;right:0!important;top:50%!important;transform:translateY(-50%)!important;z-index:2147483647!important;width:18px!important;min-width:18px!important;height:48px!important;min-height:48px!important;border:none!important;border-radius:8px 0 0 8px!important;background:rgba(0,0,0,.55)!important;color:#fff!important;font-size:18px!important;line-height:1!important;padding:0!important;box-sizing:border-box!important;cursor:pointer!important;";
   var houseBtn = document.createElement("button");
   houseBtn.id = "hg-webhome-btn";
   houseBtn.type = "button";
   houseBtn.setAttribute("aria-label", "源切换");
-  houseBtn.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff" aria-hidden="true"><path d="M12 3 2 12h3v8h6v-6h2v6h6v-8h3L12 3z"/></svg>';
-  houseBtn.style.cssText = "position:fixed;right:8px;top:50%;transform:translateY(-50%);z-index:2147483647;width:40px;height:40px;border:none;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:19px;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;";
+  // 图标尺寸不能只靠 width/height 属性：那是展示属性，页面里任何一条
+  // svg 规则都能覆盖它——Tab S9 新版页上房子缩成小点点就是这么来的。
+  // 尺寸改走内联 !important 样式，页面规则盖不掉。
+  houseBtn.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff" aria-hidden="true" style="width:22px!important;height:22px!important;display:block!important;flex:none!important;"><path d="M12 3 2 12h3v8h6v-6h2v6h6v-8h3L12 3z"/></svg>';
+  houseBtn.style.cssText = "position:fixed!important;right:8px!important;top:50%!important;transform:translateY(-50%)!important;z-index:2147483647!important;width:40px!important;min-width:40px!important;height:40px!important;min-height:40px!important;border:none!important;border-radius:50%!important;background:rgba(0,0,0,.55)!important;color:#fff!important;font-size:19px!important;line-height:1!important;display:none;align-items:center!important;justify-content:center!important;padding:0!important;box-sizing:border-box!important;flex:none!important;cursor:pointer!important;";
   var housePanel = document.createElement("div");
   housePanel.id = "hg-webhome-panel";
-  housePanel.style.cssText = "position:fixed;right:56px;top:50%;transform:translateY(-50%);z-index:2147483647;width:230px;max-height:60vh;overflow-y:auto;border-radius:12px;background:rgba(20,20,24,.92);color:#fff;box-shadow:0 4px 24px rgba(0,0,0,.4);padding:6px;display:none;";
+  housePanel.style.cssText = "position:fixed!important;right:56px!important;top:50%!important;transform:translateY(-50%)!important;z-index:2147483647!important;width:230px!important;max-height:60vh!important;overflow-y:auto!important;border-radius:12px!important;background:rgba(20,20,24,.92)!important;color:#fff!important;box-shadow:0 4px 24px rgba(0,0,0,.4)!important;padding:6px!important;box-sizing:border-box!important;display:none;";
   var houseErr = document.createElement("div");
   houseErr.style.cssText = "display:none;padding:6px 10px;color:#ff8a80;font-size:12px;line-height:1.4;";
   var houseTimer = null;

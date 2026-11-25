@@ -57,6 +57,7 @@ pub async fn dispatch(
                 .await?
         ),
         "list" => json!(manager.list().await),
+        "host.node.ensure_started" => json!(manager.node_ensure_started().await?),
         "cat.list" => json!(manager.cat_list().await?),
         "cat.import_url" => json!(
             manager

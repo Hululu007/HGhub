@@ -1071,6 +1071,18 @@ impl PluginManager {
         Ok(json!({"node": node, "sources": sources}))
     }
 
+    /// 启动时 Node 预热（供首屏在首帧绘制后调用）：平台不支持时返回
+    /// `{supported: false}` 而不是报错；iOS 上保证边车已启动，返回
+    /// `{supported: true, running: true}`。启动失败报明错，前端只显示
+    /// 不阻塞启动（见 docs/developers/node-engine.md §4.1）。
+    pub async fn node_ensure_started(&self) -> Result<Value> {
+        if !self.node_bootstrap.is_available() {
+            return Ok(json!({"supported": false}));
+        }
+        let info = self.node_bootstrap.ensure_started().await?;
+        Ok(json!({"supported": true, "running": true, "apiBase": info.api_base}))
+    }
+
     /// 网络导入：拉订阅 → 派生 id → 写插件目录并初始化 → 写订阅记录。
     /// 下载/校验/写文件失败时不留坏记录、不留残留文件。
     pub async fn cat_import_url(

@@ -431,6 +431,14 @@ UI 上要让这个区别看得见：网络导入的条目显示订阅 URL 与“
   传给 `start`，不写进边车的任何日志（见 §2.8）。
   注意：`start(config)` 的入参就是配置对象（§2.1），不要把它包一层
   （不要传 `{config}`，直接传配置对象本身）。
+- **宿主全局 `catServerFactory`**：真源的 `start()` 里 Fastify 以
+  `{serverFactory: catServerFactory}` 创建服务，期望宿主在加载前提供
+  这个全局，否则 `start()` 一调就抛 `ReferenceError: catServerFactory
+  is not defined`（真机已复现）。边车在 `require` 之前定义
+  `globalThis.catServerFactory = (handler) => require('http').createServer(handler)`，
+  等价于 Fastify 的默认工厂（Fastify 调它时可能多传一个 `opts` 参数，
+  直接忽略）。这是 CatPaw 系源的壳子约定，不是 HGhub 自创的接口；
+  其他猫源若也用 `serverFactory` 选项，同一全局同样适用。
 - **端口发现**：`start` 里监听的端口是 `process.env.DEV_HTTP_PORT || 9988`，
   被占时 +1。边车在调 `start` 前给该源分配一个端口并设
   `process.env.DEV_HTTP_PORT`（加载是顺序进行的，一次只加载一个源，
@@ -462,6 +470,10 @@ UI 上要让这个区别看得见：网络导入的条目显示订阅 URL 与“
 
 ### 5.3 错误隔离与超时
 
+- **加载超时**：`start(config)` 本身没超时，源内部一旦挂住，`/cat/load`
+  的 handler 永不回。边车给 `start()` 加 30 秒超时，超时按启动失败报
+  （“猫源启动超时（30 秒）”）；Rust 侧的加载预算（默认 15 秒）不变，
+  仍先到先报。
 - **超时**：每次内容调用（Rust 侧直接调源的 HTTP 服务）有独立超时
   （默认与插件 `net.request` 的单跳超时同一量级，15 秒）；超时后该次调用报错，
   不杀边车、不卸载源。

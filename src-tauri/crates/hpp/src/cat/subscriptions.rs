@@ -507,4 +507,66 @@ mod tests {
         assert!(!out.files.iter().any(|(n, _)| n.contains("evil")));
         assert!(!out.files.iter().any(|(n, _)| n.contains("abs")));
     }
+
+    /// 本地 mock 订阅服务器：/w/index.js.md5 返回 js 的 md5，
+    /// /w/index.js 返回 js；md5 值可指定（用于造校验失败）。
+    async fn serve_subscription(
+        js: Vec<u8>,
+        md5_body: String,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::routing::get;
+        let js_get = js.clone();
+        let router = axum::Router::new()
+            .route(
+                "/w/index.js.md5",
+                get(move || async move { md5_body.clone() }),
+            )
+            .route("/w/index.js", get(move || async move { js_get.clone() }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn fetch_subscription_md5_flow_ok() {
+        let js = b"module.exports = {start(){}, stop(){}};".to_vec();
+        let (base, server) = serve_subscription(js.clone(), md5_hex(&js)).await;
+        let (published, got) = fetch_subscription(&format!("{base}/w/index.js.md5"))
+            .await
+            .unwrap();
+        assert_eq!(published.as_deref(), Some(md5_hex(&js).as_str()));
+        assert_eq!(got, js);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_subscription_md5_mismatch_rejected() {
+        let js = b"module.exports = {};".to_vec();
+        let (base, server) =
+            serve_subscription(js.clone(), "0".repeat(32)).await;
+        let err = fetch_subscription(&format!("{base}/w/index.js.md5"))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("校验失败"), "{}", err.message);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_subscription_bad_md5_body_rejected() {
+        let js = b"module.exports = {};".to_vec();
+        let (base, server) =
+            serve_subscription(js.clone(), "not-a-hash".to_string()).await;
+        let err = fetch_subscription(&format!("{base}/w/index.js.md5"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("订阅地址返回的校验值无效"),
+            "{}",
+            err.message
+        );
+        server.abort();
+    }
 }

@@ -31,6 +31,10 @@ function fakeElement() {
 }
 
 function loadSdk(mockInvoke) {
+  // body.appendChild 记下来，供用例检查注入的房子控件。
+  const appended = [];
+  const bodyEl = fakeElement();
+  bodyEl.appendChild = (el) => { appended.push(el); };
   const sandbox = {
     console,
     setTimeout,
@@ -42,9 +46,11 @@ function loadSdk(mockInvoke) {
     },
     document: {
       createElement: () => fakeElement(),
-      body: fakeElement(),
+      body: bodyEl,
       documentElement: { classList: { add() {} } },
       addEventListener() {},
+      // 页面没有 #aggBtn 时返回 null（setupAggBtnGuard 会直接返回）。
+      getElementById: () => null,
     },
     dispatchEvent() {},
     innerWidth: 800,
@@ -59,6 +65,7 @@ function loadSdk(mockInvoke) {
   vm.runInContext(fs.readFileSync(SDK_PATH, "utf8"), sandbox, {
     filename: "webhome_sdk.js",
   });
+  loadSdk.appended = appended;
   return sandbox.fm;
 }
 
@@ -150,4 +157,22 @@ const BASE = {
   console.log("ok 7: invoke rejection propagates");
 }
 
-console.log("webhome_sdk data→body: all 7 passed");
+// 8. 房子按钮：几何尺寸与图标尺寸都走内联 !important，不怕页面 svg 规则
+// 覆盖（Tab S9 新版页上房子缩成小点点：按钮本身 40px 正常，SVG 被页面
+// 规则压到只剩几点像素——width/height 属性是展示属性，扛不住页面 CSS）。
+{
+  loadSdk(() => Promise.resolve({ ...BASE, data: LIST_HTML }));
+  const btn = loadSdk.appended.find((el) => el.id === "hg-webhome-btn");
+  assert.ok(btn, "house button appended to body");
+  assert.ok(
+    String(btn.style.cssText).includes("width:40px!important"),
+    btn.style.cssText,
+  );
+  assert.ok(
+    String(btn.innerHTML).includes("width:22px!important"),
+    btn.innerHTML,
+  );
+  console.log("ok 8: house button uses !important sizing");
+}
+
+console.log("webhome_sdk data→body: all 8 passed");

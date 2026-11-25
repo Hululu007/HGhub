@@ -25,9 +25,25 @@ import "./plugins/refined-pages.css";
 import ImmersiveHome from "./plugins/ImmersiveHome";
 import { runBack } from "./back";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
+import { pluginCommand, pluginError } from "./plugins/client";
 export default function App() { return <HostProvider><Application/></HostProvider>; }
 function Application() {
   const app=useStore(),host=useHost(),[collapsed,setCollapsed]=useState(false),top=app.stack[app.stack.length-1];
+  // 启动时 Node 预热（只 iOS）：首帧绘制后异步启动 Node，启动界面上
+  // 显示一行状态；成功即撤，失败显示错误 3 秒后撤，15 秒还没好也撤，
+  // 绝不卡启动（v0.0.70 的教训：启动时同步拉 Node 会 Jetsam 闪退）。
+  const [bootNode,setBootNode]=useState<"starting"|"ready"|"failed">("starting");
+  const [bootNodeMsg,setBootNodeMsg]=useState("正在启动 Node 服务…");
+  const [bootNodeVisible,setBootNodeVisible]=useState(app.platform==="ios");
+  useEffect(()=>{if(app.platform!=="ios")return;let cancelled=false;
+    void pluginCommand<{supported?:boolean}>("host.node.ensure_started",{}).then(r=>{if(cancelled)return;
+      if(r&&r.supported===false){setBootNode("ready");return;}
+      setBootNodeMsg("Node 服务已就绪");setBootNode("ready");}).catch(e=>{if(cancelled)return;
+      setBootNodeMsg(`Node 服务启动失败：${pluginError(e)}`);setBootNode("failed");});
+    return()=>{cancelled=true;};},[app.platform]);
+  useEffect(()=>{if(!bootNodeVisible)return;
+    if(bootNode==="starting"){const t=setTimeout(()=>setBootNodeVisible(false),15000);return()=>clearTimeout(t);}
+    const t=setTimeout(()=>setBootNodeVisible(false),bootNode==="ready"?500:3000);return()=>clearTimeout(t);},[bootNode,bootNodeVisible]);
   const backRef=useRef(()=>{});
   backRef.current=()=>{if(runBack(10))return;if(app.fs){app.setFs(false);return;}if(document.fullscreenElement){void document.exitFullscreen();return;}if(runBack())return;if(app.stack.length)app.pop();else if(app.tab!=="home")app.setTab("home");else void invoke("plugin:app|exit",{code:0}).catch(()=>{});};
   useEffect(()=>{if(app.platform!=="android")return;let disposed=false;let listener:{unregister:()=>Promise<void>}|undefined;void addPluginListener("app","back-button",()=>backRef.current()).then(l=>{if(disposed)void l.unregister();else listener=l;}).catch(()=>{});return()=>{disposed=true;void listener?.unregister();};},[app.platform]);
@@ -56,6 +72,7 @@ function Application() {
     </main></div>
     {isMobile&&!top&&!app.fs&&!app.clean&&!app.watching&&<TabBar/>}
     {app.platform==="windows"&&<ResizeHandles/>}
+    {bootNodeVisible&&<div className="hpp-boot-node" role="status"><span>{bootNodeMsg}</span></div>}
   </div>;
 }
 function ContentRoute({ page, active }: { page: Extract<import("./store").Page, { kind: "live" | "articles" | "article" | "feed" | "recommendations" }>; active: boolean }) {

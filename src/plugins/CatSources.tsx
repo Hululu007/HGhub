@@ -62,6 +62,7 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
         </div>;
       }) : <p className="hpp-muted">还没有添加猫源，贴订阅地址或导入 ZIP 文件添加。</p>}
     </section>
+    {busy && <p role="status" className="hpp-muted">正在处理，请稍候…</p>}
     {error && <div className="hpp-error" role="alert">{error}</div>}
     {notice && <p role="status" className="hpp-muted">{notice}</p>}
   </div>;
