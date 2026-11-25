@@ -1504,7 +1504,7 @@ test('猫源 /cat/unload：卸载后 list 里没有，重复卸载也成功', { 
   }
 });
 
-test('猫源 /cat/load：configFile 不存在时 start({}) 不报错', { timeout: 20000 }, async () => {
+test('猫源 /cat/load：configFile 不存在时 start 收到默认配置形状', { timeout: 20000 }, async () => {
   const dir = path.join(TMP, 'cat-d');
   const file = writeMockCat(dir, 'site-d', '站点 D');
   const { child, base } = await startHost();
@@ -1515,13 +1515,15 @@ test('猫源 /cat/load：configFile 不存在时 start({}) 不报错', { timeout
     assert.equal(status, 200);
     assert.equal(json.success, true);
     const env = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8'));
-    assert.deepEqual(env.config, {});
+    // 无配置不再传 {}：真源 start 里 e.config.sites.list 是不设防的读法，
+    // 空对象会在加载时炸成 Cannot read properties of undefined。
+    assert.deepEqual(env.config, { sites: { list: [] }, pans: { list: [] }, tgsou: {}, danmu: {} });
   } finally {
     stopHost(child);
   }
 });
 
-test('猫源 /cat/load：configFile 存在时配置对象传给 start', { timeout: 20000 }, async () => {
+test('猫源 /cat/load：configFile 存在时配置对象传给 start（缺键补默认形状）', { timeout: 20000 }, async () => {
   const dir = path.join(TMP, 'cat-e');
   const file = writeMockCat(dir, 'site-e', '站点 E');
   fs.writeFileSync(path.join(dir, 'index.config.js'), 'module.exports = { marker: "cfg-ok" };\n');
@@ -1533,7 +1535,48 @@ test('猫源 /cat/load：configFile 存在时配置对象传给 start', { timeou
     assert.equal(status, 200);
     assert.equal(json.success, true);
     const env = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8'));
-    assert.deepEqual(env.config, { marker: 'cfg-ok' });
+    assert.deepEqual(env.config, { marker: 'cfg-ok', sites: { list: [] }, pans: { list: [] }, tgsou: {}, danmu: {} });
+  } finally {
+    stopHost(child);
+  }
+});
+
+test('猫源 /cat/load：configFile 是 ESM 默认导出时解包后再传给 start', { timeout: 20000 }, async () => {
+  const dir = path.join(TMP, 'cat-f');
+  const file = writeMockCat(dir, 'site-f', '站点 F');
+  // esbuild 打包的 index.config.js 形态：只导出 default（见 cat-source.md §5.2）。
+  fs.writeFileSync(path.join(dir, 'index.config.js'), `'use strict';
+Object.defineProperty(exports, '__esModule', { value: true });
+exports.default = { sites: { list: [{ key: 's1', name: '站1' }] }, pans: { list: [] } };
+`);
+  const { child, base } = await startHost();
+  try {
+    const { status, json } = await postCat(base, '/cat/load', {
+      key: 'cat-f', file, configFile: path.join(dir, 'index.config.js'),
+    });
+    assert.equal(status, 200);
+    assert.equal(json.success, true);
+    const env = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8'));
+    // 不解包时 start 收到的是 {default: {...}}，读 sites.list 即炸。
+    assert.deepEqual(env.config, { sites: { list: [{ key: 's1', name: '站1' }] }, pans: { list: [] }, tgsou: {}, danmu: {} });
+  } finally {
+    stopHost(child);
+  }
+});
+
+test('猫源 /cat/load：config 里 sites 缺 list 时补空数组', { timeout: 20000 }, async () => {
+  const dir = path.join(TMP, 'cat-g');
+  const file = writeMockCat(dir, 'site-g', '站点 G');
+  fs.writeFileSync(path.join(dir, 'index.config.js'), 'module.exports = { sites: {}, pans: { list: [{ key: "ali", name: "阿里" }] } };\n');
+  const { child, base } = await startHost();
+  try {
+    const { status, json } = await postCat(base, '/cat/load', {
+      key: 'cat-g', file, configFile: path.join(dir, 'index.config.js'),
+    });
+    assert.equal(status, 200);
+    assert.equal(json.success, true);
+    const env = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8'));
+    assert.deepEqual(env.config, { sites: { list: [] }, pans: { list: [{ key: 'ali', name: '阿里' }] }, tgsou: {}, danmu: {} });
   } finally {
     stopHost(child);
   }

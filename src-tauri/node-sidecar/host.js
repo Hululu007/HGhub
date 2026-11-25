@@ -881,6 +881,28 @@ function fetchCatConfig(port) {
   });
 }
 
+// 猫源配置归一化（见 docs/developers/cat-source.md §5.2）：
+// 1) esbuild 打包的 ESM 默认导出：index.config.js 的 require 结果是
+//    {default: 真实配置, __esModule: true}，要解包，否则 start 里
+//    e.config.sites 是 undefined，读 .list 即炸（真机已复现）。
+// 2) 缺键补最小形状：真源 start() 里 e.config.sites.list、
+//    e.config.pans.list 是不设防的读法，e.config.tgsou[t]、
+//    e.config.danmu.urls 也是；无配置的源（网络导入）否则同样会炸。
+//    只补结构键；网盘凭证仍需真实配置文件。
+function normalizeCatConfig(config) {
+  if (!config || typeof config !== 'object') config = {};
+  if (config.__esModule === true && config.default && typeof config.default === 'object') {
+    config = config.default;
+  }
+  if (!config.sites || typeof config.sites !== 'object') config.sites = { list: [] };
+  else if (!Array.isArray(config.sites.list)) config.sites.list = [];
+  if (!config.pans || typeof config.pans !== 'object') config.pans = { list: [] };
+  else if (!Array.isArray(config.pans.list)) config.pans.list = [];
+  if (config.tgsou === undefined) config.tgsou = {};
+  if (config.danmu === undefined) config.danmu = {};
+  return config;
+}
+
 async function handleCatLoad(req, res) {
   const fail = (message) => sendJson(res, 500, { success: false, error: message });
   try {
@@ -943,7 +965,8 @@ async function handleCatLoad(req, res) {
         return;
       }
     }
-    if (!config || typeof config !== 'object') config = {};
+    // 配置归一化：ESM 默认导出解包 + 缺键补最小形状（见 normalizeCatConfig）。
+    config = normalizeCatConfig(config);
     // start() 本身没超时：源内部一旦挂住（等网络等），这个 handler 永不
     // 回，Rust 侧只能等预算超时。30 秒还没起就按失败报。
     let startTimer;
@@ -1333,4 +1356,4 @@ function closeServer() {
 // 拦截跨进程发往非 loopback 地址的 TCP（即使本机有监听；同进程内
 // 直达），spawned 边车子进程连不上 DoH 给的非保留 IP。入口运行时
 // 无影响。
-module.exports = { makeLookup, parsePinnedAddr, requestOptions, resolveAddrs, isAllowedIp, probeTls, doFetch, closeServer };
+module.exports = { makeLookup, parsePinnedAddr, requestOptions, resolveAddrs, isAllowedIp, probeTls, doFetch, closeServer, normalizeCatConfig };

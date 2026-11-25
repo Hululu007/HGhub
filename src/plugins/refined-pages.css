@@ -27,6 +27,8 @@
 .refined-page .hpp-provider-tabs {padding:0 32px 12px;gap:8px;border:0;flex-shrink:0;overflow-x:auto}
 .refined-page .hpp-provider-tabs button {border-radius:var(--r-sm);padding:7px 12px;white-space:nowrap;background:var(--p-s1);font-size:13px}
 .refined-page .hpp-provider-tabs button[aria-pressed=true] {background:var(--p-tint);color:var(--p-primary);box-shadow:none}
+.refined-page .hpp-provider-tabs .category-group-label {align-self:center;flex-shrink:0;font-size:11px;font-weight:600;color:var(--p-dim);white-space:nowrap}
+.refined-page .hpp-provider-tabs .category-source-status {opacity:.75}
 .refined-page .hpp-empty {min-height:280px;padding:32px 16px}
 .refined-page .hpp-empty h2 {font-size:18px}
 .refined-page .hpp-empty p {font-size:13px;color:var(--p-mut);opacity:1}

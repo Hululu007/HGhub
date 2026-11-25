@@ -43,15 +43,36 @@ function HomeSection({plugin:p,section:s,open,openSection}:{plugin:InstalledPlug
 export function FilterControls({filters,values,change}:{filters:Filter[];values:Record<string,string[]>;change:(v:Record<string,string[]>)=>void}) {
   return <div className="hpp-filters browse-filters">{filters.map(f=><fieldset key={f.id}><legend>{f.label}</legend>{f.options.map(o=><label key={o.id}><input type={f.multiple?"checkbox":"radio"} name={`filter-${f.id}`} checked={(values[f.id]||[]).includes(o.id)} onChange={e=>change({...values,[f.id]:f.multiple?e.target.checked?[...(values[f.id]||[]),o.id]:(values[f.id]||[]).filter(id=>id!==o.id):[o.id]})}/>{o.label}</label>)}<button type="button" aria-pressed={!values[f.id]?.length} onClick={()=>change({...values,[f.id]:[]})}>不限</button></fieldset>)}</div>;
 }
+const CATEGORY_STATUS_LABEL: Record<"failed" | "disabled" | "incompatible", string> = { failed: "运行失败", disabled: "已停用", incompatible: "不兼容" };
+// 分类片源按类型归类（与插件中心“已安装”分组同一口径，见 src/pages/Plugins.tsx）；
+// 猫源单列一组。顺序按用户说法：插件、Python、HTML、猫源。
+type CategoryGroupKey = "plugin" | "python" | "html" | "cat";
+const CATEGORY_GROUP_TITLE: Record<CategoryGroupKey, string> = { plugin: "插件", python: "Python", html: "HTML", cat: "猫源" };
+function categoryGroupOf(p: InstalledPlugin): CategoryGroupKey {
+  if (p.meta.runtime === "cat") return "cat";
+  if (p.meta.runtime === "python") return "python";
+  if (p.meta.webhome?.localPage) return "html";
+  return "plugin";
+}
 export function PluginCategory({open,manage,openContent}:{open:OpenMedia;manage:()=>void;openContent?:(kind:"live"|"articles"|"feed"|"recommendations",pluginId:string)=>void}) {
-  const {sources}=useHost(),available=sources.filter(p=>["catalog.getCategories","home.getSections","live.resolve","articles.list","feed.list"].some(m=>p.methods.includes(m))),[selected,setSelected]=useState("");
-  const current=available.find(p=>p.meta.id===selected)||available[0];
-  return <div className={"hpp-page hpp-category-page refined-page"+(isMobile?" refined-mobile":"")}><header className="shrink-0 px-4 pb-2" style={{paddingTop:"calc(var(--sat,0px) + 14px)"}}><h1 className="text-[24px] font-bold text-on leading-none">分类</h1></header><CategorySourceTabs plugins={available} selectedId={current?.meta.id} select={setSelected}/><div className="hpp-scroll"><div className="hpp-content">
-    {current && openContent && <nav className="hpp-content-entries" aria-label="其他内容">{([['recommendations','home.getSections','推荐分区'],['live','live.resolve','直播'],['articles','articles.list','图文'],['feed','feed.list','信息流']] as const).filter(([,method])=>current.methods.includes(method)).map(([kind,,label])=><button key={kind} aria-label={label+" · "+current.meta.name} onClick={()=>openContent(kind,current.meta.id)}><span className="category-entry-icon"><IGrid size={18}/></span><span><strong>{label}</strong><small>{current.meta.name}</small></span><IChevR size={16}/></button>)}</nav>}
-    {current?.methods.includes("catalog.getCategories")?<CategoryOverview key={current.meta.id+current.revision} plugin={current} open={open}/>:!current?<EmptySources manage={manage}/>:<p className="hpp-muted">选择上方内容入口开始浏览。</p>}
+  const {sources,plugins}=useHost(),available=sources.filter(p=>["catalog.getCategories","home.getSections","live.resolve","articles.list","feed.list"].some(m=>p.methods.includes(m))),[selected,setSelected]=useState("");
+  // 不可用但不应静默消失的内容源：失败/停用/不兼容，带状态列进分组里。
+  // 纯 WebHome 页源（只有 homePage）本来就不进分类，不列；待加载（unloaded）无错可报，也不列。
+  const unavailable=plugins.filter(p=>p.meta.kind!=="resolver" && !(p.meta.webhome?.homePage && !p.meta.webhome?.localPage) && (p.status==="failed"||p.status==="disabled"||p.status==="incompatible") && !available.some(a=>a.meta.id===p.meta.id));
+  const groups=(["plugin","python","html","cat"] as const).map(key=>({ key, title: CATEGORY_GROUP_TITLE[key], items: [...available, ...unavailable].filter(p=>categoryGroupOf(p)===key).map(p=>({ p, selectable: available.some(a=>a.meta.id===p.meta.id) })) })).filter(g=>g.items.length);
+  const listed=[...available, ...unavailable];
+  const current=listed.find(p=>p.meta.id===selected)||available[0]||unavailable[0];
+  const currentSelectable=!!current && available.some(a=>a.meta.id===current.meta.id);
+  return <div className={"hpp-page hpp-category-page refined-page"+(isMobile?" refined-mobile":"")}><header className="shrink-0 px-4 pb-2" style={{paddingTop:"calc(var(--sat,0px) + 14px)"}}><h1 className="text-[24px] font-bold text-on leading-none">分类</h1></header><CategorySourceTabs groups={groups} selectedId={current?.meta.id} select={setSelected}/><div className="hpp-scroll"><div className="hpp-content">
+    {current && currentSelectable && openContent && <nav className="hpp-content-entries" aria-label="其他内容">{([['recommendations','home.getSections','推荐分区'],['live','live.resolve','直播'],['articles','articles.list','图文'],['feed','feed.list','信息流']] as const).filter(([,method])=>current.methods.includes(method)).map(([kind,,label])=><button key={kind} aria-label={label+" · "+current.meta.name} onClick={()=>openContent(kind,current.meta.id)}><span className="category-entry-icon"><IGrid size={18}/></span><span><strong>{label}</strong><small>{current.meta.name}</small></span><IChevR size={16}/></button>)}</nav>}
+    {current?.methods.includes("catalog.getCategories")?<CategoryOverview key={current.meta.id+current.revision} plugin={current} open={open}/>:current&&!currentSelectable?<SourceStatusPanel plugin={current} manage={manage}/>:!current?<EmptySources manage={manage}/>:<p className="hpp-muted">选择上方内容入口开始浏览。</p>}
   </div></div></div>;
 }
-function CategorySourceTabs({plugins,selectedId,select}:{plugins:InstalledPlugin[];selectedId?:string;select:(id:string)=>void}) {
+function SourceStatusPanel({plugin,manage}:{plugin:InstalledPlugin;manage:()=>void}) {
+  const label=CATEGORY_STATUS_LABEL[plugin.status as "failed"|"disabled"|"incompatible"] ?? plugin.status;
+  return <div className="hpp-empty"><h2>{plugin.meta.name} · {label}</h2>{plugin.status==="disabled"?<p>该源已在插件中心停用，启用后即可在分类里使用。</p>:<p>{plugin.error?pluginError(plugin.error):"加载失败，原因未知。"}</p>}<button className="primary" onClick={manage}>管理插件</button></div>;
+}
+function CategorySourceTabs({groups,selectedId,select}:{groups:{title:string;items:{p:InstalledPlugin;selectable:boolean}[]}[];selectedId?:string;select:(id:string)=>void}) {
   const strip=useRef<HTMLElement>(null), [edges,setEdges]=useState({left:false,right:false});
   useEffect(()=>{
     if(isMobile)return;
@@ -66,9 +87,9 @@ function CategorySourceTabs({plugins,selectedId,select}:{plugins:InstalledPlugin
     observer.observe(el);for(const child of el.children)observer.observe(child);
     el.addEventListener("scroll",measure);el.addEventListener("wheel",wheel,{passive:false});measure();
     return()=>{observer.disconnect();el.removeEventListener("scroll",measure);el.removeEventListener("wheel",wheel);};
-  },[plugins.map(p=>p.meta.id).join("|")]);
+  },[groups.flatMap(g=>g.items.map(i=>i.p.meta.id)).join("|")]);
   useEffect(()=>{strip.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView({block:"nearest",inline:"nearest"});},[selectedId]);
-  const nav=<nav ref={strip} className="hpp-provider-tabs" aria-label="分类片源">{plugins.map(p=><button aria-label={p.meta.name} aria-pressed={selectedId===p.meta.id} className={selectedId===p.meta.id?"selected":""} key={p.meta.id} onClick={()=>select(p.meta.id)}><span className="category-source-glyph" aria-hidden="true">{p.meta.name.slice(0,1)}</span>{p.meta.name}</button>)}</nav>;
+  const nav=<nav ref={strip} className="hpp-provider-tabs" aria-label="分类片源">{groups.flatMap(g=>[<span key={"label-"+g.title} className="category-group-label" aria-hidden="true">{g.title}</span>, ...g.items.map(({p,selectable})=><button aria-label={selectable?p.meta.name:p.meta.name+" · "+(CATEGORY_STATUS_LABEL[p.status as "failed"|"disabled"|"incompatible"] ?? p.status)} aria-pressed={selectedId===p.meta.id} className={(selectedId===p.meta.id?"selected":"")+(selectable?"":" category-source-status")} key={p.meta.id} onClick={()=>select(p.meta.id)}><span className="category-source-glyph" aria-hidden="true">{p.meta.name.slice(0,1)}</span>{p.meta.name}{!selectable && <small className={"hpp-status "+p.status}>{CATEGORY_STATUS_LABEL[p.status as "failed"|"disabled"|"incompatible"] ?? p.status}</small>}</button>)])}</nav>;
   if(isMobile)return nav;
   const move=(direction:number)=>strip.current!.scrollBy({left:direction*strip.current!.clientWidth*.8,behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"instant":"smooth"});
   return <div className="category-source-bar" data-overflow={edges.left||edges.right}><button className="category-scroll-arrow" aria-label="向前滚动片源" disabled={!edges.left} onClick={()=>move(-1)}><IBack size={18}/></button>{nav}<button className="category-scroll-arrow" aria-label="向后滚动片源" disabled={!edges.right} onClick={()=>move(1)}><IChevR size={18}/></button></div>;
