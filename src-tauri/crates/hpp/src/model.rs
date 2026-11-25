@@ -808,6 +808,16 @@ mod tests {
     }
 
     #[test]
+    fn playback_keeps_http_stream_only_when_allowed() {
+        // 猫源回环 http 播放地址：声明放行时保留，未声明时整条流被丢掉、
+        // 报“没有合法可播放流”（2026-11-26 齐天圣瞳真机故障）。
+        let v = json!({"streams": [{"kind": "media", "url": "http://127.0.0.1:9988/proxy/ali/src/redirect/x", "format": "progressive"}]});
+        assert!(playback(v.clone(), true, false).is_ok());
+        let err = playback(v, false, false).unwrap_err();
+        assert_eq!(err.message, "没有合法可播放流");
+    }
+
+    #[test]
     fn get_detail_keeps_long_pan_episodes() {
         // 回归：长网盘分集 id 不应再被校验丢掉（2026-11-25 实测 565 字节全丢）。
         let id = "p".repeat(600);

@@ -443,6 +443,96 @@ pub fn detail_summary(v: &Value) -> Vec<(String, usize, usize)> {
     out
 }
 
+/// 列表诊断摘要：条目总数、缺 id 或标题的条目数、封面形态计数。
+/// 只量数量与形态，不返回地址原文——封面可能是回环 `/pic?url=…`
+/// 签名地址，绝不记进日志（见 cat-source.md §2.8）。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ListSummary {
+    /// 转换后的条目总数（`items` 长度）。
+    pub total: usize,
+    /// 缺 `id` 或缺 `title` 的条目数（校验必丢）。
+    pub missing_id_or_title: usize,
+    /// 封面是 `https:` 地址的条目数。
+    pub cover_https: usize,
+    /// 封面是回环 `http:` 地址（`127.0.0.1` / `localhost`）的条目数。
+    pub cover_http_loopback: usize,
+    /// 封面是其它 `http:` 地址的条目数。
+    pub cover_http_other: usize,
+    /// 没有封面（缺 `cover`、空值或空串）的条目数。
+    pub cover_none: usize,
+    /// 封面存在但不是 `http(s):` 地址（相对路径等）的条目数。
+    pub cover_other: usize,
+}
+
+impl ListSummary {
+    /// 只含封面形态计数的半句，供校验丢条目那行复用。
+    pub fn cover_part(&self) -> String {
+        format!(
+            "https {} 条、回环 http {} 条、其它 http {} 条、无封面 {} 条、非 http(s) {} 条",
+            self.cover_https,
+            self.cover_http_loopback,
+            self.cover_http_other,
+            self.cover_none,
+            self.cover_other
+        )
+    }
+}
+
+impl std::fmt::Display for ListSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "共 {} 条，缺 id 或标题 {} 条；封面 {}",
+            self.total, self.missing_id_or_title, self.cover_part()
+        )
+    }
+}
+
+/// 从 `py::page` 输出（`{items, next, total}`）里提炼 [`ListSummary`]。
+/// 封面只按形态计数：字符串本身，或 `{url}` 对象的 `url` 字段。
+pub fn list_summary(v: &Value) -> ListSummary {
+    let mut s = ListSummary::default();
+    if let Some(items) = v.get("items").and_then(Value::as_array) {
+        for item in items {
+            s.total += 1;
+            let id_ok = item
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty());
+            let title_ok = item
+                .get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty());
+            if !id_ok || !title_ok {
+                s.missing_id_or_title += 1;
+            }
+            match cover_url(item) {
+                None => s.cover_none += 1,
+                Some(u) if u.starts_with("https://") => s.cover_https += 1,
+                Some(u) if is_loopback_http(u) => s.cover_http_loopback += 1,
+                Some(u) if u.starts_with("http://") => s.cover_http_other += 1,
+                Some(_) => s.cover_other += 1,
+            }
+        }
+    }
+    s
+}
+
+fn cover_url(item: &Value) -> Option<&str> {
+    match item.get("cover") {
+        Some(Value::String(s)) if !s.is_empty() => Some(s),
+        Some(Value::Object(o)) => o
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    }
+}
+
+fn is_loopback_http(u: &str) -> bool {
+    u.starts_with("http://127.0.0.1") || u.starts_with("http://localhost")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +713,38 @@ mod tests {
         assert_eq!(
             detail_summary(&v),
             vec![("线路C".to_string(), 1, 9)]
+        );
+    }
+
+    #[test]
+    fn list_summary_counts_shapes_only() {
+        let v = json!({"items": [
+            {"id": "a::1", "title": "片一", "cover": "https://example.invalid/1.jpg"},
+            {"id": "a::2", "title": "片二", "cover": "http://127.0.0.1:53659/pic?url=https%3A%2F%2Fexample.invalid%2F2.jpg"},
+            {"id": "a::3", "title": "片三", "cover": {"url": "http://127.0.0.1:53659/pic?url=x"}},
+            {"id": "a::4", "title": "片四"},
+            {"title": "缺 id 的条目"},
+            {"id": "a::6"},
+            {"id": "a::7", "title": "片七", "cover": "http://example.invalid/7.jpg"},
+            {"id": "a::8", "title": "片八", "cover": "/pic?url=x"},
+        ], "next": null, "total": 8});
+        let s = list_summary(&v);
+        assert_eq!(s.total, 8);
+        assert_eq!(s.missing_id_or_title, 2);
+        assert_eq!(s.cover_https, 1);
+        assert_eq!(s.cover_http_loopback, 2);
+        assert_eq!(s.cover_http_other, 1);
+        // 无封面：片四、缺 id 的条目、缺标题的条目。
+        assert_eq!(s.cover_none, 3);
+        assert_eq!(s.cover_other, 1);
+        assert_eq!(
+            format!("{s}"),
+            "共 8 条，缺 id 或标题 2 条；封面 https 1 条、回环 http 2 条、其它 http 1 条、无封面 3 条、非 http(s) 1 条"
+        );
+        assert_eq!(list_summary(&json!({})), ListSummary::default());
+        assert_eq!(
+            list_summary(&json!({"items": "not-an-array"})),
+            ListSummary::default()
         );
     }
 

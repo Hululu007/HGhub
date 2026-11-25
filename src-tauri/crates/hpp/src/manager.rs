@@ -155,6 +155,15 @@ impl PluginManager {
                 Ok(_) => error = Some(PluginError::invalid("插件文件与索引身份不一致")),
                 Err(e) => error = Some(e),
             }
+            // 迁移：v0.0.100 之前 cat_install 没声明 allowInsecureHttp，
+            // 老猫源的 index.json 里就没有这一项；而猫源边车是回环 http，
+            // /play 与 /proxy 返回的播放地址天生是
+            // `http://127.0.0.1:<端口>/…`，没有这个声明点播会被播放校验
+            // 把流全丢掉（2026-11-26 齐天圣瞳真机故障）。恢复时在内存里
+            // 补上即可，不另写 index.json——下次启动恢复时还会再补。
+            if entry.meta.runtime == "cat" {
+                entry.meta.allow_insecure_http = true;
+            }
             let mut installed =
                 Self::installed(root.join(&indexed.id), entry, strict, cooldown.clone(), Arc::new(UnavailableNode))?;
             installed.error = error;
@@ -974,6 +983,9 @@ impl PluginManager {
         } else {
             name
         };
+        // 猫源边车服务是回环 http：/play 与 /proxy 返回的播放地址就是
+        // `http://127.0.0.1:<端口>/…`。没有这个声明，播放校验会把全部
+        // http 流丢掉、报“没有合法可播放流”（2026-11-26 齐天圣瞳真机故障）。
         let meta = Meta::parse(json!({
             "id": id,
             "name": name,
@@ -981,6 +993,7 @@ impl PluginManager {
             "protocol": 1,
             "kind": "source",
             "runtime": "cat",
+            "allowInsecureHttp": true,
         }))?;
         let entry = IndexEntry {
             meta,
@@ -1436,6 +1449,25 @@ impl PluginManager {
             } else {
                 None
             };
+        // 猫源列表诊断（2026-11-26：分类分区“暂无内容”但无报错，列表调用
+        // 成功却 0 条）：转换后、校验前记一笔条目摘要（总数、缺 id/标题数、
+        // 封面形态计数），只记数量与形态，不记地址原文（封面可能是回环
+        // `/pic?url=…` 签名地址，绝不记日志，见 cat-source.md §2.8）；
+        // 校验丢了条目再记一笔 warn。`catalog.list` 的校验用静默丢弃的
+        // `list()`，不记 warnings，所以这里单独记。
+        let cat_list_before =
+            if method == "catalog.list" && matches!(w, RuntimeWorker::Cat(_)) {
+                let summary = crate::cat::convert::list_summary(&raw);
+                logs.lock().unwrap().push(
+                    "info",
+                    &format!("[cat] list 转换后：{summary}"),
+                    "cat",
+                    None,
+                );
+                Some(summary)
+            } else {
+                None
+            };
         let mut warnings = Vec::new();
         let validated = model::validate_result_with_warnings(
             method,
@@ -1468,6 +1500,22 @@ impl PluginManager {
                         None,
                     );
                 }
+            }
+        }
+        if let (Some(before), Ok(validated_value)) = (&cat_list_before, &validated) {
+            let after = crate::cat::convert::list_summary(validated_value);
+            if after.total < before.total {
+                logs.lock().unwrap().push(
+                    "warn",
+                    &format!(
+                        "[cat] list 校验丢条目：{} 条→{} 条（转换后封面：{}）",
+                        before.total,
+                        after.total,
+                        before.cover_part()
+                    ),
+                    "cat",
+                    None,
+                );
             }
         }
         validated.map(Transfer::from_json)
@@ -2100,6 +2148,60 @@ mod tests {
         std::fs::create_dir_all(root.join("cat.test")).unwrap();
         std::fs::write(root.join("cat.test/plugin.js"), "module.exports = {start(){}, stop(){}};")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cat_install_declares_allow_insecure_http() {
+        // 猫源边车是回环 http：/play 与 /proxy 返回的播放地址就是
+        // `http://127.0.0.1:<端口>/…`；没有这个声明，播放校验会把
+        // 全部 http 流丢掉（2026-11-26 齐天圣瞳真机故障）。初始化
+        // 在无 Node 引导时失败并记在 error 里，不影响本断言。
+        let dir = tempfile::tempdir().unwrap();
+        let manager = PluginManager::open(dir.path().into()).unwrap();
+        let info = manager
+            .cat_install(
+                "cat.test",
+                "测试猫源",
+                None,
+                b"module.exports = {start(){}, stop(){}};",
+                None,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(info.meta.allow_insecure_http);
+    }
+
+    #[tokio::test]
+    async fn restore_migrates_old_cat_plugin_to_allow_insecure_http() {
+        // v0.0.100 之前导入的猫源，index.json 里没有 allowInsecureHttp：
+        // 恢复时要在内存里补上，否则老源点播会被播放校验把流全丢掉
+        // （2026-11-26 齐天圣瞳真机故障）。非猫源插件不受影响。
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let index = json!([
+            {"meta": {"id": "cat.old", "name": "老猫源", "protocol": 1, "version": "1.0.0", "runtime": "cat"}, "enabled": true, "source": null, "origin": null, "usable": true, "settings": {}, "endpoint": {}},
+            {"meta": {"id": "py.old", "name": "老 Python 源", "protocol": 1, "version": "1.0.0", "runtime": "python"}, "enabled": true, "source": null, "origin": null, "usable": true, "settings": {}, "endpoint": {}},
+        ]);
+        std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("cat.old")).unwrap();
+        std::fs::write(
+            root.join("cat.old/plugin.js"),
+            "module.exports = {start(){}, stop(){}};",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("py.old")).unwrap();
+        std::fs::write(
+            root.join("py.old/plugin.py"),
+            "class Spider(object):\n    def homeContent(self, filter):\n        return {\"class\": []}\n",
+        )
+        .unwrap();
+        let manager = PluginManager::open(root.into()).unwrap();
+        let info = manager.list().await;
+        let cat = info.iter().find(|p| p.meta.id == "cat.old").unwrap();
+        assert!(cat.meta.allow_insecure_http);
+        let py = info.iter().find(|p| p.meta.id == "py.old").unwrap();
+        assert!(!py.meta.allow_insecure_http);
     }
 
     #[tokio::test]
