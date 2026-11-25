@@ -1046,9 +1046,10 @@ async fn proxy_upstream(
             }
         }
     }
-    // 自家 Python 代理入口是回环地址，Network::target 会拦回环；但地址由
-    // 边车 /load 时登记、可信，用裸 wreq 直取（不经过系统代理）。
-    let upstream = if manager.is_py_proxy_url(&r.url) {
+    // 自家本机服务入口是回环地址，Network::target 会拦回环；但地址由
+    // 宿主自己加载、可信（Python 边车代理入口或已加载的猫源服务），
+    // 用裸 wreq 直取（不经过系统代理）。
+    let upstream = if manager.is_trusted_loopback_url(&r.url) {
         let plain = wreq::Client::builder()
             // 回环直连，不走系统代理；但同样用 Chrome 指纹模拟——边车是
             // 本机 HTTP，模拟无实际作用，只为全项目用同一套客户端。
@@ -1069,7 +1070,7 @@ async fn proxy_upstream(
         tokio::time::timeout(Duration::from_secs(20), request.send())
             .await
             .map_err(|_| PluginError::timeout())?
-            .map_err(|e| PluginError::new("NETWORK", format!("Python 代理取流失败：{e}")))?
+            .map_err(|e| PluginError::new("NETWORK", format!("本机回环取流失败：{e}")))?
     } else {
         tokio::time::timeout(
             Duration::from_secs(20),
@@ -1210,8 +1211,8 @@ async fn proxy_upstream(
             let url = final_url
                 .join(raw)
                 .map_err(|_| PluginError::invalid("HLS 子资源 URL 无效"))?;
-            // 自家 Python 代理入口免目标校验（回环地址；取流时走裸 wreq）。
-            if !manager.is_py_proxy_url(url.as_str()) {
+            // 自家本机服务入口免目标校验（回环地址；取流时走裸 wreq）。
+            if !manager.is_trusted_loopback_url(url.as_str()) {
                 network.target(url.as_str())?;
             }
             let index = session.register(Resource {

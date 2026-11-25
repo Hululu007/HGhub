@@ -22,7 +22,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -91,6 +91,9 @@ pub struct PluginManager {
     /// 边车代理入口的实际地址（/health 返回；9978 被占时会换临时端口），
     /// 供回环取流时识别自家代理地址用。
     py_proxy_base: Mutex<Option<String>>,
+    /// 已加载的猫源服务地址（每次加载的临时端口各不相同），供回环取流
+    /// 时识别自家服务地址用；与 `py_proxy_base` 同理。
+    cat_proxy_bases: Mutex<BTreeSet<String>>,
     /// 猫源订阅记录文件（App 数据目录的 `cat-sources.json`，与
     /// `node-sidecar.json` 同一目录层级）。
     cat_sources_path: PathBuf,
@@ -189,6 +192,7 @@ impl PluginManager {
             python_bootstrap: Arc::new(UnavailablePython),
             node_bootstrap: Arc::new(UnavailableNode),
             py_proxy_base: Default::default(),
+            cat_proxy_bases: Default::default(),
             cat_sources_path,
             cat_store: Mutex::new(cat_store),
             plugins: tokio::sync::RwLock::new(plugins),
@@ -237,6 +241,29 @@ impl PluginManager {
             return false;
         };
         url.starts_with(base.as_str())
+    }
+    /// 登记已加载的猫源服务地址（回环取流时识别自家服务地址用）。
+    pub(crate) fn register_cat_proxy_base(&self, base: String) {
+        let base = base.trim_end_matches('/').to_string();
+        self.cat_proxy_bases
+            .lock()
+            .unwrap()
+            .insert(format!("{base}/"));
+    }
+    /// 该地址是不是宿主自己加载的本机服务地址（Python 边车代理入口
+    /// 或已加载的猫源服务）：回环取流时豁免网络目标校验——地址由宿主
+    /// 自己加载、可信，不经过系统代理直取。登记只增不减：旧地址对应
+    /// 的服务已卸载、端口已死，取流失败而已（与 py_proxy_base 只记
+    /// 最新值同理；端口是每次加载的临时端口）。
+    pub(crate) fn is_trusted_loopback_url(&self, url: &str) -> bool {
+        if self.is_py_proxy_url(url) {
+            return true;
+        }
+        self.cat_proxy_bases
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|base| url.starts_with(base.as_str()))
     }
     pub fn with_document_reader(mut self, reader: Arc<dyn DocumentReader>) -> Self {
         self.document_reader = Some(reader);
@@ -496,6 +523,9 @@ impl PluginManager {
                 p.entry.meta.budget("media.getDetail"),
             )
             .await?;
+            // 取流豁免：媒体回环服务取源的 /proxy 回环地址时，严格模式的
+            // Network::target 会拦回环；登记服务地址，取流时直取。
+            self.register_cat_proxy_base(worker.base_url().to_string());
             let w = RuntimeWorker::Cat(worker);
             p.worker = Some(w.clone());
             p.error = None;
@@ -2304,6 +2334,38 @@ mod tests {
         let info = manager.list().await;
         let cat = info.iter().find(|p| p.meta.id == "cat.test").unwrap();
         assert!(cat.error.is_none(), "{:?}", cat.error);
+        sidecar_server.abort();
+    }
+
+    #[tokio::test]
+    async fn cat_service_base_is_trusted_loopback() {
+        // 2026-11-26 齐天圣瞳：猫源 /play 返回回环 /proxy 地址，媒体
+        // 回环服务取流时 Network::target 在严格模式下拦回环，每条流都
+        // 取不到、报“已尝试可用播放流”。加载后登记服务地址，取流豁免。
+        let cat_server = serve_mock_cat_service().await;
+        let sidecar = Arc::new(MockCatSidecar {
+            cat_base: Mutex::new(cat_server.base.clone()),
+            loads: Mutex::new(0),
+            unloads: Mutex::new(0),
+        });
+        let (sidecar_base, sidecar_server) = serve_mock_cat_sidecar(sidecar.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_cat_index(root);
+        let manager = PluginManager::open(root.into())
+            .unwrap()
+            .with_node_bootstrap(Arc::new(MockNode { base: sidecar_base }));
+        let proxy_url = format!("{}/proxy/ali/src/redirect/x", cat_server.base);
+        // 加载前：还不知道猫源服务地址，不放行。
+        assert!(!manager.is_trusted_loopback_url(&proxy_url));
+        let _ = manager
+            .call("cat.test", "catalog.getCategories", json!({}), "t1".to_string())
+            .await
+            .unwrap();
+        // 加载后：该服务的回环地址放行；别的端口不放行。
+        assert!(manager.is_trusted_loopback_url(&proxy_url));
+        assert!(!manager.is_trusted_loopback_url("http://127.0.0.1:1/proxy/x"));
+        assert!(!manager.is_trusted_loopback_url("http://127.0.0.1:9999/proxy/x"));
         sidecar_server.abort();
     }
 }

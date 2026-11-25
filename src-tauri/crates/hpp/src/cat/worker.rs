@@ -145,6 +145,11 @@ impl CatWorker {
         &self.sites
     }
 
+    /// 供 manager 登记回环取流的豁免地址：源 HTTP 服务的 baseUrl。
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub fn stop(&self) {
         self.closed.store(true, Ordering::Relaxed);
         for t in self.tokens.lock().unwrap().values() {
