@@ -85,3 +85,11 @@ pub async fn browser_close(app: AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// 主窗口点按 URL 型分类时在应用内浏览器打开（如猫源配置中心的
+/// /website 页）。只接受 http(s)；open_browser 自己会解析校验 URL。
+/// 与 commands::open_url 的区别：那个走系统浏览器，这个留在 App 内。
+#[tauri::command]
+pub async fn browser_open(app: AppHandle, url: String) -> Result<(), String> {
+    open_browser(&app, &url)
+}

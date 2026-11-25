@@ -37,6 +37,7 @@
     "allow-read-debug-log",
     "allow-open-url",
     "allow-open-external-media",
+    "allow-browser-open",
     "allow-open-webhome",
     "allow-clear-webhome-data",
     "allow-webhome-player-state",
