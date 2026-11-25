@@ -1409,10 +1409,37 @@ impl PluginManager {
             result.validate(8 * 1024 * 1024)?;
             return Ok(result);
         }
+        // 猫源详情诊断（用户 2026-11-25 定：下个版本加详情日志，复现后发
+        // 日志，定位网盘资源 0 集）：转换后、校验前记一笔播放列表摘要
+        // （每列表：名、集数、最长分集 id 字数），只记数量与长度，不记
+        // 地址原文（网盘分集 id 可能是分享链接，绝不记日志，见
+        // cat-source.md §2.8）；校验丢了分集再记一笔 warn。
+        let raw = result.json();
+        let cat_detail_before =
+            if method == "media.getDetail" && matches!(w, RuntimeWorker::Cat(_)) {
+                let summary = crate::cat::convert::detail_summary(&raw);
+                if !summary.is_empty() {
+                    let parts: Vec<String> = summary
+                        .iter()
+                        .map(|(label, count, max_len)| {
+                            format!("{label} {count}集 最长id {max_len}字")
+                        })
+                        .collect();
+                    logs.lock().unwrap().push(
+                        "info",
+                        &format!("[cat] detail 转换后：{}", parts.join("；")),
+                        "cat",
+                        None,
+                    );
+                }
+                Some(summary)
+            } else {
+                None
+            };
         let mut warnings = Vec::new();
         let validated = model::validate_result_with_warnings(
             method,
-            result.json(),
+            raw,
             meta.allow_insecure_http,
             &mut warnings,
         );
@@ -1421,6 +1448,26 @@ impl PluginManager {
         }
         if let Err(e) = &validated {
             crate::native::validation_log(&logs, "error", &e.message, &request_id);
+        }
+        if let (Some(before), Ok(validated_value)) = (&cat_detail_before, &validated) {
+            let after = crate::cat::convert::detail_summary(validated_value);
+            for (label, count_before, max_len) in before {
+                let count_after = after
+                    .iter()
+                    .find(|(l, _, _)| l == label)
+                    .map(|(_, n, _)| *n)
+                    .unwrap_or(0);
+                if count_after < *count_before {
+                    logs.lock().unwrap().push(
+                        "warn",
+                        &format!(
+                            "[cat] detail 校验丢分集：{label} {count_before}集→{count_after}集（最长id {max_len}字，上限256字）"
+                        ),
+                        "cat",
+                        None,
+                    );
+                }
+            }
         }
         validated.map(Transfer::from_json)
     }

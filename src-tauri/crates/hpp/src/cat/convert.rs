@@ -412,6 +412,37 @@ pub fn rewrite_detail(data: &Value, site: &CatSite) -> Result<Value> {
     Ok(detail)
 }
 
+/// 详情诊断摘要：每条播放列表取（名、集数、最长分集 id 字数）。
+/// 只量数量与长度，不返回地址原文——网盘分集 id 可能是分享链接，
+/// 绝不记进日志（见 cat-source.md §2.8）。
+pub fn detail_summary(v: &Value) -> Vec<(String, usize, usize)> {
+    let mut out = vec![];
+    if let Some(playlists) = v.get("playlists").and_then(Value::as_array) {
+        for p in playlists {
+            let label = p
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| p.get("id").and_then(Value::as_str))
+                .unwrap_or("未命名")
+                .to_string();
+            let episodes = p.get("episodes").and_then(Value::as_array);
+            let count = episodes.map(|e| e.len()).unwrap_or(0);
+            let max_len = episodes
+                .map(|eps| {
+                    eps.iter()
+                        .filter_map(|e| e.get("id").and_then(Value::as_str))
+                        .map(|s| s.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            out.push((label, count, max_len));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +596,26 @@ mod tests {
         assert_eq!(playlists[0]["label"], json!("线路A"));
         assert_eq!(playlists[0]["episodes"][0]["id"], json!("a::ep1"));
         assert_eq!(playlists[0]["episodes"][1]["id"], json!("a::ep2"));
+    }
+
+    #[test]
+    fn detail_summary_counts_lengths_only() {
+        let v = json!({"playlists": [
+            {"id": "a::线路A", "label": "线路A", "episodes": [
+                {"id": "a::ep1", "index": 1},
+                {"id": "a::ep22222", "index": 2},
+            ]},
+            {"id": "a::线路B", "label": "线路B", "episodes": []},
+        ]});
+        assert_eq!(
+            detail_summary(&v),
+            vec![
+                ("线路A".to_string(), 2, 10),
+                ("线路B".to_string(), 0, 0),
+            ]
+        );
+        assert!(detail_summary(&json!({})).is_empty());
+        assert!(detail_summary(&json!({"playlists": "not-an-array"})).is_empty());
     }
 
     #[test]
