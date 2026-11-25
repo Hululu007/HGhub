@@ -27,10 +27,13 @@ pub struct Library {
 fn key(parts: &[&str]) -> String {
     serde_json::to_string(parts).unwrap()
 }
-fn ident<'a>(v: &'a Value, k: &str) -> Result<&'a str> {
+fn ident_max<'a>(v: &'a Value, k: &str, max: usize) -> Result<&'a str> {
     v[k].as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 256)
+        .filter(|s| !s.is_empty() && s.len() <= max)
         .ok_or_else(|| PluginError::invalid(format!("{k} 标识无效")))
+}
+fn ident<'a>(v: &'a Value, k: &str) -> Result<&'a str> {
+    ident_max(v, k, 256)
 }
 fn flag(v: &Value, k: &str) -> Result<Option<bool>> {
     v.get(k)
@@ -46,11 +49,14 @@ fn progress_key(p: &Value) -> Result<String> {
     } else {
         None
     };
+    // 分集 id 走 EPISODE_ID_MAX：网盘分集 id 是分享链接（见 model.rs），
+    // 256 不够用——2026-11-26 齐天圣瞳在 v0.0.101 上点播报
+    // “episodeId 标识无效”，就是这一步把 565 字节的 id 挡掉了。
     Ok(serde_json::to_string(&json!([
         ident(p, "pluginId")?,
         ident(p, "mediaId")?,
         playlist,
-        ident(p, "episodeId")?
+        ident_max(p, "episodeId", model::EPISODE_ID_MAX)?
     ]))
     .unwrap())
 }
@@ -156,7 +162,7 @@ impl Library {
                 } else {
                     None
                 };
-                let episode = ident(p, "episodeId")?;
+                let episode = ident_max(p, "episodeId", model::EPISODE_ID_MAX)?;
                 for field in ["positionSec", "durationSec"] {
                     if (field == "positionSec" || p.get(field).is_some())
                         && !p[field].as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
@@ -200,5 +206,62 @@ impl Library {
             *lock = data;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tmp_lib(name: &str) -> (Library, PathBuf) {
+        let path = std::env::temp_dir()
+            .join(format!("hghub-library-test-{name}-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        (Library::open(path.clone()).unwrap(), path)
+    }
+
+    fn put_entry(lib: &Library) {
+        lib.operation(
+            "put",
+            &json!({"pluginId": "p", "item": {"id": "m1", "title": "t"}}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn progress_accepts_long_episode_id_up_to_2048() {
+        // 2026-11-26 齐天圣瞳：网盘分集 id 565 字节，播放前调
+        // library.progress.get 曾被 256 上限挡掉、报“episodeId 标识无效”。
+        let (lib, path) = tmp_lib("long-episode");
+        put_entry(&lib);
+        let long_id = "x".repeat(600);
+        lib.operation(
+            "progress.set",
+            &json!({"pluginId": "p", "mediaId": "m1", "episodeId": long_id, "positionSec": 0}),
+        )
+        .unwrap();
+        let got = lib
+            .operation(
+                "progress.get",
+                &json!({"pluginId": "p", "mediaId": "m1", "episodeId": long_id}),
+            )
+            .unwrap();
+        assert_eq!(got["episodeId"], json!(long_id));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn progress_rejects_episode_id_over_2048() {
+        let (lib, path) = tmp_lib("too-long-episode");
+        put_entry(&lib);
+        let err = lib
+            .operation(
+                "progress.set",
+                &json!({"pluginId": "p", "mediaId": "m1", "episodeId": "x".repeat(2049), "positionSec": 0}),
+            )
+            .unwrap_err();
+        assert!(err.message.contains("episodeId 标识无效"));
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -533,6 +533,64 @@ fn is_loopback_http(u: &str) -> bool {
     u.starts_with("http://127.0.0.1") || u.starts_with("http://localhost")
 }
 
+/// 分区诊断摘要：分区数、条目总数、空分区（只记分区 id，即站点 key，
+/// 不记地址原文；`py::sections` 产的分区本来就没有标题，只有回退分区
+/// 才带分类名标题）。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SectionsSummary {
+    /// 转换后的分区数。
+    pub sections: usize,
+    /// 各分区条目数之和。
+    pub total_items: usize,
+    /// 条目数为 0 的分区个数。
+    pub empty_sections: usize,
+    /// 空分区的 id（最多记 10 个）。
+    pub empty_ids: Vec<String>,
+}
+
+impl std::fmt::Display for SectionsSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "共 {} 个分区，合计 {} 条", self.sections, self.total_items)?;
+        if self.empty_sections > 0 {
+            write!(f, "；空分区 {} 个", self.empty_sections)?;
+            if !self.empty_ids.is_empty() {
+                write!(f, "（{}）", self.empty_ids.join("、"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 从 `home.getSections` 的转换输出（`{items: [Section], next, total}`）
+/// 里提炼 [`SectionsSummary`]。
+pub fn sections_summary(v: &Value) -> SectionsSummary {
+    let mut s = SectionsSummary::default();
+    if let Some(items) = v.get("items").and_then(Value::as_array) {
+        for section in items {
+            s.sections += 1;
+            let n = section
+                .get("items")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            s.total_items += n;
+            if n == 0 {
+                s.empty_sections += 1;
+                if s.empty_ids.len() < 10 {
+                    if let Some(id) = section
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|t| !t.is_empty())
+                    {
+                        s.empty_ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,6 +803,30 @@ mod tests {
         assert_eq!(
             list_summary(&json!({"items": "not-an-array"})),
             ListSummary::default()
+        );
+    }
+
+    #[test]
+    fn sections_summary_counts_and_empty_ids() {
+        let v = json!({"items": [
+            {"id": "a", "layout": "grid", "items": [{"id": "a::1"}, {"id": "a::2"}]},
+            {"id": "b", "layout": "grid", "items": []},
+            {"id": "c", "layout": "row"},
+        ], "next": null, "total": 2});
+        let s = sections_summary(&v);
+        assert_eq!(s.sections, 3);
+        assert_eq!(s.total_items, 2);
+        assert_eq!(s.empty_sections, 2);
+        // 没 items 字段的分区也算空；带 id 的空分区都记进 empty_ids。
+        assert_eq!(s.empty_ids, vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(
+            format!("{s}"),
+            "共 3 个分区，合计 2 条；空分区 2 个（b、c）"
+        );
+        assert_eq!(sections_summary(&json!({})), SectionsSummary::default());
+        assert_eq!(
+            sections_summary(&json!({"items": "not-an-array"})),
+            SectionsSummary::default()
         );
     }
 

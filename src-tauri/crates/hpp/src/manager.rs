@@ -1403,6 +1403,17 @@ impl PluginManager {
             }
             (w, p.entry.meta.clone(), p.logs.clone())
         };
+        // 分类诊断要标出是哪个分类：分类页会给每个分类预览各调一次
+        // `catalog.list`，行首不带分类 id 就对不上分区。
+        let cat_list_category = if method == "catalog.list" {
+            params
+                .json()
+                .get("categoryId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        };
         let result = w
             .call_scoped(
                 request_id.clone(),
@@ -1455,12 +1466,38 @@ impl PluginManager {
         // `/pic?url=…` 签名地址，绝不记日志，见 cat-source.md §2.8）；
         // 校验丢了条目再记一笔 warn。`catalog.list` 的校验用静默丢弃的
         // `list()`，不记 warnings，所以这里单独记。
+        // 只记源返回空的那笔：分类页会给每个分类预览各调一次
+        // `catalog.list`，每笔都记会把日志刷爆——2026-11-26 一次打开就
+        // 触发限速丢了 302 行，要找的 warn 行也可能在其中。返回条目
+        // 正常、校验没丢的调用不用记，没行就是正常。
         let cat_list_before =
             if method == "catalog.list" && matches!(w, RuntimeWorker::Cat(_)) {
                 let summary = crate::cat::convert::list_summary(&raw);
+                if summary.total == 0 {
+                    logs.lock().unwrap().push(
+                        "info",
+                        &format!(
+                            "[cat] list [{}] 转换后：{summary}",
+                            cat_list_category.as_deref().unwrap_or("?")
+                        ),
+                        "cat",
+                        None,
+                    );
+                }
+                Some(summary)
+            } else {
+                None
+            };
+        // 猫源分区诊断（与上面列表同模式）：`home.getSections`（推荐分区
+        // / 信息流入口）的分区数与条目数；校验丢了分区或条目再记一笔
+        // warn。分区校验（content.rs）虽记 warnings，但只看警告数不清
+        // 丢了多少，这里补一笔总数对照。一次打开只调一次，不刷屏。
+        let cat_sections_before =
+            if method == "home.getSections" && matches!(w, RuntimeWorker::Cat(_)) {
+                let summary = crate::cat::convert::sections_summary(&raw);
                 logs.lock().unwrap().push(
                     "info",
-                    &format!("[cat] list 转换后：{summary}"),
+                    &format!("[cat] sections 转换后：{summary}"),
                     "cat",
                     None,
                 );
@@ -1508,10 +1545,25 @@ impl PluginManager {
                 logs.lock().unwrap().push(
                     "warn",
                     &format!(
-                        "[cat] list 校验丢条目：{} 条→{} 条（转换后封面：{}）",
+                        "[cat] list [{}] 校验丢条目：{} 条→{} 条（转换后封面：{}）",
+                        cat_list_category.as_deref().unwrap_or("?"),
                         before.total,
                         after.total,
                         before.cover_part()
+                    ),
+                    "cat",
+                    None,
+                );
+            }
+        }
+        if let (Some(before), Ok(validated_value)) = (&cat_sections_before, &validated) {
+            let after = crate::cat::convert::sections_summary(validated_value);
+            if after.sections < before.sections || after.total_items < before.total_items {
+                logs.lock().unwrap().push(
+                    "warn",
+                    &format!(
+                        "[cat] sections 校验丢内容：{} 个分区→{} 个，{} 条→{} 条",
+                        before.sections, after.sections, before.total_items, after.total_items
                     ),
                     "cat",
                     None,
