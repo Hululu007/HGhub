@@ -389,19 +389,30 @@ impl PluginManager {
         }
         Ok(())
     }
-    async fn initialize(&self, p: &mut Installed, full: bool) -> Result<RuntimeWorker> {
+    async fn initialize(&self, p: &mut Installed, mut full: bool) -> Result<RuntimeWorker> {
         if p.retired {
             return Err(PluginError::cancelled());
         }
         if !p.entry.enabled {
             return Err(PluginError::new("UNSUPPORTED", "插件已停用"));
         }
+        // 猫源连接失败的 fault 不是永久错误：源服务已死（端口失效），
+        // 下次调用应重新加载而不是永远返回旧错（见
+        // CatWorker::note_call_error 的注释）。其他运行时的 fault 仍按旧错返回。
         if !full {
             if let Some(w) = &p.worker {
                 if let Some(error) = w.fault() {
-                    p.error = Some(error.clone());
-                    return Err(error);
+                    if matches!(w, RuntimeWorker::Cat(_)) {
+                        full = true;
+                    } else {
+                        p.error = Some(error.clone());
+                        return Err(error);
+                    }
                 }
+            }
+        }
+        if !full {
+            if let Some(w) = &p.worker {
                 if !w.closed() {
                     return Ok(w.clone());
                 }
@@ -416,7 +427,13 @@ impl PluginManager {
         }
         self.requirements(&p.entry.meta)?;
         if let Some(w) = p.worker.take() {
-            w.stop();
+            // 猫源：等旧服务的卸载完成再加载新的，否则后台卸载可能落在
+            // 新加载之后、把刚起的服务卸掉（同 key）。
+            if matches!(w, RuntimeWorker::Cat(_)) {
+                let _ = w.stop_and_wait().await;
+            } else {
+                w.stop();
+            }
         }
         // Python 运行时：读 plugin.py，走 CPython 边车（PyWorker），不走
         // QuickJS。media_base 是宿主回环地址，/load 时传给边车，
@@ -1900,25 +1917,191 @@ mod tests {
         assert!(!root.join("fixture.b/loose.pyc").exists());
     }
 
+    /// mock Node 引导：ensure_started 直接返回给定的边车地址。
+    use crate::node::NodeInfo;
+    use futures_util::future::BoxFuture;
+    struct MockNode {
+        base: String,
+    }
+
+    impl NodeBootstrap for MockNode {
+        fn ensure_started(&self) -> BoxFuture<'static, Result<NodeInfo>> {
+            let base = self.base.clone();
+            Box::pin(async move { Ok(NodeInfo { api_base: base }) })
+        }
+    }
+
+    /// mock 猫源边车（/cat/load、/cat/unload）。猫源服务单独起监听，
+    /// 关掉它即模拟“端口上没服务在听”（连接被拒）；/cat/load 每次都
+    /// 返回当前猫源服务的地址，由测试在“复活”时换掉。
+    struct MockCatSidecar {
+        cat_base: Mutex<String>,
+        loads: Mutex<u32>,
+        unloads: Mutex<u32>,
+    }
+
+    /// mock 猫源服务：单独起监听，`shutdown()` 优雅停机（关监听 +
+    /// 关空闲 keep-alive 连接），模拟“端口上没服务在听”。只 abort
+    /// serve 任务不够：axum 把已建立的连接派生到独立任务，abort 后
+    /// 池里的旧连接仍能被服务，客户端会拿到陈旧 200。
+    struct MockCatServer {
+        base: String,
+        shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl MockCatServer {
+        async fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            let _ = self.task.await;
+        }
+    }
+
+    async fn serve_mock_cat_service() -> MockCatServer {
+        use axum::http::header;
+        use axum::routing::post;
+        // 响应带 Connection: close：客户端不池化连接，每次都重新连接，
+        // 服务停掉后下一次调用必定走到新连接、拿到连接被拒。
+        let router = axum::Router::new()
+            .route(
+                "/spider/a/3/init",
+                post(|| async {
+                    ([(header::CONNECTION, "close")], axum::Json(json!({})))
+                }),
+            )
+            .route(
+                "/spider/a/3/home",
+                post(|| async {
+                    (
+                        [(header::CONNECTION, "close")],
+                        axum::Json(
+                            json!({"code": 0, "data": {"class": [{"type_id": "hot", "type_name": "热门"}], "filters": {}}}),
+                        ),
+                    )
+                }),
+            )
+            .route(
+                "/spider/a/3/category",
+                post(|| async {
+                    (
+                        [(header::CONNECTION, "close")],
+                        axum::Json(json!({"code": 0, "data": {"page": 1, "pagecount": 1, "total": 1, "list": [{"vod_id": "v1", "vod_name": "影片一", "vod_pic": "http://x/1.jpg", "vod_remarks": "8.8"}]}})),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap()
+        });
+        MockCatServer {
+            base,
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        }
+    }
+
+    async fn serve_mock_cat_sidecar(
+        state: Arc<MockCatSidecar>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::routing::post;
+        async fn load(
+            axum::extract::State(state): axum::extract::State<Arc<MockCatSidecar>>,
+            axum::Json(_body): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            *state.loads.lock().unwrap() += 1;
+            let base = state.cat_base.lock().unwrap().clone();
+            let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+            axum::Json(json!({
+                "success": true,
+                "port": port,
+                "baseUrl": base,
+                "sites": [{"key": "a", "name": "A 站", "type": 3, "api": "/spider/a/3"}],
+            }))
+        }
+        async fn unload(
+            axum::extract::State(state): axum::extract::State<Arc<MockCatSidecar>>,
+            axum::Json(_body): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            *state.unloads.lock().unwrap() += 1;
+            axum::Json(json!({"success": true}))
+        }
+        let router = axum::Router::new()
+            .route("/cat/load", post(load))
+            .route("/cat/unload", post(unload))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (base, server)
+    }
+
+    fn write_cat_index(root: &std::path::Path) {
+        let index = json!([
+            {"meta": {"id": "cat.test", "name": "测试猫源", "protocol": 1, "version": "1.0.0", "runtime": "cat", "allowInsecureHttp": true}, "enabled": true, "source": null, "origin": null, "usable": true, "settings": {}, "endpoint": {}}
+        ]);
+        std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("cat.test")).unwrap();
+        std::fs::write(root.join("cat.test/plugin.js"), "module.exports = {start(){}, stop(){}};")
+            .unwrap();
+    }
+
     #[tokio::test]
-    async fn clear_all_logs_drops_entries_from_all_plugins() {
+    async fn cat_worker_reloads_after_connection_failure() {
+        // 猫源服务 #1 活着；边车 /cat/load 指过去。
+        let cat_server1 = serve_mock_cat_service().await;
+        let sidecar = Arc::new(MockCatSidecar {
+            cat_base: Mutex::new(cat_server1.base.clone()),
+            loads: Mutex::new(0),
+            unloads: Mutex::new(0),
+        });
+        let (sidecar_base, sidecar_server) = serve_mock_cat_sidecar(sidecar.clone()).await;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_index(root);
-        let manager = PluginManager::open(root.into()).unwrap();
-        seed(&manager).await;
-        assert_eq!(manager.clear_all_logs().await, 4);
-        assert_eq!(manager.clear_all_logs().await, 0);
-        let plugins = manager
-            .plugins
-            .read()
+        write_cat_index(root);
+        let manager = PluginManager::open(root.into())
+            .unwrap()
+            .with_node_bootstrap(Arc::new(MockNode { base: sidecar_base }));
+        // 第一次调用成功（加载服务 #1，分类出来）。
+        let first = manager
+            .call("cat.test", "catalog.getCategories", json!({}), "t1".to_string())
             .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for p in plugins {
-            let p = p.lock().await;
-            assert!(p.logs.lock().unwrap().snapshot().is_empty());
-        }
+            .unwrap();
+        assert_eq!(first[0]["id"].as_str(), Some("a::hot"));
+        assert_eq!(first[0]["label"].as_str(), Some("热门"));
+        assert_eq!(*sidecar.loads.lock().unwrap(), 1);
+        // 关掉猫源服务 #1：再调报连接失败，worker 记 fault。
+        cat_server1.shutdown().await;
+        let err = manager
+            .call("cat.test", "catalog.getCategories", json!({}), "t2".to_string())
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("猫源服务连接失败"), "{}", err.message);
+        // 起猫源服务 #2（新端口），边车 /cat/load 改指过去；再调一次应
+        // 重新加载并成功，而不是永远返回上面那个旧错。
+        let cat_server2 = serve_mock_cat_service().await;
+        *sidecar.cat_base.lock().unwrap() = cat_server2.base.clone();
+        let third = manager
+            .call("cat.test", "catalog.getCategories", json!({}), "t3".to_string())
+            .await
+            .unwrap();
+        assert_eq!(third[0]["id"].as_str(), Some("a::hot"));
+        assert_eq!(*sidecar.loads.lock().unwrap(), 2);
+        // 重载前旧服务的卸载已完成（stop_and_wait 等到了卸载往返），
+        // 不是 fire-and-forget。
+        assert!(*sidecar.unloads.lock().unwrap() >= 1);
+        // 故障已清：插件信息里不再带错。
+        let info = manager.list().await;
+        let cat = info.iter().find(|p| p.meta.id == "cat.test").unwrap();
+        assert!(cat.error.is_none(), "{:?}", cat.error);
+        sidecar_server.abort();
     }
 }

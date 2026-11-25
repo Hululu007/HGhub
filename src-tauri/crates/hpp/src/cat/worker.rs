@@ -17,6 +17,7 @@ use crate::{
     wire::Transfer,
     PluginError, Result,
 };
+use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -92,6 +93,30 @@ impl CatWorker {
             sites,
             methods: convert::hpp_methods(),
             media,
+            fault: Arc::new(Mutex::new(None)),
+            closed: Arc::new(AtomicBool::new(false)),
+            tokens: Arc::new(Mutex::new(HashMap::new())),
+            inited: Arc::new(Mutex::new(HashSet::new())),
+        })
+    }
+
+    /// 测试用构造：直接给源服务地址与站点列表，不走边车加载。
+    #[cfg(test)]
+    pub fn for_test(plugin_id: String, base_url: String, sites: Vec<CatSite>) -> Result<Self> {
+        let client = Arc::new(CatClient::new("http://127.0.0.1:1".into())?);
+        let http = wreq::Client::builder()
+            .emulation(wreq_util::Profile::Chrome149)
+            .no_proxy()
+            .build()
+            .map_err(|_| PluginError::internal("创建猫源 HTTP 客户端失败"))?;
+        Ok(Self {
+            plugin_id,
+            client: Arc::new(Mutex::new(client)),
+            http,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            sites,
+            methods: convert::hpp_methods(),
+            media: MediaCapabilities::default(),
             fault: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -348,6 +373,38 @@ impl CatWorker {
         }
     }
 
+    /// 并发扇出取数：对每个任务（站点 + 各自的 body）各调一次源服务
+    ///（先 `ensure_init` 再 `call_source`），最多 6 路并行；结果按任务
+    /// 顺序返回。单个站点失败只记在结果里，不中断其他站点。
+    /// 之前是逐站串行：37 个站点、每站最长 5 秒 init + 15 秒调用，
+    /// 一个慢站就能把整条调用拖到几十秒、前端骨架屏一直挂着。
+    async fn fanout_fetch(
+        &self,
+        endpoint: &str,
+        jobs: Vec<(CatSite, Value)>,
+        budget: Duration,
+        cancel: &CancellationToken,
+    ) -> Vec<(CatSite, Result<Value>)> {
+        let mut out: Vec<(usize, CatSite, Result<Value>)> = stream::iter(
+            jobs.into_iter().enumerate().map(|(idx, (site, body))| {
+                let worker = self.clone();
+                let cancel = cancel.clone();
+                async move {
+                    worker.ensure_init(&site).await;
+                    let r = worker
+                        .call_source(&site, endpoint, body, budget, &cancel)
+                        .await;
+                    (idx, site, r)
+                }
+            }),
+        )
+        .buffer_unordered(6)
+        .collect()
+        .await;
+        out.sort_by_key(|(idx, _, _)| *idx);
+        out.into_iter().map(|(_, site, r)| (site, r)).collect()
+    }
+
     /// 扇出调用：对每个 type-3 站点各调一次，合并结果。单个站点失败
     /// 只跳过该站；全部失败时返回第一个站点的错误。
     async fn call_fanout(
@@ -361,22 +418,20 @@ impl CatWorker {
         let mut first_err: Option<PluginError> = None;
         match method {
             "catalog.getCategories" => {
+                let jobs = self
+                    .sites
+                    .iter()
+                    .map(|s| (s.clone(), body.clone()))
+                    .collect();
                 let mut classes = vec![];
-                for site in &self.sites {
-                    self.ensure_init(site).await;
-                    match self
-                        .call_source(site, endpoint, body.clone(), budget, cancel)
-                        .await
-                    {
+                for (site, result) in self.fanout_fetch(endpoint, jobs, budget, cancel).await {
+                    match result {
                         Ok(data) => {
                             if let Some(arr) = data.get("class").and_then(Value::as_array) {
                                 for c in arr {
                                     let mut c = c.clone();
                                     if let Some(obj) = c.as_object_mut() {
-                                        obj.insert(
-                                            "_cat_site".into(),
-                                            json!(site.key),
-                                        );
+                                        obj.insert("_cat_site".into(), json!(site.key));
                                     }
                                     classes.push(c);
                                 }
@@ -404,14 +459,90 @@ impl CatWorker {
                 } else {
                     "row"
                 };
+                let jobs = self
+                    .sites
+                    .iter()
+                    .map(|s| (s.clone(), body.clone()))
+                    .collect();
+                let mut homes = self.fanout_fetch(endpoint, jobs, budget, cancel).await;
+                // 回退：/home 只给分类不给列表的站点（设计 §5 的 /home
+                // 形状本来就没有 list），取首个分类的 /category 列表当
+                // 推荐内容；与 Python 蜘蛛 home.getSections 无
+                // homeVideoContent 时退回 homeContent 的做法同款（协议
+                // 06 §19.1）。有 list 的站点不走回退，避免两份推荐打架。
+                let mut fallback_jobs: Vec<(CatSite, Value)> = vec![];
+                let mut fallback_title: HashMap<String, String> = HashMap::new();
+                for (site, result) in homes.iter() {
+                    let Ok(data) = result else { continue };
+                    let list_empty = data.get("list").is_none()
+                        || data
+                            .get("list")
+                            .and_then(Value::as_array)
+                            .is_some_and(Vec::is_empty);
+                    if !list_empty {
+                        continue;
+                    }
+                    let Some(class) = data
+                        .get("class")
+                        .and_then(Value::as_array)
+                        .and_then(|a| a.first())
+                    else {
+                        continue;
+                    };
+                    let Some(tid) = class.get("type_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let name = class
+                        .get("type_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(tid)
+                        .to_string();
+                    let encoded = convert::encode_id(&site.key, tid);
+                    let Some(convert::CatCall::Single { body, .. }) =
+                        convert::dispatch("catalog.list", &json!({"categoryId": encoded}), &self.sites)
+                    else {
+                        continue;
+                    };
+                    fallback_jobs.push((site.clone(), body));
+                    fallback_title.insert(site.key.clone(), name);
+                }
+                let mut used_fallback: HashSet<String> = HashSet::new();
+                if !fallback_jobs.is_empty() {
+                    let results = self
+                        .fanout_fetch("/category", fallback_jobs, budget, cancel)
+                        .await;
+                    let by_key: HashMap<String, Result<Value>> = results
+                        .into_iter()
+                        .map(|(s, r)| (s.key, r))
+                        .collect();
+                    for (site, result) in homes.iter_mut() {
+                        let Ok(data) = result.as_mut() else { continue };
+                        let Some(cat) = by_key.get(&site.key) else { continue };
+                        match cat {
+                            Ok(cat) => {
+                                if let Some(list) = cat
+                                    .get("list")
+                                    .and_then(Value::as_array)
+                                    .filter(|a| !a.is_empty())
+                                {
+                                    if let Some(obj) = data.as_object_mut() {
+                                        obj.insert("list".into(), json!(list));
+                                    }
+                                    used_fallback.insert(site.key.clone());
+                                }
+                            }
+                            Err(e) => {
+                                if first_err.is_none() {
+                                    first_err = Some(e.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 let mut sections = vec![];
                 let mut total = 0u64;
-                for site in &self.sites {
-                    self.ensure_init(site).await;
-                    match self
-                        .call_source(site, endpoint, body.clone(), budget, cancel)
-                        .await
-                    {
+                for (site, result) in homes {
+                    match result {
                         Ok(data) => {
                             // 无 list 时为空分区（设计 §6.1）；条目 id 也要
                             // 加站点前缀，否则多站点时详情解不出站点。
@@ -421,7 +552,7 @@ impl CatWorker {
                                     obj.insert("list".into(), json!([]));
                                 }
                             }
-                            let prefixed = match convert::prefix_page_items(&data, site) {
+                            let prefixed = match convert::prefix_page_items(&data, &site) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     if first_err.is_none() {
@@ -431,7 +562,24 @@ impl CatWorker {
                                 }
                             };
                             match py::sections(&prefixed, &site.key, layout) {
-                                Ok(page) => {
+                                Ok(mut page) => {
+                                    // 回退分区标上分类名（例：热门电影），
+                                    // 不然全是“推荐”，分不出是哪个分类。
+                                    if used_fallback.contains(&site.key) {
+                                        if let Some(title) = fallback_title.get(&site.key) {
+                                            if let Some(items) = page
+                                                .get_mut("items")
+                                                .and_then(Value::as_array_mut)
+                                            {
+                                                if let Some(sec) = items
+                                                    .first_mut()
+                                                    .and_then(Value::as_object_mut)
+                                                {
+                                                    sec.insert("title".into(), json!(title));
+                                                }
+                                            }
+                                        }
+                                    }
                                     if let Some(items) =
                                         page.get("items").and_then(Value::as_array)
                                     {
@@ -461,17 +609,18 @@ impl CatWorker {
                 Ok(json!({"items": sections, "next": null, "total": total}))
             }
             "search.search" => {
+                let jobs = self
+                    .sites
+                    .iter()
+                    .map(|s| (s.clone(), body.clone()))
+                    .collect();
                 let mut items = vec![];
                 let mut total = 0u64;
                 let mut next = Value::Null;
-                for site in &self.sites {
-                    self.ensure_init(site).await;
-                    match self
-                        .call_source(site, endpoint, body.clone(), budget, cancel)
-                        .await
-                    {
+                for (site, result) in self.fanout_fetch(endpoint, jobs, budget, cancel).await {
+                    match result {
                         Ok(data) => {
-                            let converted = convert::prefix_page_items(&data, site)
+                            let converted = convert::prefix_page_items(&data, &site)
                                 .and_then(|prefixed| py::page(&prefixed));
                             match converted {
                                 Ok(page) => {
@@ -508,5 +657,136 @@ impl CatWorker {
             }
             _ => Err(PluginError::new("UNSUPPORTED", "猫源不支持该方法")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        extract::{Json, Path, State},
+        routing::post,
+        Router,
+    };
+    use std::time::Instant;
+
+    /// mock 猫源服务：记每次调用的起止时间，供并发断言用。
+    struct MockState {
+        calls: Mutex<Vec<(String, String, Instant, Instant)>>,
+    }
+
+    fn vod(id: &str, name: &str) -> Value {
+        json!({"vod_id": id, "vod_name": name, "vod_pic": "http://x/1.jpg", "vod_remarks": "8.8"})
+    }
+
+    async fn mock_handler(
+        State(state): State<Arc<MockState>>,
+        Path((key, endpoint)): Path<(String, String)>,
+        Json(_body): Json<Value>,
+    ) -> Json<Value> {
+        let start = Instant::now();
+        // c/d 两站的 /home 各睡 2 秒：串行要 4 秒以上，并行约 2 秒。
+        if endpoint == "home" && (key == "c" || key == "d") {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let data = match (key.as_str(), endpoint.as_str()) {
+            (_, "init") => return Json(json!({})),
+            // a：/home 只有分类没有 list（豆瓣的形状），/category 给 2 条。
+            ("a", "home") => json!({"class": [{"type_id": "hot_gaia", "type_name": "热门电影"}], "filters": {}}),
+            ("a", "category") => {
+                json!({"page": 1, "pagecount": 1, "total": 2, "list": [vod("a1", "影片一"), vod("a2", "影片二")]})
+            }
+            // b：/home 自带 list，不应再调 /category。
+            ("b", "home") => json!({"class": [{"type_id": "bhot", "type_name": "B 热门"}], "list": [vod("b1", "B 影片")]}),
+            ("b", "category") => {
+                json!({"page": 1, "pagecount": 1, "total": 1, "list": [vod("bX", "不应出现")]})
+            }
+            ("c", "home") => json!({"class": [{"type_id": "chot", "type_name": "C 热门"}], "filters": {}}),
+            ("c", "category") => {
+                json!({"page": 1, "pagecount": 1, "total": 1, "list": [vod("c1", "C 影片")]})
+            }
+            ("d", "home") => json!({"class": [{"type_id": "dhot", "type_name": "D 热门"}], "filters": {}}),
+            ("d", "category") => {
+                json!({"page": 1, "pagecount": 1, "total": 1, "list": [vod("d1", "D 影片")]})
+            }
+            _ => json!({}),
+        };
+        let end = Instant::now();
+        state
+            .calls
+            .lock()
+            .unwrap()
+            .push((key, endpoint, start, end));
+        Json(json!({"code": 0, "data": data}))
+    }
+
+    fn site(key: &str, name: &str) -> CatSite {
+        CatSite {
+            key: key.to_string(),
+            name: name.to_string(),
+            site_type: 3,
+            api: format!("/spider/{key}/3"),
+        }
+    }
+
+    #[tokio::test]
+    async fn home_sections_falls_back_to_first_category_and_fans_out_concurrently() {
+        let state = Arc::new(MockState { calls: Mutex::new(vec![]) });
+        let router = Router::new()
+            .route("/spider/:key/3/:endpoint", post(mock_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let worker = CatWorker::for_test(
+            "cat.test".to_string(),
+            base,
+            vec![site("a", "A 站"), site("b", "B 站"), site("c", "C 站"), site("d", "D 站")],
+        )
+        .unwrap();
+        let result = worker
+            .call_scoped(
+                "test-home-1".to_string(),
+                "home.getSections".to_string(),
+                Transfer::from_json(json!({})),
+                Duration::from_secs(30),
+                false,
+            )
+            .await
+            .unwrap();
+        server.abort();
+        let page = result.json();
+        let sections = page.get("items").and_then(Value::as_array).unwrap();
+        assert_eq!(sections.len(), 4, "{page}");
+        // a：回退首分类，2 条，标题是分类名。
+        assert_eq!(sections[0].get("id").and_then(Value::as_str), Some("a"));
+        assert_eq!(sections[0].get("title").and_then(Value::as_str), Some("热门电影"));
+        assert_eq!(sections[0].get("items").and_then(Value::as_array).map(Vec::len), Some(2));
+        // b：/home 自带 list，直接用，不调 /category。
+        assert_eq!(sections[1].get("id").and_then(Value::as_str), Some("b"));
+        assert!(sections[1].get("title").is_none());
+        assert_eq!(sections[1].get("items").and_then(Value::as_array).map(Vec::len), Some(1));
+        assert_eq!(
+            sections[1]["items"][0].get("id").and_then(Value::as_str),
+            Some("b::b1")
+        );
+        // c/d：回退，各 1 条。
+        assert_eq!(sections[2].get("items").and_then(Value::as_array).map(Vec::len), Some(1));
+        assert_eq!(sections[3].get("items").and_then(Value::as_array).map(Vec::len), Some(1));
+        // b 的 /category 一次也没调。
+        let calls = state.calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|(k, e, _, _)| k == "b" && e == "category"),
+            "{calls:?}"
+        );
+        // c/d 的 /home 在时间上重叠：并行扇出，否则一个 2 秒睡完另一个才开始。
+        let home_c = calls.iter().find(|(k, e, _, _)| k == "c" && e == "home").unwrap();
+        let home_d = calls.iter().find(|(k, e, _, _)| k == "d" && e == "home").unwrap();
+        assert!(
+            home_c.2 < home_d.3 && home_d.2 < home_c.3,
+            "c/d 的 /home 没有重叠：{calls:?}"
+        );
     }
 }

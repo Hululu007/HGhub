@@ -544,12 +544,20 @@ HPP 方法面（§3.2）不变；新增 `cat/convert.rs`，把 HPP 方法译成�
 | HPP 方法 | 猫源 HTTP 调用 | 参数 |
 | --- | --- | --- |
 | `catalog.getCategories` | `POST <api>/home` | 无（`{}`） |
-| `home.getSections` | `POST <api>/home`（取返回里的 `list`；无 `list` 时为空） | 无 |
+| `home.getSections` | `POST <api>/home`；`/home` 只给分类不给列表时（设计 §5 的 `/home` 形状本来就没有 `list`），取首个分类调 `POST <api>/category` 拿列表当推荐内容；有 `list` 的站点不走回退 | 无 |
 | `feed.list` | `POST <api>/home`（同上） | 无 |
 | `catalog.list` | `POST <api>/category` | `{id: tid, page: pg, filter, filters}` |
 | `search.search` | `POST <api>/search` | `{wd: query, page: pg}` |
 | `media.getDetail` | `POST <api>/detail` | `{id}`（单个 ID；批量时传数组） |
 | `media.resolvePlayback` | `POST <api>/play` | `{flag, id}` |
+
+多站点调用是并发扇出（最多 6 路并行，结果按站点顺序返回），不再逐站串行；
+单个站点失败只跳过该站，全部失败时返回第一个站点的错误。
+
+源服务连不上时（`猫源服务连接失败`），worker 记 fault；下一次调用重新加载
+服务（新端口、新 revision）而不是永远返回旧错——分类/推荐页的重试按钮
+就是这条恢复路径。重载前等旧服务卸载完成，避免后到的卸载杀掉新加载的
+同名服务。
 
 调用前先调 `POST <api>/init`（站源初始化，首次加载、搜索时调用；
 返回无内容，失败不阻塞后续调用——与 CatPawOpen 协议一致）。

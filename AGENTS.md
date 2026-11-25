@@ -156,3 +156,4 @@ HGhub 同时维护 **HPP 插件协议文档及其宿主实现**，以及 **播�
 - **不要设 `CC_aarch64-linux-android` 等带横杠的环境变量**：cmake crate 会把它当成 `CMAKE_C_COMPILER`，和 toolchain 文件的编译器冲突，`FindThreads` 报错，且会污染 btls-sys 的 cmake 缓存；一旦污染，删掉 `target/aarch64-linux-android/debug/build/btls-sys` 再重跑。
 - hpp 的宿主 `cargo test --lib`（在 `src-tauri/crates/hpp` 里跑，hpp 是独立包，不在 workspace 里）同样缺系统 libclang/头文件：用 `LIBCLANG_PATH` + `BINDGEN_EXTRA_CLANG_ARGS="--sysroot=<NDK sysroot> -resource-dir=<NDK>/lib/clang/19 -I<NDK sysroot>/usr/include/aarch64-linux-android"` 才能编过 btls-sys 的 bindgen。
 - 两个 cargo 进程不能同时跑：build script 产物都在 `target/debug/`，后启动的会卡在 `Blocking waiting for file lock on build directory` 直到前一个释放。
+- **v0.0.96 补记（2026-11-25）：`/tmp/ndk-wrap` 里的包装脚本不能只验证“文件存在”——之前有一次脚本写的是 `exec .../bin/$T`，`$T` 从未赋值，实际是去执行目录本身，cargo 跑到 rquickjs-sys 的 dtoa.c 才报 cc-rs 126。重建包装目录后必须实跑验证（比如 PATH 里调一次 `aarch64-linux-android-clang --version`），确认脚本真的能执行；重建时把工具名写死，不要用变量拼。**
