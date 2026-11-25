@@ -19,6 +19,12 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [logsId, setLogsId] = useState<string | null>(null), [logs, setLogs] = useState<unknown[]>([]);
+  const showLogs = (id: string) => {
+    if (logsId === id) { setLogsId(null); setLogs([]); return; }
+    setBusy(true); setError("");
+    void request<unknown[]>("logs", { id }).then(entries => { setLogsId(id); setLogs(entries); }).catch(e => setError(pluginError(e))).finally(() => setBusy(false));
+  };
   const load = async () => {
     const result = await request<CatList>("cat.list");
     setNode(result.node); setSources(result.sources);
@@ -57,8 +63,10 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
             {s.sourceType === "url" ? <button disabled={busy} onClick={() => void run(async () => { const result = await request<{ changed: boolean }>("cat.check_update", { id: s.id }); return result.changed ? "已更新到最新版本" : "已是最新版本"; })}>检查更新</button>
               : <button disabled={busy} onClick={() => void run(async () => { const path = await pickZip(); if (!path) return; await request("cat.reimport_zip", { id: s.id, path }); return "已重新导入"; })}>重新导入 ZIP</button>}
             <button disabled={busy} onClick={() => void run(async () => { const paths = await invoke<string[]>("pick_plugin_files"); if (!paths[0]) return; await request("cat.import_config", { id: s.id, path: paths[0] }); return "配置已导入"; })}>导入配置</button>
+            <button disabled={busy} onClick={() => showLogs(s.id)}>{logsId === s.id ? "收起日志" : "运行日志"}</button>
             <button className="danger" disabled={busy} onClick={() => { if (confirmRemove !== s.id) { setConfirmRemove(s.id); return; } setConfirmRemove(null); void run(async () => { await request("remove", { id: s.id }); }); }}>{confirmRemove === s.id ? `确认删除「${s.name}」？` : "删除"}</button>
           </div>
+          {logsId === s.id && (!!logs.length ? <pre className="hpp-logs">{logs.map(x => JSON.stringify(x)).join("\n")}</pre> : <p className="hpp-muted">暂无日志</p>)}
         </div>;
       }) : <p className="hpp-muted">还没有添加猫源，贴订阅地址或导入 ZIP 文件添加。</p>}
     </section>
