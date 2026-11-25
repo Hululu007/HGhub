@@ -412,9 +412,9 @@ pub fn rewrite_detail(data: &Value, site: &CatSite) -> Result<Value> {
     Ok(detail)
 }
 
-/// 详情诊断摘要：每条播放列表取（名、集数、最长分集 id 字数）。
-/// 只量数量与长度，不返回地址原文——网盘分集 id 可能是分享链接，
-/// 绝不记进日志（见 cat-source.md §2.8）。
+/// 详情诊断摘要：每条播放列表取（名、集数、最长分集 id 字节数）。
+/// 长度按字节计，与 `model.rs` 校验的 `.len()` 对得上；只量数量与长度，
+/// 不返回地址原文——网盘分集 id 可能是分享链接，绝不记进日志（见 cat-source.md §2.8）。
 pub fn detail_summary(v: &Value) -> Vec<(String, usize, usize)> {
     let mut out = vec![];
     if let Some(playlists) = v.get("playlists").and_then(Value::as_array) {
@@ -432,7 +432,7 @@ pub fn detail_summary(v: &Value) -> Vec<(String, usize, usize)> {
                 .map(|eps| {
                     eps.iter()
                         .filter_map(|e| e.get("id").and_then(Value::as_str))
-                        .map(|s| s.chars().count())
+                        .map(|s| s.len())
                         .max()
                         .unwrap_or(0)
                 })
@@ -616,6 +616,14 @@ mod tests {
         );
         assert!(detail_summary(&json!({})).is_empty());
         assert!(detail_summary(&json!({"playlists": "not-an-array"})).is_empty());
+        // 长度按字节计（中文 1 字 3 字节），与校验的 `.len()` 对得上。
+        let v = json!({"playlists": [
+            {"id": "a::线路C", "label": "线路C", "episodes": [{"id": "a::中文", "index": 1}]},
+        ]});
+        assert_eq!(
+            detail_summary(&v),
+            vec![("线路C".to_string(), 1, 9)]
+        );
     }
 
     #[test]

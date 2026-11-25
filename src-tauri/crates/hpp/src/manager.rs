@@ -1422,7 +1422,7 @@ impl PluginManager {
                     let parts: Vec<String> = summary
                         .iter()
                         .map(|(label, count, max_len)| {
-                            format!("{label} {count}集 最长id {max_len}字")
+                            format!("{label} {count}集 最长id {max_len}字节")
                         })
                         .collect();
                     logs.lock().unwrap().push(
@@ -1461,7 +1461,8 @@ impl PluginManager {
                     logs.lock().unwrap().push(
                         "warn",
                         &format!(
-                            "[cat] detail 校验丢分集：{label} {count_before}集→{count_after}集（最长id {max_len}字，上限256字）"
+                            "[cat] detail 校验丢分集：{label} {count_before}集→{count_after}集（最长id {max_len}字节，上限{}字节）",
+                            model::EPISODE_ID_MAX
                         ),
                         "cat",
                         None,

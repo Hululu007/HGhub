@@ -293,12 +293,21 @@ pub(crate) fn required(o: &Map<String, Value>, key: &str) -> Result<String> {
         .map(String::from)
         .ok_or_else(|| PluginError::internal(format!("返回值缺少 {key}")))
 }
-pub(crate) fn id(o: &Map<String, Value>, key: &str) -> Result<()> {
-    if required(o, key)?.len() > 256 {
+/// 分集 id 的长度上限（字节）。网盘分集 id 本身就是分享链接，实测最长
+/// 565 字节（王二小·玩偶哥哥，2026-11-25），256 不够用；其它 id
+/// （作品、线路等）仍走 256。
+pub(crate) const EPISODE_ID_MAX: usize = 2048;
+
+pub(crate) fn id_max(o: &Map<String, Value>, key: &str, max: usize) -> Result<()> {
+    if required(o, key)?.len() > max {
         Err(PluginError::internal(format!("{key} 超长")))
     } else {
         Ok(())
     }
+}
+
+pub(crate) fn id(o: &Map<String, Value>, key: &str) -> Result<()> {
+    id_max(o, key, 256)
 }
 pub(crate) fn keep(o: &mut Map<String, Value>, keys: &[&str]) {
     o.retain(|k, _| keys.contains(&k.as_str()));
@@ -403,7 +412,8 @@ pub fn media_item(v: Value, http: bool) -> Result<Value> {
         o.insert("stats".into(), Value::Object(stats));
     }
     if o.contains_key("entryEpisodeId") {
-        id(&o, "entryEpisodeId")?;
+        // 入口分集 id 也是分集 id，走同一上限。
+        id_max(&o, "entryEpisodeId", EPISODE_ID_MAX)?;
     }
     if o.get("status")
         .is_some_and(|v| !matches!(v.as_str(), Some("ongoing" | "finished" | "upcoming")))
@@ -459,7 +469,8 @@ pub fn resource(v: Value, http: bool) -> Result<Value> {
 }
 fn episode(v: Value, http: bool) -> Result<Value> {
     let mut o = object(v)?;
-    id(&o, "id")?;
+    // 分集 id 走 EPISODE_ID_MAX：网盘分集 id 是分享链接（见上）。
+    id_max(&o, "id", EPISODE_ID_MAX)?;
     if !o
         .get("index")
         .and_then(Value::as_f64)
@@ -757,5 +768,57 @@ pub(crate) fn validate_result_with_warnings(
             "UNSUPPORTED",
             format!("尚未实现该返回类型校验：{method}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn episode_allows_long_pan_id() {
+        // 网盘分集 id 是分享链接，实测 565 字节；2048 内应通过。
+        let id = "p".repeat(600);
+        let v = json!({"id": id, "index": 1});
+        assert!(episode(v, false).is_ok());
+    }
+
+    #[test]
+    fn episode_rejects_overlong_id() {
+        let id = "p".repeat(3000);
+        let v = json!({"id": id, "index": 1});
+        assert!(episode(v, false).is_err());
+    }
+
+    #[test]
+    fn media_item_keeps_256_limit() {
+        // 作品 id 仍走 256。
+        let id = "m".repeat(300);
+        let v = json!({"id": id, "title": "t"});
+        assert!(media_item(v, false).is_err());
+    }
+
+    #[test]
+    fn media_item_entry_episode_id_uses_episode_limit() {
+        // 入口分集 id 也是分集 id，走同一上限。
+        let id = "p".repeat(600);
+        let v = json!({"id": "vid1", "title": "t", "entryEpisodeId": id});
+        assert!(media_item(v, false).is_ok());
+    }
+
+    #[test]
+    fn get_detail_keeps_long_pan_episodes() {
+        // 回归：长网盘分集 id 不应再被校验丢掉（2026-11-25 实测 565 字节全丢）。
+        let id = "p".repeat(600);
+        let v = json!({
+            "id": "vid1",
+            "title": "t",
+            "playlists": [{"id": "p1", "episodes": [{"id": id, "index": 1}]}],
+        });
+        let out = validate_result("media.getDetail", v, false).unwrap();
+        let eps = out["playlists"][0]["episodes"].as_array().unwrap();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0]["id"].as_str(), Some(id.as_str()));
     }
 }

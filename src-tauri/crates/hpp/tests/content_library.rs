@@ -213,6 +213,22 @@ fn structured_content_discards_bad_rows_and_unknown_fields() {
     assert!(model::validate_result("search.getFilters", json!({}), false).is_err());
 }
 
+#[test]
+fn catalog_categories_keep_multi_site_merge() {
+    // 回归：猫源多站合并后的分类可达数百条（93 站），100 的上限会丢掉
+    // 尾部站点的分类（2026-11-25 日志：catalog.getCategories：超量条目已丢弃）。
+    let cats: Vec<_> = (0..150)
+        .map(|i| json!({"id": format!("site{i}::c{i}"), "label": format!("站点{i} · 分类{i}")}))
+        .collect();
+    let out = model::validate_result("catalog.getCategories", json!(cats), false).unwrap();
+    assert_eq!(out.as_array().unwrap().len(), 150);
+    let many: Vec<_> = (0..1005)
+        .map(|i| json!({"id": format!("s{i}"), "label": format!("分类{i}")}))
+        .collect();
+    let out = model::validate_result("catalog.getCategories", json!(many), false).unwrap();
+    assert_eq!(out.as_array().unwrap().len(), 1000);
+}
+
 #[tokio::test]
 async fn capability_discovery_and_removal_keep_local_library() {
     let dir = tempfile::tempdir().unwrap();

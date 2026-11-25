@@ -300,7 +300,10 @@ pub(crate) fn validate(m: &str, v: Value, http: bool, w: &mut Vec<String>) -> Re
             o.insert("items".into(), items);
             Ok(Value::Object(o))
         }),
-        "catalog.getCategories" => rows(v, 100, m, w, |v, w| category(v, 1, w)),
+        // 顶级分类上限 1000：猫源多站合并后的分类可达数百条（93 站），
+        // 100 会丢掉尾部站点的分类（2026-11-25 日志“超量条目已丢弃”）；
+        // 仍有界，超量照样记警告。
+        "catalog.getCategories" => rows(v, 1000, m, w, |v, w| category(v, 1, w)),
         "catalog.getFilters" => {
             let mut o = object(v)?;
             keep(&mut o, &["filters", "sorts"]);
