@@ -118,21 +118,31 @@ function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia})
   const pickEntry=(c:Category)=>{const url=categoryUrl(c);if(url){openCategoryUrl(url);return;}const kids=c.children??[];if(kids.length===1){const childUrl=categoryUrl(kids[0]);if(childUrl){openCategoryUrl(childUrl);return;}}setSelected(c);};
   // 进入资源分类页后，右滑返回资源列表。只在已选资源时启用；不限从左边缘
   // 起手（分类详情里没有横向滚动的内容，不会误触）；横向占主导就触发，
-  // 不要求竖向几乎不动——拇指右滑常带一点下弧，旧的 |dy|<40 会把这种
-  // 斜滑全拒掉。touchmove 里达到阈值就返回，不等 touchend——浏览器接管
-  // 纵滑后 touchend 可能收不到。容器设 touch-action: pan-y，让横滑继续走事件。
-  // 右滑返回（第 3 轮，v0.0.109 角度判定仍无效）：touchmove 在 dx>30 且横向占主导时即触发，
-  // 比 50 更早，抢在浏览器竖滑接管前。另写 [swipe] 诊断行进 debug.log（设置页「运行日志」可读）：
-  // start（起手坐标）/ move back（触发）/ end（终点 dx/dy、峰值 mx/my、是否返回）/ cancel（被浏览器
-  // 接管时的峰值）——只在已选站、且有实际位移（mx/my>20）时记 end/cancel，点按不记。
+  // 不要求竖向几乎不动——拇指右滑常带一点下弧。
+  // v0.0.110 诊断定案：日志里两次右滑都只有 [swipe] start，没有 move/end/cancel——
+  // React 的触摸回调是被动的（passive），调 preventDefault 无效，浏览器在起手后
+  // 几 px 内就把手势接管去纵滑，touchmove 再也不到 JS。所以改原生监听：
+  // touchmove 用 {passive:false}，横向占主导（dx>10）就 preventDefault 抢回手势，
+  // dx>30 即返回；竖向占主导时不拦，页面照常滚动。诊断行保留（[swipe] 写 debug.log）。
+  const layoutRef=useRef<HTMLDivElement|null>(null);
   const swipe=useRef<{x:number;y:number;t:number;done:boolean;mx:number;my:number}|null>(null);
-  const swipeLog=(m:string)=>{void invoke("debug_log",{msg:`[swipe] ${m}`}).catch(()=>{});};
-  const onSwipeStart=(e:React.TouchEvent)=>{if(!selected)return;const t=e.touches[0];swipe.current={x:t.clientX,y:t.clientY,t:performance.now(),done:false,mx:0,my:0};swipeLog(`start x=${Math.round(t.clientX)} y=${Math.round(t.clientY)}`);};
-  const onSwipeMove=(e:React.TouchEvent)=>{const s=swipe.current;if(!s||s.done||!selected)return;const t=e.touches[0],dx=t.clientX-s.x,dy=t.clientY-s.y;s.mx=Math.max(s.mx,Math.abs(dx));s.my=Math.max(s.my,Math.abs(dy));if(dx>30&&dx>Math.abs(dy)){s.done=true;swipeLog(`move back dx=${Math.round(dx)} dy=${Math.round(dy)}`);setSelected(null);}};
-  const onSwipeEnd=(e:React.TouchEvent)=>{const s=swipe.current;swipe.current=null;if(!s||s.done||!selected)return;const t=e.changedTouches[0],dx=t.clientX-s.x,dy=t.clientY-s.y,dt=Math.max(1,performance.now()-s.t);const back=dx>Math.abs(dy)&&(dx>80||(dx>40&&dx/dt>.5));if(s.mx>20||s.my>20)swipeLog(`end dx=${Math.round(dx)} dy=${Math.round(dy)} mx=${Math.round(s.mx)} my=${Math.round(s.my)} -> ${back?'back':'no'}`);if(back)setSelected(null);};
-  const onSwipeCancel=()=>{const s=swipe.current;swipe.current=null;if(s&&(s.mx>20||s.my>20))swipeLog(`cancel mx=${Math.round(s.mx)} my=${Math.round(s.my)}`);};
+  const selectedRef=useRef(selected);
+  useEffect(()=>{selectedRef.current=selected;});
+  useEffect(()=>{
+    const el=layoutRef.current; if(!el) return;
+    const log=(m:string)=>{void invoke("debug_log",{msg:`[swipe] ${m}`}).catch(()=>{});};
+    const onStart=(e:TouchEvent)=>{if(!selectedRef.current)return;const t=e.touches[0];swipe.current={x:t.clientX,y:t.clientY,t:performance.now(),done:false,mx:0,my:0};log(`start x=${Math.round(t.clientX)} y=${Math.round(t.clientY)}`);};
+    const onMove=(e:TouchEvent)=>{const s=swipe.current;if(!s||s.done||!selectedRef.current)return;const t=e.touches[0],dx=t.clientX-s.x,dy=t.clientY-s.y;s.mx=Math.max(s.mx,Math.abs(dx));s.my=Math.max(s.my,Math.abs(dy));if(dx>10&&dx>Math.abs(dy))e.preventDefault();if(dx>30&&dx>Math.abs(dy)){s.done=true;log(`move back dx=${Math.round(dx)} dy=${Math.round(dy)}`);setSelected(null);}};
+    const onEnd=(e:TouchEvent)=>{const s=swipe.current;swipe.current=null;if(!s||s.done||!selectedRef.current)return;const t=e.changedTouches[0],dx=t.clientX-s.x,dy=t.clientY-s.y,dt=Math.max(1,performance.now()-s.t);const back=dx>Math.abs(dy)&&(dx>80||(dx>40&&dx/dt>.5));if(s.mx>20||s.my>20)log(`end dx=${Math.round(dx)} dy=${Math.round(dy)} mx=${Math.round(s.mx)} my=${Math.round(s.my)} -> ${back?'back':'no'}`);if(back)setSelected(null);};
+    const onCancel=()=>{const s=swipe.current;swipe.current=null;if(s)log(`cancel mx=${Math.round(s.mx)} my=${Math.round(s.my)}`);};
+    el.addEventListener('touchstart',onStart,{passive:true});
+    el.addEventListener('touchmove',onMove,{passive:false});
+    el.addEventListener('touchend',onEnd);
+    el.addEventListener('touchcancel',onCancel);
+    return()=>{el.removeEventListener('touchstart',onStart);el.removeEventListener('touchmove',onMove);el.removeEventListener('touchend',onEnd);el.removeEventListener('touchcancel',onCancel);};
+  },[]);
   const content=selected?<><button className="hpp-back" onClick={()=>setSelected(null)}><IBack size={17}/>全部分类</button><h2>{selected.label}</h2><CategorySource key={selected.id} plugin={plugin} open={open} initialCategory={selected.id} siteKey={Array.isArray(selected.children)?selected.id:undefined}/></>:<><Notice error={error}/>{error&&<button onClick={()=>setAttempt(v=>v+1)}>重试分类</button>}{busy?<div className="hpp-skeleton" aria-label="正在加载分类"/>:hasParents?<>{isMobile?<div className="hpp-category-sites" aria-label="选择资源"><h2>选择资源</h2>{tree.map(site=><button key={site.id} onClick={()=>pickEntry(site)}><span><strong>{site.label}</strong><small>{site.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</div>:<p className="hpp-muted">从左侧分类目录选择一个资源，查看它的分类。</p>}</>:tree.map(category=><CategoryPreview key={category.id} plugin={plugin} category={category} open={open} all={()=>pickEntry(category)}/>)}{!busy&&!error&&!tree.length&&<div className="hpp-empty"><IGrid size={36}/><h2>这里还没有分类</h2><p>片源暂未提供分类内容。</p></div>}{!!tree.length&&<p className="hpp-end-note">— 已展示全部分类 —</p>}</>;
-  return <div className="refined-category-layout" style={{touchAction:"pan-y"}} onTouchStart={onSwipeStart} onTouchMove={onSwipeMove} onTouchEnd={onSwipeEnd} onTouchCancel={onSwipeCancel}><aside className="refined-category-directory"><h2>分类目录</h2><nav aria-label="分类目录"><button aria-pressed={!selected} onClick={()=>setSelected(null)}><IGrid size={18}/>全部概览</button>{tree.map(c=><button key={c.id} aria-pressed={selected?.id===c.id} onClick={()=>pickEntry(c)}><span><strong>{c.label}</strong><small>{c.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</nav></aside><div className="refined-category-results">{content}</div></div>;
+  return <div ref={layoutRef} className="refined-category-layout" style={{touchAction:"pan-y"}}><aside className="refined-category-directory"><h2>分类目录</h2><nav aria-label="分类目录"><button aria-pressed={!selected} onClick={()=>setSelected(null)}><IGrid size={18}/>全部概览</button>{tree.map(c=><button key={c.id} aria-pressed={selected?.id===c.id} onClick={()=>pickEntry(c)}><span><strong>{c.label}</strong><small>{c.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</nav></aside><div className="refined-category-results">{content}</div></div>;
 }
 function CategoryPreview({plugin,category,open,all}:{plugin:InstalledPlugin;category:Category;open:OpenMedia;all:()=>void}) {
   const list=usePagedPlugin<MediaItem>({plugin,method:"catalog.list",args:{categoryId:category.children?.[0]?.id||category.id},limit:8});
