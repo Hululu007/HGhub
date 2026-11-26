@@ -1,4 +1,7 @@
-// swift-tools-version:5.3
+// swift-tools-version:5.6
+// （5.3 是 Tauri 模板原值；mpv 依赖的 `.package(url:exact:)` 要
+// PackageDescription 5.6 才有，5.3 下 CI 报 'package(url:exact:)'
+// is unavailable，见 v0.0.117 的 iOS 构建日志。）
 // Copyright 2019-2023 Tauri Programme within The Commons Conservancy
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
