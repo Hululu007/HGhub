@@ -19,21 +19,26 @@ const LABEL: &str = "browser";
 /// 否则刘海机上页面自己的顶部会被状态栏和浮动栏盖住、显示不全。
 /// 注意：页面的 viewport 没写 viewport-fit=cover 时 env(safe-area-inset-*)
 /// 是 0（猫源配置页就是这样），浮动栏会顶到状态栏底下——所以先给页面
-/// 补上 viewport-fit=cover，让 safe-area 真正生效；脚本刚跑和页面加载
-/// 完各补一次，覆盖 meta 还没解析完的情况。
+/// 补上 viewport-fit=cover，让 safe-area 真正生效。meta 必须落在 <head>
+/// 里才算数（直接挂在 <html> 下会被忽略），所以补 meta 时优先插到 head
+/// 最前面；脚本刚跑时 head 还没出来就用 MutationObserver 盯着，head 一出
+/// 来马上补，页面加载完 bar() 里再补一次兜底。
 const CHROME: &str = r#"(function(){
   if (window.__hgBrowserChrome) return; window.__hgBrowserChrome = true;
   function fitViewport(){
-    var m = document.querySelector('meta[name="viewport"]');
+    var head = document.head;
+    var m = head ? head.querySelector('meta[name="viewport"]') : document.querySelector('meta[name="viewport"]');
     if (m) {
       var c = m.getAttribute('content') || '';
       if (c.indexOf('viewport-fit') === -1) m.setAttribute('content', c ? c + ', viewport-fit=cover' : 'viewport-fit=cover');
-    } else {
-      var n = document.createElement('meta');
-      n.setAttribute('name', 'viewport');
-      n.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover');
-      (document.head || document.documentElement).appendChild(n);
+      if (head && m.parentNode !== head) head.insertBefore(m, head.firstChild);
+      return;
     }
+    var n = document.createElement('meta');
+    n.setAttribute('name', 'viewport');
+    n.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover');
+    if (head) head.insertBefore(n, head.firstChild);
+    else if (document.documentElement) document.documentElement.appendChild(n);
   }
   function bar(){
     fitViewport();
@@ -52,6 +57,10 @@ const CHROME: &str = r#"(function(){
     document.documentElement.appendChild(b);
   }
   fitViewport();
+  if (!document.head && window.MutationObserver && document.documentElement) {
+    var mo = new MutationObserver(function(){ if (document.head) { try { mo.disconnect(); } catch (e) {} fitViewport(); } });
+    mo.observe(document.documentElement, {childList: true});
+  }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bar); else bar();
 })();"#;
 
