@@ -4,7 +4,7 @@ import { pluginError } from "../plugins/client";
 import { BrowseFrame, CategoryOverview, Notice, type OpenMedia } from "../plugins/BrowsePages";
 import { usePluginRequests } from "../plugins/usePluginRequests";
 import { openWebhome } from "../plugins/webhome";
-import { IChevR } from "../icons";
+import { ICheck, IChevR } from "../icons";
 
 const CAT_STATUS_LABEL: Record<string, string> = { failed: "运行失败", incompatible: "不兼容" };
 
@@ -49,11 +49,11 @@ export default function WebHomeSources({ manage, open }: { manage: () => void; o
                 <button key={p.meta.id} className="refined-source-row" style={{ width: "100%", textAlign: "left", opacity: ready ? undefined : 0.45 }}
                   disabled={!ready || opening !== ""} onClick={() => openHome(p.meta.id)} aria-label={p.meta.name}>
                   <span className="refined-glyph">{p.meta.name.slice(0, 1)}</span>
+                  {opened === p.meta.id && <ICheck size={18} className="refined-source-picked" />}
                   <span>
                     <strong>{p.meta.name}</strong>
                     <small>v{p.meta.version}{!p.enabled ? " · 未启用" : p.status !== "ready" ? " · 未就绪" : ""}</small>
                   </span>
-                  {opened === p.meta.id && <span className="refined-source-check">当前打开</span>}
                 </button>
               );
             })}

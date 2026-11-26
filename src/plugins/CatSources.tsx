@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { IClose } from "../icons";
+import { registerBackHandler } from "../back";
 import { pluginError } from "./client";
 import { useHost } from "./HostContext";
 import type { Category } from "./protocol";
@@ -12,6 +14,47 @@ interface CatSourceRecord {
 interface CatList { node: { running: boolean; version?: string }; sources: CatSourceRecord[] }
 const catStatuses: Record<string, string> = { ready: "运行中", unloaded: "待加载", failed: "运行失败", incompatible: "不兼容", disabled: "已停用" };
 
+const pickZip = async () => {
+  const paths = await invoke<string[]>("pick_cat_zip");
+  return paths[0];
+};
+
+// 二级导入框：点“导入 ZIP”先弹这个框，上面填名称、下面点“本地带入 ZIP”
+// 只选文件（选好后按钮上显示文件名，可再点换一个）；最下面是取消/保存，
+// 点保存才用选好的文件 + 框里的名字调 cat.import_zip，点取消放弃导入。
+// 样式与结构复用代理设置的 hg-proxy-dialog（原生 <dialog> + showModal）。
+function ZipImportDialog({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
+  const request = usePluginRequests();
+  const ref = useRef<HTMLDialogElement>(null), pending = useRef(false);
+  const [zipName, setZipName] = useState("");
+  const [zipPath, setZipPath] = useState("");
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const close = () => { if (!pending.current) onClose(); };
+  useEffect(() => { ref.current!.showModal(); const un = registerBackHandler(() => { close(); return true; }); return () => { un(); }; }, []);
+  const pickFile = async () => {
+    if (pending.current) return;
+    const path = await pickZip();
+    if (!path) return; // 取消文件选择，什么都不变
+    setZipPath(path); setError("");
+  };
+  const save = async () => {
+    if (pending.current || !zipPath) return;
+    pending.current = true; setBusy(true); setError("");
+    try {
+      await request("cat.import_zip", { path: zipPath, name: zipName.trim() });
+      onImported();
+    } catch (e) { setError(pluginError(e)); } finally { pending.current = false; setBusy(false); }
+  };
+  const fileName = zipPath.split(/[\\/]/).pop() ?? "";
+  return <dialog className="hg-proxy-dialog" ref={ref} aria-labelledby="zip-import-title" onCancel={e => { e.preventDefault(); close(); }} onClick={e => { if (e.target === e.currentTarget) close(); }}>
+    <header><h2 id="zip-import-title">导入 ZIP</h2><button aria-label="关闭导入" disabled={busy} onClick={close}><IClose size={20} /></button></header>
+    <label>源名称<input aria-label="猫源名称" placeholder="源名称（可选，不填用默认名）" value={zipName} maxLength={60} disabled={busy} onChange={e => setZipName(e.target.value)} /></label>
+    <button className="hg-proxy-pick" aria-label="本地带入 ZIP" disabled={busy} onClick={() => void pickFile()}>{fileName || "本地带入 ZIP"}</button>
+    {error && <p role="alert" className="hg-proxy-error">{error}</p>}
+    <footer><button disabled={busy} onClick={close}>取消</button><button className="hg-watch-action" disabled={busy || !zipPath} onClick={() => void save()}>{busy ? "正在导入…" : "保存"}</button></footer>
+  </dialog>;
+}
+
 export default function CatSources({ reload }: { reload: () => Promise<void> }) {
   const request = usePluginRequests();
   const host = useHost();
@@ -21,6 +64,7 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [zipOpen, setZipOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null), [renameName, setRenameName] = useState("");
   const [logsId, setLogsId] = useState<string | null>(null), [logs, setLogs] = useState<unknown[]>([]);
   const showLogs = (id: string) => {
@@ -40,10 +84,6 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
       if (refresh) { await load(); await reload(); }
       if (message) setNotice(message);
     } catch (e) { setError(pluginError(e)); } finally { setBusy(false); }
-  };
-  const pickZip = async () => {
-    const paths = await invoke<string[]>("pick_cat_zip");
-    return paths[0];
   };
   // 配置中心：猫源的配置站（/home 只回一个 URL 分类）在分类页摘掉后无处可点，
   // 这里按需找出来打开。配置站的站点 key 含 baseset 或名字含“配置”；找不到就报没有。
@@ -69,7 +109,8 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
         <input aria-label="猫源订阅地址" placeholder="订阅 URL，如 https://…/index.js.md5" value={url} onChange={e => setUrl(e.target.value)} />
         <button disabled={busy || !url.trim()}>添加订阅</button>
       </form>
-      <div className="hpp-distribution-buttons"><button disabled={busy} onClick={() => void run(async () => { const path = await pickZip(); if (!path) return; await request("cat.import_zip", { path, name: name.trim() }); setName(""); return "猫源已添加"; })}>导入 ZIP</button></div>
+      <div className="hpp-distribution-buttons"><button disabled={busy} onClick={() => setZipOpen(true)}>导入 ZIP</button></div>
+      {zipOpen && <ZipImportDialog onClose={() => setZipOpen(false)} onImported={() => { setZipOpen(false); void run(async () => "猫源已添加"); }} />}
     </section>
     <section className="hpp-subscriptions" aria-label="已添加的猫源"><div className="hpp-section-title"><h2>已添加的猫源</h2><span>{sources.length} 个</span></div>
       {sources.length ? sources.map(s => {

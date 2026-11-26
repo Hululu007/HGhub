@@ -27,7 +27,14 @@ let package = Package(
       targets: ["NativePlugins"])
   ],
   dependencies: [
-    .package(name: "Tauri", path: "../.tauri/tauri-api")
+    .package(name: "Tauri", path: "../.tauri/tauri-api"),
+    // mpv 软解（LGPL 版产品 `MPVKit`；GPL 版产品 `MPVKit-GPL` 含 Samba，
+    // 与 HGhub 的 PolyForm Noncommercial 冲突，不要用）。
+    // 钉 0.40.0 exact：0.41.0 起最低 iOS 14.0，1.x 起 iOS 15.0，
+    // 本包与应用目前都是 iOS 13.0 底线；升版要先定 iOS floor 再说。
+    // 注意 MPVKit 只提供 libmpv/FFmpeg 的 XCFramework，没有 Swift
+    // 播放器类——引擎直接调 libmpv C API（见 engines/MPVEngine.swift）。
+    .package(url: "https://github.com/mpvkit/MPVKit.git", exact: "0.40.0")
   ],
   targets: [
     // Targets are the basic building blocks of a package. A target can define a module or a test suite.
@@ -35,7 +42,8 @@ let package = Package(
     .target(
       name: "NativePlugins",
       dependencies: [
-        .byName(name: "Tauri")
+        .byName(name: "Tauri"),
+        .product(name: "MPVKit", package: "MPVKit")
       ],
       path: "Sources")
   ]

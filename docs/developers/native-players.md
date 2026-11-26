@@ -78,16 +78,27 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
 | AVPlayer | H.264/HEVC + MP4/HLS | 系统自带，无许可证问题 | 零依赖，`AVPlayerViewController` 全屏 | 不吃 MKV/FLV/WebM/VP9/AV1，不支持 DASH，ASS 只能走 HLS 内嵌字幕 |
 | MDK | FFmpeg 底，格式宽，ASS 需可选 `ass.framework` | key 制：开源 / 非商业免费，找作者申请 key；无 key 且 SDK 过期时最后一帧可能出现二维码水印 | CocoaPods `pod 'mdk'` 或 SPM `swift-mdk` | key 要另外申请；`setDecoders` 目前配 `VT / FFmpeg / dav1d` |
 | KSPlayer | AVPlayer + FFmpeg，HDR / Dolby Vision / Atmos 好 | **默认 GPL-3.0，要求开源自家代码**；HGhub 是 PolyForm Noncommercial，**不能直接按 GPL 发行**；完整格式 / 全量 ASS / AV1 硬解 / FFmpeg 8.1 在付费 LGPL 版（联系 kingslay@icloud.com），免费 GPL 版是 FFmpeg 6.1.0 且功能受限 | SPM `kingslay/KSPlayer`，`KSOptions.secondPlayerType = KSMEPlayer.self` 切 FFmpeg 路 | 没拿到付费 LGPL 之前不要用它发正式包 |
-| mpv（libmpv） | 格式 / ASS 最强 | 选 MPVKit 的 LGPL 版；GPL 版含 Samba 等 GPL 组件，发行口径与 PolyForm Noncommercial 冲突 | 无官方现成 iOS 包：要在 Mac 上编 `Libmpv.xcframework`（FFmpeg、libass、libplacebo、dav1d 整条链），不能从 Linux 交叉编；或用 `mpvkit/MPVKit` SPM（LGPL 版） | 最难编，包体最大 |
+| mpv（libmpv） | 格式 / ASS 最强 | 选 MPVKit 的 LGPL 版；GPL 版含 Samba 等 GPL 组件，发行口径与 PolyForm Noncommercial 冲突 | 已接：`src-tauri/ios/Package.swift` 里 SPM `mpvkit/MPVKit` 钉 `0.40.0` exact（LGPL 版产品 `MPVKit`）。0.41.0 起最低 iOS 14.0，1.x 起 iOS 15.0，本包与应用目前都是 iOS 13.0 底线，升版要先定 iOS floor。MPVKit 只提供 libmpv/FFmpeg 的 XCFramework，没有 Swift 播放器类——引擎直接调 libmpv C API（`import Libmpv`），渲染走 Demo 同款 CAMetalLayer + gpu-next/vulkan/moltenvk + hwdec=videotoolbox | 最难编，包体最大；Metal 渲染在 mpv 里还是补丁支持，非官方正式支持 |
 
 当前实现状态：
 
 - **AVPlayer 已完整实现**：`engines/AVPlayerEngine.swift`，起播、续播、进度观察、
   结束 / 失败回调、Done 关闭回传都有。
-- **MDK / KSPlayer / mpv 是 `canImport` 守卫**：依赖装了走 `#if` 分支的真实调用，
+- **MDK / KSPlayer 是 `canImport` 守卫**：依赖装了走 `#if` 分支的真实调用，
   没装走 `#else` 分支——`open` 直接失败，报错里写清缺哪个依赖、怎么装，
   不留“能打开但播不了”的空实现。`#if` 分支里的方法名是按各家 README 所写，
   第一次在 Mac 上编时以接入的依赖版本为准在构建时校验（见下）。
+- **mpv 已接线（依赖已声明，引擎已按 libmpv C API 写好，尚未编译验证）**：
+  `Package.swift` 里 MPVKit `0.40.0` exact（LGPL 版产品 `MPVKit`），
+  `engines/MPVEngine.swift` 的 `#if` 分支是 `import Libmpv` 直接调 C API
+  （`mpv_create` / `mpv_initialize` / `loadfile` / `seek` / `pause` /
+  `speed` / `volume` / `time-pos` / `duration` / `dwidth` / `dheight`，
+  事件走 `mpv_set_wakeup_callback` + `mpv_wait_event` 排空），渲染是
+  Demo 同款 CAMetalLayer + gpu-next/vulkan/moltenvk。注意 MPVKit 包里
+  没有 `MPVPlayer` / `MPVGLView`（那是另一个 libmpv-ios 项目的包），
+  旧代码里按它们写的分支已经删掉。第一次真正的编译检查是下个版本 tag
+  的 CI iOS 构建；真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）
+  要等用户装上试。
 
 ## Mac 验证（按顺序）
 
@@ -169,8 +180,9 @@ bash scripts/build-ios-unsigned.sh 0.0.4
   管理点播时就显示报错横条（v0.0.37 的“播放失败”、v0.0.38 的真实
   报错都是它）；更多菜单的“原生播放”入口同样受影响。修法是一行
   属性 + 一个 serde 往返单元测试（`native_player.rs`）。
-  MDK / KSPlayer / mpv 的 `videoSize` 目前返回 `.zero`（未接各家
+  MDK / KSPlayer 的 `videoSize` 目前返回 `.zero`（未接各家
   的尺寸 API），角标按未知隐藏，等 Mac 上接依赖时再按各家 API 补。
+  mpv 已接 `dwidth` / `dheight`，报真实尺寸。
 - 真机验收时加一项：播 HLS/MP4 看角标是否出现、数值是否与实际
   清晰度一致、3 秒后是否自动消失；切集后角标是否跟着变。
 

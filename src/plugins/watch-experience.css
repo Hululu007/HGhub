@@ -183,7 +183,7 @@
 .hg-proxy-modes button{flex:1;border-radius:24px;min-height:40px;font-size:12px}.hg-proxy-modes button[aria-pressed=true]{background:var(--p-primary);color:var(--p-on-primary)}
 .hg-proxy-dialog label{display:block;font-size:12px;margin-top:12px}.hg-proxy-dialog input{display:block;width:100%;min-height:42px;margin-top:7px;padding:10px;border-radius:10px;background:var(--p-s3);outline-color:var(--p-primary)}
 .hg-proxy-dialog .hg-proxy-error{color:var(--p-primary)}.hg-proxy-reveal{font-size:12px;color:var(--p-primary);margin-top:8px}
-.hg-proxy-dialog footer>button{flex:1;min-height:44px;border-radius:24px;font-size:13px}.hg-proxy-dialog footer>button:first-child{border:1px solid var(--p-s4)}.hg-proxy-dialog button:disabled{opacity:.45}
+.hg-proxy-dialog footer>button{flex:1;min-height:44px;border-radius:24px;font-size:13px}.hg-proxy-dialog footer>button:first-child{border:1px solid var(--p-s4)}.hg-proxy-dialog .hg-proxy-pick{display:block;width:100%;min-height:42px;margin-top:12px;padding:10px;border-radius:10px;background:var(--p-s3);text-align:left;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hg-proxy-dialog button:disabled{opacity:.45}
 .hg-diagnose-report{max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0003;padding:14px;margin-top:13px;font-size:11px;line-height:1.7;border-radius:9px}
 
 /* Player drawers stay above the native landscape video stage. */

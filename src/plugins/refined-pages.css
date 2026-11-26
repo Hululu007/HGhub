@@ -82,6 +82,7 @@
 .refined-source-row strong,.refined-source-row small {display:block;font-size:14px;font-weight:500}
 .refined-source-row small {font-size:12px;color:var(--p-dim);margin-top:3px}
 .refined-source-check {margin-left:auto;color:var(--p-primary)}
+.refined-source-picked {flex:none;color:var(--p-success)}
 .refined-results-toolbar {display:flex;justify-content:space-between;gap:12px;align-items:center;margin:12px 0 20px}
 .refined-view-toggle {display:flex;background:var(--p-s3);padding:3px;border-radius:var(--r-md);flex-shrink:0}
 .refined-view-toggle button {padding:5px 12px;font-size:12px;border-radius:var(--r-sm);color:var(--p-mut)}
@@ -107,6 +108,7 @@
 .hpp-category-sites strong,.hpp-category-sites small {display:block;font-weight:500;text-align:center}
 .hpp-category-sites small {display:none}
 .hpp-category-sites button svg {display:none}
+.hpp-category-sites button svg.hpp-site-check {display:block;flex:none;color:var(--p-success)}
 .hpp-category-sites button.hpp-category-sites-toggle {grid-column:1/-1;justify-content:space-between;text-align:left;background:var(--p-s1);padding:8px 14px}
 .hpp-category-sites button.hpp-category-sites-toggle strong,.hpp-category-sites button.hpp-category-sites-toggle small {text-align:left}
 .hpp-category-sites button.hpp-category-sites-toggle small {display:block;color:var(--p-dim);font-size:12px}

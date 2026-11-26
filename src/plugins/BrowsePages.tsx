@@ -1,5 +1,5 @@
 import { isMobile } from "../environment";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useHost } from "./HostContext";
 import { pluginError, type InstalledPlugin } from "./client";
@@ -10,7 +10,7 @@ import type { OpenSection } from "./SectionPage";
 import { mergeSearch, type SearchHit } from "./searchModel";
 import { PageLoadMore, usePagedPlugin } from "./usePagedPlugin";
 import SearchPosters from "./SearchPosters";
-import { CAT_ICONS, IGrid, IChevR, IBack, ISearch, IClose, ISettings, IFireF, IFilter } from "../icons";
+import { CAT_ICONS, IGrid, IChevR, IBack, ISearch, IClose, ISettings, IFireF, IFilter, ICheck } from "../icons";
 
 // Cache fulfilled metadata only. A view owns its in-flight request and may cancel it.
 const categoryTrees = new Map<string, { revision: string; tree: Category[] }>();
@@ -134,13 +134,21 @@ function CategorySourceTree({groups,selectedId,select}:{groups:{title:string;ite
 }
 export function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia}) {
   const request=usePluginRequests(),[tree,setTree]=useState<Category[]>([]),[selected,setSelected]=useState<Category|null>(null),[error,setError]=useState(""),[busy,setBusy]=useState(true),[attempt,setAttempt]=useState(0),[sitesOpen,setSitesOpen]=useState(false);
-  useEffect(()=>{let live=true;setBusy(true);setError("");const cached=categoryTrees.get(plugin.meta.id);const load=cached?.revision===plugin.revision?Promise.resolve(cached.tree):request<Category[]>("call",{id:plugin.meta.id,method:"catalog.getCategories",args:plugin.meta.runtime==="cat"?{shallow:true}:{}});void load.then(tree=>{if(live){categoryTrees.set(plugin.meta.id,{revision:plugin.revision,tree});setTree(tree);if(tree.length===1&&Array.isArray(tree[0].children))setSelected(tree[0]);}}).catch(e=>{if(live)setError(pluginError(e));}).finally(()=>{if(live)setBusy(false);});return()=>{live=false;request.cancelAll();};},[plugin.meta.id,plugin.revision,attempt,request]);
+  // 最后选的站：返回列表时 selected 已清，√ 靠这个 id 留在站名前面。
+  const [pickedId,setPickedId]=useState("");
+  // 进站前记下资源列表的滚动位置，返回时恢复：列表与分类详情共用
+  // 页级 .hpp-scroll，进站时详情初渲染只有骨架，内容一塌，浏览器
+  // 会把 scrollTop 钳到 0，不记就回不到原位。
+  const savedListScroll=useRef<number|null>(null);
+  const layoutRef=useRef<HTMLDivElement|null>(null);
+  const listScrollBox=()=>layoutRef.current?.closest(".hpp-scroll") as HTMLElement|null;
+  useEffect(()=>{let live=true;setBusy(true);setError("");const cached=categoryTrees.get(plugin.meta.id);const load=cached?.revision===plugin.revision?Promise.resolve(cached.tree):request<Category[]>("call",{id:plugin.meta.id,method:"catalog.getCategories",args:plugin.meta.runtime==="cat"?{shallow:true}:{}});void load.then(tree=>{if(live){categoryTrees.set(plugin.meta.id,{revision:plugin.revision,tree});setTree(tree);if(tree.length===1&&Array.isArray(tree[0].children)){setSelected(tree[0]);setPickedId(tree[0].id);}}}).catch(e=>{if(live)setError(pluginError(e));}).finally(()=>{if(live)setBusy(false);});return()=>{live=false;request.cancelAll();};},[plugin.meta.id,plugin.revision,attempt,request]);
   // 顶层节点带子节点时（猫源按站分组后的站节点），概览不再把所有子分类
   // 的预览一次全拉出来：先选资源，切到某个资源后它的分类才出来。
   // 手机端左侧目录是隐藏的，所以在内容区放一份资源列表；桌面端用左侧目录。
   // 站节点以 children 字段在不在区分（浅层列表里 children 是空数组）。
   const hasParents=tree.some(c=>Array.isArray(c.children));
-  const pickEntry=(c:Category)=>{const url=categoryUrl(c);if(url){openCategoryUrl(url);return;}const kids=c.children??[];if(kids.length===1){const childUrl=categoryUrl(kids[0]);if(childUrl){openCategoryUrl(childUrl);return;}}setSelected(c);};
+  const pickEntry=(c:Category)=>{const url=categoryUrl(c);if(url){openCategoryUrl(url);return;}const kids=c.children??[];if(kids.length===1){const childUrl=categoryUrl(kids[0]);if(childUrl){openCategoryUrl(childUrl);return;}}savedListScroll.current=listScrollBox()?.scrollTop ?? null;setPickedId(c.id);setSelected(c);};
   // 进入资源分类页后，右滑返回资源列表。只在已选资源时启用；不限从左边缘
   // 起手（分类详情里没有横向滚动的内容，不会误触）；横向占主导就触发，
   // 不要求竖向几乎不动——拇指右滑常带一点下弧。
@@ -158,7 +166,6 @@ export function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:Open
   // 真凶是布局 div 的 touch-action: pan-y：浏览器见横向手势不在允许方向，
   // 直接截断触摸序列（且不发 touchcancel）。改为 pan-x pan-y，让横向
   // touchmove 也到 JS，由 preventDefault 判定；竖滑仍不拦，照常滚动。
-  const layoutRef=useRef<HTMLDivElement|null>(null);
   const swipe=useRef<{x:number;y:number;t:number;done:boolean;mx:number;my:number}|null>(null);
   const selectedRef=useRef(selected);
   useEffect(()=>{selectedRef.current=selected;});
@@ -175,7 +182,11 @@ export function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:Open
     el.addEventListener('touchcancel',onCancel);
     return()=>{el.removeEventListener('touchstart',onStart);el.removeEventListener('touchmove',onMove);el.removeEventListener('touchend',onEnd);el.removeEventListener('touchcancel',onCancel);};
   },[]);
-  const content=selected?<><button className="hpp-back" onClick={()=>setSelected(null)}><IBack size={17}/>全部分类</button><h2>{selected.label}</h2><CategorySource key={selected.id} plugin={plugin} open={open} initialCategory={selected.id} siteKey={Array.isArray(selected.children)?selected.id:undefined}/></>:<><Notice error={error}/>{error&&<button onClick={()=>setAttempt(v=>v+1)}>重试分类</button>}{busy?<div className="hpp-skeleton" aria-label="正在加载分类"/>:hasParents?<>{isMobile?<div className="hpp-category-sites" aria-label="选择资源"><button className="hpp-category-sites-toggle" aria-expanded={sitesOpen} onClick={()=>setSitesOpen(v=>!v)}><span><strong>选择资源</strong><small>{tree.length} 个资源</small></span><IChevR size={14}/></button>{sitesOpen&&tree.map(site=><button key={site.id} onClick={()=>pickEntry(site)}><span><strong>{site.label}</strong><small>{site.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</div>:<p className="hpp-muted">从左侧分类目录选择一个资源，查看它的分类。</p>}</>:tree.map(category=><CategoryPreview key={category.id} plugin={plugin} category={category} open={open} all={()=>pickEntry(category)}/>)}{!busy&&!error&&!tree.length&&<div className="hpp-empty"><IGrid size={36}/><h2>这里还没有分类</h2><p>片源暂未提供分类内容。</p></div>}{!!tree.length&&<p className="hpp-end-note">— 已展示全部分类 —</p>}</>;
+  // 返回资源列表时回到进站前滑到的位置（“全部分类”按钮、右滑返回、
+  // 桌面目录“全部概览”都走 setSelected(null)，这里一次全接住）。
+  // 用 layout effect 在绘制前恢复，不闪一下顶部。
+  useLayoutEffect(()=>{if(selected!==null||savedListScroll.current===null)return;const el=listScrollBox();if(el)el.scrollTop=savedListScroll.current;savedListScroll.current=null;},[selected]);
+  const content=selected?<><button className="hpp-back" onClick={()=>setSelected(null)}><IBack size={17}/>全部分类</button><h2>{selected.label}</h2><CategorySource key={selected.id} plugin={plugin} open={open} initialCategory={selected.id} siteKey={Array.isArray(selected.children)?selected.id:undefined}/></>:<><Notice error={error}/>{error&&<button onClick={()=>setAttempt(v=>v+1)}>重试分类</button>}{busy?<div className="hpp-skeleton" aria-label="正在加载分类"/>:hasParents?<>{isMobile?<div className="hpp-category-sites" aria-label="选择资源"><button className="hpp-category-sites-toggle" aria-expanded={sitesOpen} onClick={()=>setSitesOpen(v=>!v)}><span><strong>选择资源</strong><small>{tree.length} 个资源</small></span><IChevR size={14}/></button>{sitesOpen&&tree.map(site=><button key={site.id} onClick={()=>pickEntry(site)}>{pickedId===site.id&&<ICheck size={16} className="hpp-site-check"/>}<span><strong>{site.label}</strong><small>{site.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</div>:<p className="hpp-muted">从左侧分类目录选择一个资源，查看它的分类。</p>}</>:tree.map(category=><CategoryPreview key={category.id} plugin={plugin} category={category} open={open} all={()=>pickEntry(category)}/>)}{!busy&&!error&&!tree.length&&<div className="hpp-empty"><IGrid size={36}/><h2>这里还没有分类</h2><p>片源暂未提供分类内容。</p></div>}{!!tree.length&&<p className="hpp-end-note">— 已展示全部分类 —</p>}</>;
   return <div ref={layoutRef} className="refined-category-layout" style={{touchAction:"pan-x pan-y"}}><aside className="refined-category-directory"><h2>分类目录</h2><nav aria-label="分类目录"><button aria-pressed={!selected} onClick={()=>setSelected(null)}><IGrid size={18}/>全部概览</button>{tree.map(c=><button key={c.id} aria-pressed={selected?.id===c.id} onClick={()=>pickEntry(c)}><span><strong>{c.label}</strong><small>{c.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</nav></aside><div className="refined-category-results">{content}</div></div>;
 }
 function CategoryPreview({plugin,category,open,all}:{plugin:InstalledPlugin;category:Category;open:OpenMedia;all:()=>void}) {
