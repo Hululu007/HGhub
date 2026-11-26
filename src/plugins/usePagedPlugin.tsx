@@ -25,7 +25,11 @@ export function usePagedPlugin<T extends { id: string }>({ plugin, method, args 
       const items = [...oldItems, ...result.items.filter(item => { if (ids.has(item.id)) return false; ids.add(item.id); return true; })];
       const repeated = result.next !== undefined && result.next !== null && consumed.current.has(result.next);
       if (repeated) setWarning("来源返回了重复分页游标，已停止继续加载。");
-      current.current = { ...result, items, next: repeated ? null : result.next }; setPage(current.current);
+      // 空页也截断：源称还有下一页、但这页一个新条目都没给时，自动翻页
+      // 会一页接一页空转下去（分类页“正在加载…”闪个不停）；有下一页
+      // 的说法不可信时，以实际到货为准，下一页游标作废。
+      const exhausted = items.length === oldItems.length;
+      current.current = { ...result, items, next: repeated || exhausted ? null : result.next }; setPage(current.current);
     } catch (e) { if (n === epoch.current && (e as { code?: string }).code !== "CANCELLED") setError(pluginError(e)); }
     finally { if (n === epoch.current) { lock.current = false; setBusy(false); } }
   };

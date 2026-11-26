@@ -6,7 +6,7 @@ import { usePluginRequests } from "../plugins/usePluginRequests";
 import { openWebhome } from "../plugins/webhome";
 import { IChevR } from "../icons";
 
-const CAT_STATUS_LABEL: Record<string, string> = { failed: "运行失败", disabled: "已停用", incompatible: "不兼容" };
+const CAT_STATUS_LABEL: Record<string, string> = { failed: "运行失败", incompatible: "不兼容" };
 
 /** 底部栏 Node源面板：webhome 分组列出已装的 WebHome 源，点行打开首页，点另一行切换；猫源分组是猫源的资源浏览（与之前分类里的猫源同一套视图：选资源 → 分类 → 资源列表），订阅管理（添加/启停/删除/配置）只在插件中心的“猫源”分栏。 */
 export default function WebHomeSources({ manage, open }: { manage: () => void; open: OpenMedia }) {
@@ -14,7 +14,9 @@ export default function WebHomeSources({ manage, open }: { manage: () => void; o
   const request = usePluginRequests();
   const webhome = sources.filter((p) => p.meta.webhome);
   const cats = sources.filter((p) => p.meta.runtime === "cat" && p.methods.includes("catalog.getCategories"));
-  const catsUnavailable = plugins.filter((p) => p.meta.runtime === "cat" && (p.status === "failed" || p.status === "disabled" || p.status === "incompatible") && !cats.some((a) => a.meta.id === p.meta.id));
+  // 停用的猫源不在这里出现：只在插件中心管理，Node源只列能用的和
+  // 出了问题的（运行失败/不兼容）；停用的连状态块都不留。
+  const catsUnavailable = plugins.filter((p) => p.meta.runtime === "cat" && (p.status === "failed" || p.status === "incompatible") && !cats.some((a) => a.meta.id === p.meta.id));
   const [node, setNode] = useState<{ running: boolean; version?: string } | null>(null);
   useEffect(() => { let live = true; void request<{ node: { running: boolean; version?: string } }>("cat.list").then((r) => { if (live) setNode(r.node); }).catch(() => {}); return () => { live = false; }; }, [request]);
   const [opened, setOpened] = useState("");
