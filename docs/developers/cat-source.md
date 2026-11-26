@@ -652,11 +652,12 @@ HPP 方法面（§3.2）不变；新增 `cat/convert.rs`，把 HPP 方法译成�
 
 ### 7.1 落点：Node源面板为主，插件中心“猫源”分栏保留
 
-猫源订阅管理的主入口是底部栏 **Node源面板**（`src/pages/WebHomeSources.tsx`，
-见 [webhome.md](webhome.md)）：面板分 webhome、猫源两组，猫源组就是下面的
-`CatSources` 组件（Node 运行状态、添加猫源、已添加的猫源列表）。
-插件中心的“猫源”分栏保留，挂的是同一个组件，两处是同一批数据、同一批 IPC，
-状态一致。
+猫源资源浏览的主入口是底部栏 **Node源面板**（`src/pages/WebHomeSources.tsx`，
+见 [webhome.md](webhome.md)）：面板分 webhome、猫源两组，猫源组按猫源分组，
+每源先列它的资源站（`catalog.getCategories {shallow:true}`），点站进分类，
+再点分类看资源——与之前分类里的猫源同一套视图（`CategoryOverview`）。
+订阅管理（添加/启停/删除/配置/日志）只在插件中心的“猫源”分栏
+（`CatSources` 组件），不在 Node源面板。
 
 红苹果**没有“站源订阅”这个页**（全仓 grep 无此文案），来源的管理入口是
 插件中心 `src/pages/Plugins.tsx`（标题“插件中心”），已有两个分栏：
@@ -742,10 +743,11 @@ HPP 方法面（§3.2）不变；新增 `cat/convert.rs`，把 HPP 方法译成�
 `docs/plugin-protocol/08-frontend.md` §4）。
 
 猫源配置站是个例外：它的 `/home` 只回一个 class，`type_id` 是 `setting`，
-`type_name` 就是本机 `/website` 地址（端口随每次加载变）。它在 Node源面板
-猫源组的每条后面有“配置中心”按钮：点按直接在应用内浏览器打开配置页
+`type_name` 就是本机 `/website` 地址（端口随每次加载变）。在 Node源面板
+猫源组里点配置站的资源行，会直接在应用内浏览器打开配置页
 （扫码登录、网盘 token 等都在那页里管），不调 `catalog.list`——调了也只
-会拿到扫码配置/点击配置/弹幕服务三张动作卡片，点开详情是空的。
+会拿到扫码配置/点击配置/弹幕服务三张动作卡片，点开详情是空的；
+插件中心“猫源”分栏的每条后面另有“配置中心”按钮，同样打开配置页。
 
 ## 8. WebHome 网盘链走猫源 token 解析（已实现，未真机验证）
 

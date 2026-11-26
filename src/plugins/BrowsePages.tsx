@@ -108,7 +108,7 @@ function CategorySourceTabs({groups,selectedId,select}:{groups:{title:string;ite
   const move=(direction:number)=>strip.current!.scrollBy({left:direction*strip.current!.clientWidth*.8,behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"instant":"smooth"});
   return <div className="category-source-bar" data-overflow={edges.left||edges.right}><button className="category-scroll-arrow" aria-label="向前滚动片源" disabled={!edges.left} onClick={()=>move(-1)}><IBack size={18}/></button>{nav}<button className="category-scroll-arrow" aria-label="向后滚动片源" disabled={!edges.right} onClick={()=>move(1)}><IChevR size={18}/></button></div>;
 }
-function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia}) {
+export function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia}) {
   const request=usePluginRequests(),[tree,setTree]=useState<Category[]>([]),[selected,setSelected]=useState<Category|null>(null),[error,setError]=useState(""),[busy,setBusy]=useState(true),[attempt,setAttempt]=useState(0);
   useEffect(()=>{let live=true;setBusy(true);setError("");const cached=categoryTrees.get(plugin.meta.id);const load=cached?.revision===plugin.revision?Promise.resolve(cached.tree):request<Category[]>("call",{id:plugin.meta.id,method:"catalog.getCategories",args:plugin.meta.runtime==="cat"?{shallow:true}:{}});void load.then(tree=>{if(live){categoryTrees.set(plugin.meta.id,{revision:plugin.revision,tree});setTree(tree);if(tree.length===1&&Array.isArray(tree[0].children))setSelected(tree[0]);}}).catch(e=>{if(live)setError(pluginError(e));}).finally(()=>{if(live)setBusy(false);});return()=>{live=false;request.cancelAll();};},[plugin.meta.id,plugin.revision,attempt,request]);
   // 顶层节点带子节点时（猫源按站分组后的站节点），概览不再把所有子分类
