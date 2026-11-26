@@ -1396,6 +1396,38 @@ impl PluginManager {
         }
     }
 
+    /// 猫源改名：改订阅记录的显示名并置 `custom_name`（检查更新/重新导入
+    /// 不再拿首个站点名覆盖），同步改插件 entry 的显示名（Node源面板的
+    /// 分组标题与搜索来源列表都用它）。记录先落盘，失败时插件不动。
+    pub async fn cat_rename(&self, id: &str, name: &str) -> Result<Value> {
+        let name: String = name.trim().chars().take(60).collect();
+        if name.is_empty() {
+            return Err(PluginError::invalid("源名称不能为空"));
+        }
+        let _mutation = self.mutation.lock().await;
+        let record = self
+            .cat_store
+            .lock()
+            .unwrap()
+            .get(id)
+            .ok_or_else(|| PluginError::invalid("猫源订阅不存在"))?;
+        let plugin = self.get(id).await?;
+        let mut new_record = record.clone();
+        new_record.name = name.clone();
+        new_record.custom_name = true;
+        {
+            let mut store = self.cat_store.lock().unwrap();
+            store.upsert(new_record.clone());
+            store.save()?;
+        }
+        {
+            let mut p = plugin.lock().await;
+            p.entry.meta.name = name;
+        }
+        self.save().await?;
+        Ok(json!({"changed": true, "source": new_record}))
+    }
+
     /// 重新导入 ZIP（仅 ZIP 导入的源，也可用于覆盖同一订阅）：覆盖插件
     /// 目录（新 ZIP 没有 `index.config.js` 时保留旧的配置文件，不删
     /// 用户凭证；有则覆盖）→ 更新记录 → 重新初始化。初始化失败时文件
@@ -2371,6 +2403,51 @@ mod tests {
             .await
             .unwrap();
         assert!(info.meta.allow_insecure_http);
+    }
+
+    #[tokio::test]
+    async fn cat_rename_updates_record_and_plugin_name() {
+        // 改名同时改订阅记录与插件 entry 的显示名，并置 custom_name，
+        // 此后检查更新/重新导入不再拿首个站点名覆盖；空名与不存在的
+        // 订阅报错，什么都不改。
+        let dir = tempfile::tempdir().unwrap();
+        let manager = PluginManager::open(dir.path().into()).unwrap();
+        manager
+            .cat_install(
+                "cat.test",
+                "测试猫源",
+                None,
+                None,
+                b"module.exports = {start(){}, stop(){}};",
+                None,
+                &[],
+            )
+            .await
+            .unwrap();
+        {
+            let mut store = manager.cat_store.lock().unwrap();
+            store.upsert(CatSourceRecord {
+                id: "cat.test".into(),
+                name: "测试猫源".into(),
+                source_type: "zip".into(),
+                url: None,
+                md5: "x".into(),
+                enabled: true,
+                custom_name: false,
+                updated_at: 0,
+            });
+            store.save().unwrap();
+        }
+        let out = manager.cat_rename("cat.test", "  新名字  ").await.unwrap();
+        assert_eq!(out["source"]["name"], "新名字");
+        assert_eq!(out["source"]["customName"], true);
+        let record = manager.cat_store.lock().unwrap().get("cat.test").unwrap();
+        assert_eq!(record.name, "新名字");
+        assert!(record.custom_name);
+        let plugin = manager.get("cat.test").await.unwrap();
+        assert_eq!(plugin.lock().await.entry.meta.name, "新名字");
+        assert!(manager.cat_rename("cat.test", "   ").await.is_err());
+        assert!(manager.cat_rename("cat.missing", "名字").await.is_err());
     }
 
     #[tokio::test]

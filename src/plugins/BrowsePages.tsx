@@ -10,7 +10,7 @@ import type { OpenSection } from "./SectionPage";
 import { mergeSearch, type SearchHit } from "./searchModel";
 import { PageLoadMore, usePagedPlugin } from "./usePagedPlugin";
 import SearchPosters from "./SearchPosters";
-import { CAT_ICONS, IGrid, IChevR, IBack, ISearch, IClose, ISettings, IFireF } from "../icons";
+import { CAT_ICONS, IGrid, IChevR, IBack, ISearch, IClose, ISettings, IFireF, IFilter } from "../icons";
 
 // Cache fulfilled metadata only. A view owns its in-flight request and may cancel it.
 const categoryTrees = new Map<string, { revision: string; tree: Category[] }>();
@@ -77,7 +77,7 @@ export function PluginCategory({open,manage,openContent}:{open:OpenMedia;manage:
   const listed=[...available, ...unavailable];
   const current=listed.find(p=>p.meta.id===selected)||available[0]||unavailable[0];
   const currentSelectable=!!current && available.some(a=>a.meta.id===current.meta.id);
-  return <div className={"hpp-page hpp-category-page refined-page"+(isMobile?" refined-mobile":"")}><header className="shrink-0 px-4 pb-2" style={{paddingTop:"calc(var(--sat,0px) + 14px)"}}><h1 className="text-[24px] font-bold text-on leading-none">分类</h1></header><CategorySourceTabs groups={groups} selectedId={current?.meta.id} select={setSelected}/><div className="hpp-scroll"><div className="hpp-content">
+  return <div className={"hpp-page hpp-category-page refined-page"+(isMobile?" refined-mobile":"")}><header className="shrink-0 px-4 pb-2" style={{paddingTop:"calc(var(--sat,0px) + 14px)"}}><h1 className="text-[24px] font-bold text-on leading-none">分类</h1></header><CategorySourceTree groups={groups} selectedId={current?.meta.id} select={setSelected}/><div className="hpp-scroll"><div className="hpp-content">
     {current && currentSelectable && openContent && <nav className="hpp-content-entries" aria-label="其他内容">{([['recommendations','home.getSections','推荐分区'],['live','live.resolve','直播'],['articles','articles.list','图文'],['feed','feed.list','信息流']] as const).filter(([,method])=>current.methods.includes(method)).map(([kind,,label])=><button key={kind} aria-label={label+" · "+current.meta.name} onClick={()=>openContent(kind,current.meta.id)}><span className="category-entry-icon"><IGrid size={18}/></span><span><strong>{label}</strong><small>{current.meta.name}</small></span><IChevR size={16}/></button>)}</nav>}
     {current?.methods.includes("catalog.getCategories")?<CategoryOverview key={current.meta.id+current.revision} plugin={current} open={open}/>:current&&!currentSelectable?<SourceStatusPanel plugin={current} manage={manage}/>:!current?<EmptySources manage={manage}/>:<p className="hpp-muted">选择上方内容入口开始浏览。</p>}
   </div></div></div>;
@@ -86,30 +86,54 @@ function SourceStatusPanel({plugin,manage}:{plugin:InstalledPlugin;manage:()=>vo
   const label=CATEGORY_STATUS_LABEL[plugin.status as "failed"|"disabled"|"incompatible"] ?? plugin.status;
   return <div className="hpp-empty"><h2>{plugin.meta.name} · {label}</h2>{plugin.status==="disabled"?<p>该源已在插件中心停用，启用后即可在分类里使用。</p>:<p>{plugin.error?pluginError(plugin.error):"加载失败，原因未知。"}</p>}<button className="primary" onClick={manage}>管理插件</button></div>;
 }
-function CategorySourceTabs({groups,selectedId,select}:{groups:{title:string;items:{p:InstalledPlugin;selectable:boolean}[]}[];selectedId?:string;select:(id:string)=>void}) {
-  const strip=useRef<HTMLElement>(null), [edges,setEdges]=useState({left:false,right:false});
-  useEffect(()=>{
-    if(isMobile)return;
-    const el=strip.current!;
-    const measure=()=>setEdges({left:el.scrollLeft>1,right:el.scrollLeft+el.clientWidth<el.scrollWidth-1});
-    const wheel=(event:WheelEvent)=>{
-      if(event.ctrlKey||Math.abs(event.deltaX)>=Math.abs(event.deltaY)||el.scrollWidth<=el.clientWidth)return;
-      event.preventDefault();
-      el.scrollLeft+=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?el.clientWidth:1);
-    };
-    const observer=new ResizeObserver(measure);
-    observer.observe(el);for(const child of el.children)observer.observe(child);
-    el.addEventListener("scroll",measure);el.addEventListener("wheel",wheel,{passive:false});measure();
-    return()=>{observer.disconnect();el.removeEventListener("scroll",measure);el.removeEventListener("wheel",wheel);};
-  },[groups.flatMap(g=>g.items.map(i=>i.p.meta.id)).join("|")]);
-  useEffect(()=>{strip.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView({block:"nearest",inline:"nearest"});},[selectedId]);
-  const nav=<nav ref={strip} className="hpp-provider-tabs" aria-label="分类片源">{groups.flatMap(g=>[<span key={"label-"+g.title} className="category-group-label" aria-hidden="true">{g.title}</span>, ...g.items.map(({p,selectable})=><button aria-label={selectable?p.meta.name:p.meta.name+" · "+(CATEGORY_STATUS_LABEL[p.status as "failed"|"disabled"|"incompatible"] ?? p.status)} aria-pressed={selectedId===p.meta.id} className={(selectedId===p.meta.id?"selected":"")+(selectable?"":" category-source-status")} key={p.meta.id} onClick={()=>select(p.meta.id)}><span className="category-source-glyph" aria-hidden="true">{p.meta.name.slice(0,1)}</span>{p.meta.name}{!selectable && <small className={"hpp-status "+p.status}>{CATEGORY_STATUS_LABEL[p.status as "failed"|"disabled"|"incompatible"] ?? p.status}</small>}</button>)])}</nav>;
-  if(isMobile)return nav;
-  const move=(direction:number)=>strip.current!.scrollBy({left:direction*strip.current!.clientWidth*.8,behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"instant":"smooth"});
-  return <div className="category-source-bar" data-overflow={edges.left||edges.right}><button className="category-scroll-arrow" aria-label="向前滚动片源" disabled={!edges.left} onClick={()=>move(-1)}><IBack size={18}/></button>{nav}<button className="category-scroll-arrow" aria-label="向后滚动片源" disabled={!edges.right} onClick={()=>move(1)}><IChevR size={18}/></button></div>;
+// 分类片源选择器：树状。平时只显示当前插件（点它展开/收起）；右上角
+// 搜索图标展开按名称搜插件，筛选图标只留可用插件。分组点开才出插件。
+function CategorySourceTree({groups,selectedId,select}:{groups:{title:string;items:{p:InstalledPlugin;selectable:boolean}[]}[];selectedId?:string;select:(id:string)=>void}) {
+  const all=groups.flatMap(g=>g.items);
+  const current=all.find(i=>i.p.meta.id===selectedId)?.p;
+  const currentGroup=groups.find(g=>g.items.some(i=>i.p.meta.id===selectedId));
+  const [open,setOpen]=useState(false);
+  const [openGroups,setOpenGroups]=useState<Record<string,boolean>>(()=>currentGroup?{[currentGroup.title]:true}:{});
+  const [showSearch,setShowSearch]=useState(false);
+  const [query,setQuery]=useState("");
+  const [onlyAvailable,setOnlyAvailable]=useState(false);
+  const inputRef=useRef<HTMLInputElement>(null);
+  useEffect(()=>{if(showSearch)inputRef.current?.focus();},[showSearch]);
+  useEffect(()=>{const g=groups.find(g=>g.items.some(i=>i.p.meta.id===selectedId));if(g)setOpenGroups(old=>({...old,[g.title]:true}));},[selectedId]);
+  if(!groups.length)return null;
+  const q=query.trim().toLowerCase();
+  const visible=groups.map(g=>({...g,items:g.items.filter(({p,selectable})=>(!onlyAvailable||selectable)&&(!q||p.meta.name.toLowerCase().includes(q)))})).filter(g=>g.items.length);
+  const searching=!!q;
+  const currentSelectable=!!current&&all.some(i=>i.p.meta.id===current.meta.id&&i.selectable);
+  const currentStatus=!current||currentSelectable?null:(CATEGORY_STATUS_LABEL[current.status as "failed"|"disabled"|"incompatible"] ?? current.status);
+  const pick=(id:string)=>{select(id);setOpen(false);setQuery("");setShowSearch(false);};
+  return <div className="hpp-category-source-tree">
+    <div className="hpp-source-tree-head">
+      <button className="hpp-source-tree-current" aria-expanded={open} onClick={()=>setOpen(v=>!v)}>
+        <span className="category-source-glyph" aria-hidden="true">{current?current.meta.name.slice(0,1):"源"}</span>
+        <span className="hpp-source-tree-current-name">{current?current.meta.name:"选择片源"}</span>
+        {currentStatus&&<small className={"hpp-status "+current?.status}>{currentStatus}</small>}
+        <IChevR size={16} className="hpp-source-tree-chev"/>
+      </button>
+      <div className="hpp-source-tree-tools">
+        <button aria-label="搜索插件" aria-pressed={showSearch} onClick={()=>{setShowSearch(v=>!v);setOpen(true);}}><ISearch size={17}/></button>
+        <button aria-label="只显示可用插件" aria-pressed={onlyAvailable} onClick={()=>setOnlyAvailable(v=>!v)}><IFilter size={17}/></button>
+      </div>
+    </div>
+    {showSearch&&<div className="hpp-source-tree-search"><ISearch size={15}/><input ref={inputRef} aria-label="按名称搜索插件" placeholder="搜索插件名称…" value={query} onChange={e=>setQuery(e.target.value)}/>{query&&<button aria-label="清除搜索" onClick={()=>setQuery("")}><IClose size={13}/></button>}</div>}
+    {open&&<div className="hpp-source-tree-panel">
+      {!visible.length?<p className="hpp-muted">没有找到相关插件</p>:visible.map(g=>{
+        const expanded=searching||!!openGroups[g.title];
+        return <div key={g.title} className="hpp-source-tree-group">
+          <button className="hpp-source-tree-group-row" aria-expanded={expanded} onClick={()=>setOpenGroups(old=>({...old,[g.title]:!old[g.title]}))}><IChevR size={14} className="hpp-source-tree-chev"/><strong>{g.title}</strong><small>{g.items.length} 个</small></button>
+          {expanded&&g.items.map(({p,selectable})=><button key={p.meta.id} aria-pressed={selectedId===p.meta.id} className={"hpp-source-tree-item"+(selectedId===p.meta.id?" selected":"")} onClick={()=>pick(p.meta.id)}><span className="category-source-glyph" aria-hidden="true">{p.meta.name.slice(0,1)}</span><span className="hpp-source-tree-item-name">{p.meta.name}</span>{!selectable&&<small className={"hpp-status "+p.status}>{CATEGORY_STATUS_LABEL[p.status as "failed"|"disabled"|"incompatible"] ?? p.status}</small>}</button>)}
+        </div>;
+      })}
+    </div>}
+  </div>;
 }
 export function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia}) {
-  const request=usePluginRequests(),[tree,setTree]=useState<Category[]>([]),[selected,setSelected]=useState<Category|null>(null),[error,setError]=useState(""),[busy,setBusy]=useState(true),[attempt,setAttempt]=useState(0);
+  const request=usePluginRequests(),[tree,setTree]=useState<Category[]>([]),[selected,setSelected]=useState<Category|null>(null),[error,setError]=useState(""),[busy,setBusy]=useState(true),[attempt,setAttempt]=useState(0),[sitesOpen,setSitesOpen]=useState(false);
   useEffect(()=>{let live=true;setBusy(true);setError("");const cached=categoryTrees.get(plugin.meta.id);const load=cached?.revision===plugin.revision?Promise.resolve(cached.tree):request<Category[]>("call",{id:plugin.meta.id,method:"catalog.getCategories",args:plugin.meta.runtime==="cat"?{shallow:true}:{}});void load.then(tree=>{if(live){categoryTrees.set(plugin.meta.id,{revision:plugin.revision,tree});setTree(tree);if(tree.length===1&&Array.isArray(tree[0].children))setSelected(tree[0]);}}).catch(e=>{if(live)setError(pluginError(e));}).finally(()=>{if(live)setBusy(false);});return()=>{live=false;request.cancelAll();};},[plugin.meta.id,plugin.revision,attempt,request]);
   // 顶层节点带子节点时（猫源按站分组后的站节点），概览不再把所有子分类
   // 的预览一次全拉出来：先选资源，切到某个资源后它的分类才出来。
@@ -151,7 +175,7 @@ export function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:Open
     el.addEventListener('touchcancel',onCancel);
     return()=>{el.removeEventListener('touchstart',onStart);el.removeEventListener('touchmove',onMove);el.removeEventListener('touchend',onEnd);el.removeEventListener('touchcancel',onCancel);};
   },[]);
-  const content=selected?<><button className="hpp-back" onClick={()=>setSelected(null)}><IBack size={17}/>全部分类</button><h2>{selected.label}</h2><CategorySource key={selected.id} plugin={plugin} open={open} initialCategory={selected.id} siteKey={Array.isArray(selected.children)?selected.id:undefined}/></>:<><Notice error={error}/>{error&&<button onClick={()=>setAttempt(v=>v+1)}>重试分类</button>}{busy?<div className="hpp-skeleton" aria-label="正在加载分类"/>:hasParents?<>{isMobile?<div className="hpp-category-sites" aria-label="选择资源"><h2>选择资源</h2>{tree.map(site=><button key={site.id} onClick={()=>pickEntry(site)}><span><strong>{site.label}</strong><small>{site.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</div>:<p className="hpp-muted">从左侧分类目录选择一个资源，查看它的分类。</p>}</>:tree.map(category=><CategoryPreview key={category.id} plugin={plugin} category={category} open={open} all={()=>pickEntry(category)}/>)}{!busy&&!error&&!tree.length&&<div className="hpp-empty"><IGrid size={36}/><h2>这里还没有分类</h2><p>片源暂未提供分类内容。</p></div>}{!!tree.length&&<p className="hpp-end-note">— 已展示全部分类 —</p>}</>;
+  const content=selected?<><button className="hpp-back" onClick={()=>setSelected(null)}><IBack size={17}/>全部分类</button><h2>{selected.label}</h2><CategorySource key={selected.id} plugin={plugin} open={open} initialCategory={selected.id} siteKey={Array.isArray(selected.children)?selected.id:undefined}/></>:<><Notice error={error}/>{error&&<button onClick={()=>setAttempt(v=>v+1)}>重试分类</button>}{busy?<div className="hpp-skeleton" aria-label="正在加载分类"/>:hasParents?<>{isMobile?<div className="hpp-category-sites" aria-label="选择资源"><button className="hpp-category-sites-toggle" aria-expanded={sitesOpen} onClick={()=>setSitesOpen(v=>!v)}><span><strong>选择资源</strong><small>{tree.length} 个资源</small></span><IChevR size={14}/></button>{sitesOpen&&tree.map(site=><button key={site.id} onClick={()=>pickEntry(site)}><span><strong>{site.label}</strong><small>{site.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</div>:<p className="hpp-muted">从左侧分类目录选择一个资源，查看它的分类。</p>}</>:tree.map(category=><CategoryPreview key={category.id} plugin={plugin} category={category} open={open} all={()=>pickEntry(category)}/>)}{!busy&&!error&&!tree.length&&<div className="hpp-empty"><IGrid size={36}/><h2>这里还没有分类</h2><p>片源暂未提供分类内容。</p></div>}{!!tree.length&&<p className="hpp-end-note">— 已展示全部分类 —</p>}</>;
   return <div ref={layoutRef} className="refined-category-layout" style={{touchAction:"pan-x pan-y"}}><aside className="refined-category-directory"><h2>分类目录</h2><nav aria-label="分类目录"><button aria-pressed={!selected} onClick={()=>setSelected(null)}><IGrid size={18}/>全部概览</button>{tree.map(c=><button key={c.id} aria-pressed={selected?.id===c.id} onClick={()=>pickEntry(c)}><span><strong>{c.label}</strong><small>{c.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</nav></aside><div className="refined-category-results">{content}</div></div>;
 }
 function CategoryPreview({plugin,category,open,all}:{plugin:InstalledPlugin;category:Category;open:OpenMedia;all:()=>void}) {

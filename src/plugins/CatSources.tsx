@@ -21,6 +21,7 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null), [renameName, setRenameName] = useState("");
   const [logsId, setLogsId] = useState<string | null>(null), [logs, setLogs] = useState<unknown[]>([]);
   const showLogs = (id: string) => {
     if (logsId === id) { setLogsId(null); setLogs([]); return; }
@@ -74,12 +75,12 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
       {sources.length ? sources.map(s => {
         const plugin = host.plugins.find(p => p.meta.id === s.id);
         const status = s.status || "unloaded";
-        return <div className="hpp-subscription" key={s.id}><div><strong>{s.name}</strong><small>{s.sourceType === "url" ? s.url || "" : "ZIP 导入"}</small><p>{catStatuses[status] || status}{status === "failed" && plugin?.error?.message ? ` · ${plugin.error.message}` : ""}</p></div>
+        return <div className="hpp-subscription" key={s.id}><div>{renamingId === s.id ? <span className="hpp-rename-row"><input aria-label="源名称" value={renameName} maxLength={60} onChange={e => setRenameName(e.target.value)} /><button disabled={busy || !renameName.trim()} onClick={() => void run(async () => { await request("cat.rename", { id: s.id, name: renameName.trim() }); setRenamingId(null); return "已改名"; })}>保存</button><button disabled={busy} onClick={() => setRenamingId(null)}>取消</button></span> : <strong>{s.name}</strong>}<small>{s.sourceType === "url" ? s.url || "" : "ZIP 导入"}</small><p>{catStatuses[status] || status}{status === "failed" && plugin?.error?.message ? ` · ${plugin.error.message}` : ""}</p></div>
           <div className="hpp-distribution-buttons">
             <button className="plugin-enable-switch" role="switch" aria-checked={s.enabled} aria-label={"启用 " + s.name} disabled={busy} onClick={() => void run(async () => { await request("enable", { id: s.id, enabled: !s.enabled }); })}><span /></button>
+            {renamingId !== s.id && <button disabled={busy} onClick={() => { setRenamingId(s.id); setRenameName(s.name); }}>改名</button>}
             {s.sourceType === "url" ? <button disabled={busy} onClick={() => void run(async () => { const result = await request<{ changed: boolean }>("cat.check_update", { id: s.id }); return result.changed ? "已更新到最新版本" : "已是最新版本"; })}>检查更新</button>
               : <button disabled={busy} onClick={() => void run(async () => { const path = await pickZip(); if (!path) return; await request("cat.reimport_zip", { id: s.id, path }); return "已重新导入"; })}>重新导入 ZIP</button>}
-            <button disabled={busy} onClick={() => void run(async () => { const paths = await invoke<string[]>("pick_plugin_files"); if (!paths[0]) return; await request("cat.import_config", { id: s.id, path: paths[0] }); return "配置已导入"; })}>导入配置</button>
             <button disabled={busy} onClick={() => void openConfigCenter(s.id)}>配置中心</button>
             <button disabled={busy} onClick={() => showLogs(s.id)}>{logsId === s.id ? "收起日志" : "运行日志"}</button>
             <button className="danger" disabled={busy} onClick={() => { if (confirmRemove !== s.id) { setConfirmRemove(s.id); return; } setConfirmRemove(null); void run(async () => { await request("remove", { id: s.id }); }); }}>{confirmRemove === s.id ? `确认删除「${s.name}」？` : "删除"}</button>

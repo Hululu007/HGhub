@@ -54,7 +54,7 @@ export default function PluginDistribution({ plugins, reload }: { plugins: Insta
     <section className="hpp-subscriptions" aria-label="插件订阅"><div className="hpp-section-title"><h2>插件订阅</h2><span>{host.updates.subscriptions.length} 个列表</span></div>
       {host.updates.subscriptions.length ? host.updates.subscriptions.map(subscription => <div className="hpp-subscription" key={subscription.id}><div><strong>{subscription.name}</strong><small>{subscription.location}</small>{subscription.description && <p>{subscription.description}</p>}</div>
         <button disabled={busy} onClick={() => void run(async () => { setUpdates([]); setReport([]); replacePreview(await request<Preview>("subscriptions.refresh", { id: subscription.id }), true); })}>刷新订阅 · {subscription.name}</button>
-        <button disabled={busy} onClick={() => void run(async () => { await request("subscriptions.remove", { id: subscription.id }); await host.refreshUpdates(); })}>取消订阅 · {subscription.name}</button></div>) : <p className="hpp-muted">读取远程插件列表后，可将其保存为订阅。刷新后勾选新增插件或更新。</p>}
+        <button disabled={busy} onClick={() => void run(async () => { await request("subscriptions.remove", { id: subscription.id }); await host.refreshUpdates(); })}>取消订阅 · {subscription.name}</button></div>) : <p className="hpp-muted">读取远程插件列表后，可将其保存为订阅。刷新后勾选新增插件或更新。订阅的插件可以是 JSON、py、HTML 格式的文件插件。</p>}
     </section>
     {host.updates.items.length>0&&<section className="hpp-update-queue" aria-label="插件更新队列"><h2>插件更新</h2>{host.updates.items.map(item => <div className="hpp-subscription" key={item.id}><div><strong>{item.name} · v{item.version}</strong><small>{item.error?.message || ({available:"有新版本",deferred:"等待播放结束后安装",installed:"已更新",current:"已是此版本或更高版本",failed:"更新失败，可重新检查或恢复上一版本"})[item.status]}</small></div>
       {["available","deferred"].includes(item.status)&&<button disabled={busy} onClick={() => void run(async () => { await request("updates.install", { ids: [item.id] }); await host.refreshUpdates(); await reload(); })}>安装更新 · {item.name}</button>}
@@ -65,6 +65,7 @@ export default function PluginDistribution({ plugins, reload }: { plugins: Insta
         <input aria-label="插件或列表地址" placeholder="HTTPS 地址或本地 manifest.json 完整路径" value={location} onChange={e => setLocation(e.target.value)} />
         <button disabled={busy || !location.trim()}>读取列表或插件</button>
       </form>
+      <p className="hpp-muted">支持在线导入 JSON、py、HTML 格式的插件文件，或订阅列表。</p>
       <div className="hpp-distribution-buttons"><label className="hpp-check"><input type="checkbox" checked={downgrade} disabled={busy} onChange={e => setDowngrade(e.target.checked)} />允许导入更低版本</label>
         <label className="hpp-check"><input type="checkbox" checked={installOnly} disabled={busy} onChange={e => setInstallOnly(e.target.checked)} />仅安装，暂不启用</label></div>
       {busy && <button onClick={() => request.cancelAll()}>取消当前操作</button>}

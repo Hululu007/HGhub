@@ -80,6 +80,11 @@ pub async fn dispatch(
                 .cat_import_config(text(p, "id")?, text(p, "path")?)
                 .await?
         ),
+        "cat.rename" => json!(
+            manager
+                .cat_rename(text(p, "id")?, text(p, "name")?)
+                .await?
+        ),
         "updates.state" => json!(manager.refresh_update_state().await?),
         "updates.policy.set" => json!(manager.update_policy_set(
             serde_json::from_value(p.clone()).map_err(|_| PluginError::invalid(
