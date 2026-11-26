@@ -98,6 +98,10 @@ pub struct PluginManager {
     /// `node-sidecar.json` 同一目录层级）。
     cat_sources_path: PathBuf,
     cat_store: Mutex<CatStore>,
+    /// 崩溃面包屑落盘接收端（App 的 debug.log）：猫源加载/卸载/调用
+    /// 边界各记一行，崩后重开能从 panic 行前一行看到最后一步。
+    /// 未注入时不记（测试与非 iOS 默认）。
+    crumb_sink: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     plugins: tokio::sync::RwLock<BTreeMap<String, Arc<tokio::sync::Mutex<Installed>>>>,
     mutation: tokio::sync::Mutex<()>,
     strict: Option<bool>,
@@ -109,6 +113,37 @@ pub struct PluginManager {
     pub sessions: crate::media::MediaSessions,
     pub library: crate::library::Library,
 }
+
+/// 面包屑里的猫源调用标签：方法 + 站点 key。只取 id 里 `::` 前的
+/// 站点段：分集 id 后半段可能含分享链接原文，绝不记日志
+/// （cat-source.md §2.8）；无 `::` 的 id 只取前 48 字。
+fn cat_call_label(method: &str, params: &Value, list_category: Option<&str>) -> String {
+    match method {
+        "catalog.list" => format!(
+            "catalog.list {}",
+            list_category
+                .map(|c| c.chars().take(64).collect::<String>())
+                .unwrap_or_else(|| "?".to_string())
+        ),
+        "media.getDetail" | "media.resolvePlayback" => {
+            let key = if method == "media.getDetail" {
+                "id"
+            } else {
+                "episodeId"
+            };
+            let site = params
+                .get(key)
+                .and_then(Value::as_str)
+                .and_then(|s| s.split("::").next())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(48).collect::<String>())
+                .unwrap_or_else(|| "?".to_string());
+            format!("{method} {site}")
+        }
+        _ => method.to_string(),
+    }
+}
+
 impl PluginManager {
     pub fn open(root: PathBuf) -> Result<Self> {
         Self::with_mode(root, None)
@@ -195,6 +230,7 @@ impl PluginManager {
             cat_proxy_bases: Default::default(),
             cat_sources_path,
             cat_store: Mutex::new(cat_store),
+            crumb_sink: None,
             plugins: tokio::sync::RwLock::new(plugins),
             mutation: tokio::sync::Mutex::new(()),
             strict,
@@ -277,6 +313,34 @@ impl PluginManager {
             self.cat_store = Mutex::new(store);
         }
         self
+    }
+
+    /// 注入崩溃面包屑落盘接收端（App 的 debug.log）。只记猫源边界，
+    /// 不记插件日志面板里的行；接收端只管写日志，永不抛错。
+    pub fn with_crumb_sink(mut self, sink: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        self.crumb_sink = Some(sink);
+        self
+    }
+
+    /// 写一行崩溃面包屑；未注入接收端时不做任何事。
+    fn crumb(&self, line: &str) {
+        if let Some(sink) = &self.crumb_sink {
+            sink(line);
+        }
+    }
+
+    /// 停掉旧 worker 并记面包屑（重载/重装前等卸载完成；只有猫源记，
+    /// 其他运行时只停不停、行为与原来一致）。
+    async fn stop_old_worker(&self, id: &str, w: RuntimeWorker) -> Result<()> {
+        let is_cat = matches!(w, RuntimeWorker::Cat(_));
+        if is_cat {
+            self.crumb(&format!("[crumb] cat {id} 卸载开始"));
+        }
+        let r = w.stop_and_wait().await;
+        if is_cat {
+            self.crumb(&format!("[crumb] cat {id} 卸载完成"));
+        }
+        r
     }
     pub async fn configure_media(
         &self,
@@ -466,7 +530,7 @@ impl PluginManager {
             // 猫源：等旧服务的卸载完成再加载新的，否则后台卸载可能落在
             // 新加载之后、把刚起的服务卸掉（同 key）。
             if matches!(w, RuntimeWorker::Cat(_)) {
-                let _ = w.stop_and_wait().await;
+                let _ = self.stop_old_worker(&p.entry.meta.id, w).await;
             } else {
                 w.stop();
             }
@@ -514,6 +578,7 @@ impl PluginManager {
                 None
             };
             let media_caps = self.media_capabilities.lock().unwrap().clone();
+            self.crumb(&format!("[crumb] cat {} 加载开始", p.entry.meta.id));
             let worker = CatWorker::spawn(
                 p.entry.meta.id.clone(),
                 file.to_string_lossy().into_owned(),
@@ -522,7 +587,15 @@ impl PluginManager {
                 &self.node_bootstrap,
                 p.entry.meta.budget("media.getDetail"),
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                self.crumb(&format!(
+                    "[crumb] cat {} 加载失败：{}",
+                    p.entry.meta.id, e.code
+                ));
+                e
+            })?;
+            self.crumb(&format!("[crumb] cat {} 加载完成", p.entry.meta.id));
             // 取流豁免：媒体回环服务取源的 /proxy 回环地址时，严格模式的
             // Network::target 会拦回环；登记服务地址，取流时直取。
             self.register_cat_proxy_base(worker.base_url().to_string());
@@ -808,7 +881,7 @@ impl PluginManager {
         };
         if let Some(old) = old_guard.as_mut() {
             if let Some(w) = old.worker.take() {
-                w.stop_and_wait().await?;
+                self.stop_old_worker(&meta.id, w).await?;
             }
         }
         let mut p = Self::installed(dir.clone(), entry, self.strict, self.cooldown.clone(), self.node_bootstrap.clone())?;
@@ -1040,7 +1113,7 @@ impl PluginManager {
         };
         if let Some(old) = old_guard.as_mut() {
             if let Some(w) = old.worker.take() {
-                w.stop_and_wait().await?;
+                self.stop_old_worker(id, w).await?;
             }
         }
         let mut p = Self::installed(
@@ -1444,6 +1517,13 @@ impl PluginManager {
         } else {
             None
         };
+        let is_cat = matches!(w, RuntimeWorker::Cat(_));
+        let cat_label =
+            is_cat.then(|| cat_call_label(method, &params.json(), cat_list_category.as_deref()));
+        let started = std::time::Instant::now();
+        if let Some(label) = &cat_label {
+            self.crumb(&format!("[crumb] cat {id} 调用 {label} 开始"));
+        }
         let result = w
             .call_scoped(
                 request_id.clone(),
@@ -1452,13 +1532,22 @@ impl PluginManager {
                 meta.budget(method),
                 user_auth && method == "auth.submit",
             )
-            .await
-            .map_err(|mut e| {
-                if matches!(e.code.as_str(), "AUTH_REQUIRED" | "AUTH_EXPIRED") {
-                    e.plugin_id = Some(id.into());
-                }
-                e
-            })?;
+            .await;
+        if let Some(label) = &cat_label {
+            match &result {
+                Ok(_) => self.crumb(&format!(
+                    "[crumb] cat {id} 调用 {label} 完成（{}ms）",
+                    started.elapsed().as_millis()
+                )),
+                Err(e) => self.crumb(&format!("[crumb] cat {id} 调用 {label} 失败：{}", e.code)),
+            }
+        }
+        let result = result.map_err(|mut e| {
+            if matches!(e.code.as_str(), "AUTH_REQUIRED" | "AUTH_EXPIRED") {
+                e.plugin_id = Some(id.into());
+            }
+            e
+        })?;
         if method == "transformResource" {
             result.validate(8 * 1024 * 1024)?;
             return Ok(result);
@@ -2375,6 +2464,103 @@ mod tests {
         assert!(manager.is_trusted_loopback_url(&proxy_url));
         assert!(!manager.is_trusted_loopback_url("http://127.0.0.1:1/proxy/x"));
         assert!(!manager.is_trusted_loopback_url("http://127.0.0.1:9999/proxy/x"));
+        sidecar_server.abort();
+    }
+
+    #[test]
+    fn cat_call_label_keeps_only_the_site_segment() {
+        // 列表：分类 id 全记（站点::分类，都是短 id）。
+        assert_eq!(
+            cat_call_label(
+                "catalog.list",
+                &json!({"categoryId": "nodejs_douban::1"}),
+                Some("nodejs_douban::1")
+            ),
+            "catalog.list nodejs_douban::1"
+        );
+        // 详情：只记 `::` 前的站点段，分集 id 后半段（可能含分享链接原文）绝不出现。
+        assert_eq!(
+            cat_call_label(
+                "media.getDetail",
+                &json!({"id": "nodejs_mypan::pan@@@115@@@0"}),
+                None
+            ),
+            "media.getDetail nodejs_mypan"
+        );
+        // 点播：episodeId 同理。
+        assert_eq!(
+            cat_call_label(
+                "media.resolvePlayback",
+                &json!({"episodeId": "nodejs_douban::https://example.invalid/share/abc"}),
+                None
+            ),
+            "media.resolvePlayback nodejs_douban"
+        );
+        // 其他方法只记方法名，不记参数（搜索词、URL 都不进日志）。
+        assert_eq!(
+            cat_call_label("media.search", &json!({"keyword": "齐天圣瞳"}), None),
+            "media.search"
+        );
+        // 无 id 时不崩，只记方法。
+        assert_eq!(
+            cat_call_label("media.getDetail", &json!({}), None),
+            "media.getDetail ?"
+        );
+    }
+
+    #[tokio::test]
+    async fn cat_crumb_sink_records_load_and_call() {
+        // 面包屑接收端记下每一行：一次分类调用应留下加载开始/完成
+        // 与调用开始/完成四行，崩后重开能从 panic 行前一行看到最后一步。
+        let crumbs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_crumbs = crumbs.clone();
+        let cat_server = serve_mock_cat_service().await;
+        let sidecar = Arc::new(MockCatSidecar {
+            cat_base: Mutex::new(cat_server.base.clone()),
+            loads: Mutex::new(0),
+            unloads: Mutex::new(0),
+        });
+        let (sidecar_base, sidecar_server) = serve_mock_cat_sidecar(sidecar.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_cat_index(root);
+        let manager = PluginManager::open(root.into())
+            .unwrap()
+            .with_node_bootstrap(Arc::new(MockNode { base: sidecar_base }))
+            .with_crumb_sink(Arc::new(move |line: &str| {
+                sink_crumbs.lock().unwrap().push(line.to_string());
+            }));
+        let first = manager
+            .call(
+                "cat.test",
+                "catalog.getCategories",
+                json!({}),
+                "t1".to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first[0]["id"].as_str(), Some("a::hot"));
+        let lines = crumbs.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l == "[crumb] cat cat.test 加载开始"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "[crumb] cat cat.test 加载完成"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "[crumb] cat cat.test 调用 catalog.getCategories 开始"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("[crumb] cat cat.test 调用 catalog.getCategories 完成（")),
+            "{lines:?}"
+        );
         sidecar_server.abort();
     }
 }

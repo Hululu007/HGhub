@@ -307,10 +307,23 @@ impl PluginHost {
                         .unwrap_or_else(|_| self.dir.clone())
                         .join("node-sidecar.json")
                 };
+                // 崩溃面包屑：猫源加载/卸载/调用边界各记一行进 App 的
+                // debug.log（<app_data_dir>/debug.log，设置页运行日志
+                // 读的就是它）；崩后重开，panic 行前一行即最后一步。
+                // 注意 self.dir 是 <app_data_dir>/hpp，不是日志目录。
+                let crumb_dir = {
+                    use tauri::Manager;
+                    app.path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| self.dir.clone())
+                };
                 let manager = PluginManager::open(self.dir.clone())?
                     .with_document_reader(Arc::new(PickedDocuments(app.clone())))
                     .with_python_bootstrap(crate::python::python_bootstrap(info_path))
-                    .with_node_bootstrap(crate::node::node_bootstrap(node_info_path));
+                    .with_node_bootstrap(crate::node::node_bootstrap(node_info_path))
+                    .with_crumb_sink(Arc::new(move |line: &str| {
+                        let _ = crate::logging::append_debug(&crumb_dir, line);
+                    }));
                 #[cfg(target_os = "windows")]
                 let manager = match crate::windows_login::WindowsLogin::detect() {
                     Some(provider) => manager.with_web_login(Arc::new(provider)),
