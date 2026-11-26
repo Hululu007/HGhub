@@ -179,7 +179,8 @@
   .refined-search .legacy-search-poster>div:last-child {flex:1;min-width:0;padding:4px 0}
   .refined-search .legacy-search-poster>div:first-child>span {font-size:9px;padding:2px}
   .refined-search .legacy-search-poster>div:first-child>span:last-child:not(:first-child) {display:none}
-  .refined-category-layout {display:block}
+  /* 布局 div 盖住 .hpp-content 两侧 16px 留白：从屏幕左缘起手的右滑否则落不到监听上 */
+  .refined-category-layout {display:block;margin:0 -16px;padding:0 16px}
   .refined-category-directory {display:none}
   .refined-page .hpp-content-entries {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:20px}
   .refined-page .hpp-content-entries button {min-width:0;font-size:12px;padding:10px;text-align:left}

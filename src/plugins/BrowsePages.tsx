@@ -57,22 +57,23 @@ function categoryUrl(c: Category): string | null {
 function openCategoryUrl(url: string) {
   void invoke("browser_open", { url }).catch(() => {});
 }
-// 分类片源按类型归类（与插件中心“已安装”分组同一口径，见 src/pages/Plugins.tsx）；
-// 猫源单列一组。顺序按用户说法：插件、Python、HTML、猫源。
-type CategoryGroupKey = "plugin" | "python" | "html" | "cat";
-const CATEGORY_GROUP_TITLE: Record<CategoryGroupKey, string> = { plugin: "插件", python: "Python", html: "HTML", cat: "猫源" };
+// 分类片源按类型归类（与插件中心“已安装”分组同一口径，见 src/pages/Plugins.tsx）。
+// 猫源不进分类：已移到 Node 源面板（底部栏），见 src/pages/WebHomeSources.tsx。
+// 顺序按用户说法：插件、Python、HTML。
+type CategoryGroupKey = "plugin" | "python" | "html";
+const CATEGORY_GROUP_TITLE: Record<CategoryGroupKey, string> = { plugin: "插件", python: "Python", html: "HTML" };
 function categoryGroupOf(p: InstalledPlugin): CategoryGroupKey {
-  if (p.meta.runtime === "cat") return "cat";
   if (p.meta.runtime === "python") return "python";
   if (p.meta.webhome?.localPage) return "html";
   return "plugin";
 }
 export function PluginCategory({open,manage,openContent}:{open:OpenMedia;manage:()=>void;openContent?:(kind:"live"|"articles"|"feed"|"recommendations",pluginId:string)=>void}) {
-  const {sources,plugins}=useHost(),available=sources.filter(p=>["catalog.getCategories","home.getSections","live.resolve","articles.list","feed.list"].some(m=>p.methods.includes(m))),[selected,setSelected]=useState("");
+  const {sources,plugins}=useHost(),available=sources.filter(p=>p.meta.runtime!=="cat"&&["catalog.getCategories","home.getSections","live.resolve","articles.list","feed.list"].some(m=>p.methods.includes(m))),[selected,setSelected]=useState("");
   // 不可用但不应静默消失的内容源：失败/停用/不兼容，带状态列进分组里。
   // 纯 WebHome 页源（只有 homePage）本来就不进分类，不列；待加载（unloaded）无错可报，也不列。
-  const unavailable=plugins.filter(p=>p.meta.kind!=="resolver" && !(p.meta.webhome?.homePage && !p.meta.webhome?.localPage) && (p.status==="failed"||p.status==="disabled"||p.status==="incompatible") && !available.some(a=>a.meta.id===p.meta.id));
-  const groups=(["plugin","python","html","cat"] as const).map(key=>({ key, title: CATEGORY_GROUP_TITLE[key], items: [...available, ...unavailable].filter(p=>categoryGroupOf(p)===key).map(p=>({ p, selectable: available.some(a=>a.meta.id===p.meta.id) })) })).filter(g=>g.items.length);
+  // 猫源也不进分类（已移到 Node 源面板），这里一并排除。
+  const unavailable=plugins.filter(p=>p.meta.runtime!=="cat"&&p.meta.kind!=="resolver" && !(p.meta.webhome?.homePage && !p.meta.webhome?.localPage) && (p.status==="failed"||p.status==="disabled"||p.status==="incompatible") && !available.some(a=>a.meta.id===p.meta.id));
+  const groups=(["plugin","python","html"] as const).map(key=>({ key, title: CATEGORY_GROUP_TITLE[key], items: [...available, ...unavailable].filter(p=>categoryGroupOf(p)===key).map(p=>({ p, selectable: available.some(a=>a.meta.id===p.meta.id) })) })).filter(g=>g.items.length);
   const listed=[...available, ...unavailable];
   const current=listed.find(p=>p.meta.id===selected)||available[0]||unavailable[0];
   const currentSelectable=!!current && available.some(a=>a.meta.id===current.meta.id);
@@ -123,7 +124,11 @@ function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia})
   // React 的触摸回调是被动的（passive），调 preventDefault 无效，浏览器在起手后
   // 几 px 内就把手势接管去纵滑，touchmove 再也不到 JS。所以改原生监听：
   // touchmove 用 {passive:false}，横向占主导（dx>10）就 preventDefault 抢回手势，
-  // dx>30 即返回；竖向占主导时不拦，页面照常滚动。诊断行保留（[swipe] 写 debug.log）。
+  // dx>30 即返回；竖向占主导时不拦，页面照常滚动。v0.0.112 只修好一半：
+  // 从屏幕中间起手的右滑能回，靠左缘起手的没反应——监听挂在布局 div 上，
+  // 而 .hpp-content 两侧各有 16px 留白，左缘起手落在留白里，根本到不了监听
+  // （唯一成功的那笔 start x=17，正好在 16px 线外 1px）。修法见 refined-pages.css：
+  // 布局 div 用负 margin 盖住两侧留白。[swipe] 诊断行先留着，下一版还要验。
   // v0.0.112 诊断：IMG_6437 的左缘慢速右滑仍只有 start——快竖滑有 end 行，
   // 慢横滑连 touchmove 都没有。主窗口没开原生边缘返回手势（只 WebHome 有），
   // 真凶是布局 div 的 touch-action: pan-y：浏览器见横向手势不在允许方向，

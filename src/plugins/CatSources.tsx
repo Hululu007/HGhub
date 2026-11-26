@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { pluginError } from "./client";
 import { useHost } from "./HostContext";
+import type { Category } from "./protocol";
 import { usePluginRequests } from "./usePluginRequests";
 
 interface CatSourceRecord {
@@ -42,6 +43,20 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
     const paths = await invoke<string[]>("pick_cat_zip");
     return paths[0];
   };
+  // 配置中心：猫源的配置站（/home 只回一个 URL 分类）在分类页摘掉后无处可点，
+  // 这里按需找出来打开。配置站的站点 key 含 baseset 或名字含“配置”；找不到就报没有。
+  const openConfigCenter = async (pluginId: string) => {
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const sites = await request<Category[]>("call", { id: pluginId, method: "catalog.getCategories", args: { shallow: true } });
+      const site = sites.find(s => s.id.toLowerCase().includes("baseset") || s.label.includes("配置"));
+      if (!site) { setNotice("该猫源没有配置中心"); return; }
+      const classes = await request<Category[]>("call", { id: pluginId, method: "catalog.getCategories", args: { site: site.id } });
+      const url = classes.map(c => c.label.match(/https?:\/\/[^\s"']+/)?.[0]).find(Boolean);
+      if (!url) { setNotice("该猫源没有配置中心"); return; }
+      await invoke("browser_open", { url });
+    } catch (e) { setError(pluginError(e)); } finally { setBusy(false); }
+  };
   return <div className="plugin-cat-sources">
     <section className="hpp-subscriptions" aria-label="Node 运行状态"><div className="hpp-section-title"><h2>{node?.running ? `Node 运行中${node.version ? ` · ${node.version}` : ""}` : "Node 已停止"}</h2></div>
       <p className="hpp-muted">Node 单实例，停用猫源请用下方开关。</p>
@@ -63,6 +78,7 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
             {s.sourceType === "url" ? <button disabled={busy} onClick={() => void run(async () => { const result = await request<{ changed: boolean }>("cat.check_update", { id: s.id }); return result.changed ? "已更新到最新版本" : "已是最新版本"; })}>检查更新</button>
               : <button disabled={busy} onClick={() => void run(async () => { const path = await pickZip(); if (!path) return; await request("cat.reimport_zip", { id: s.id, path }); return "已重新导入"; })}>重新导入 ZIP</button>}
             <button disabled={busy} onClick={() => void run(async () => { const paths = await invoke<string[]>("pick_plugin_files"); if (!paths[0]) return; await request("cat.import_config", { id: s.id, path: paths[0] }); return "配置已导入"; })}>导入配置</button>
+            <button disabled={busy} onClick={() => void openConfigCenter(s.id)}>配置中心</button>
             <button disabled={busy} onClick={() => showLogs(s.id)}>{logsId === s.id ? "收起日志" : "运行日志"}</button>
             <button className="danger" disabled={busy} onClick={() => { if (confirmRemove !== s.id) { setConfirmRemove(s.id); return; } setConfirmRemove(null); void run(async () => { await request("remove", { id: s.id }); }); }}>{confirmRemove === s.id ? `确认删除「${s.name}」？` : "删除"}</button>
           </div>

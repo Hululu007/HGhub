@@ -108,8 +108,10 @@ WebHome（HTML 源）v1 已落地：`meta.webhome` 声明与 `webhome: {}` 能�
 hpp 有 5 个 WebHome 集成测试通过；`hg.env.features` 含 `"webhome"`。
 iOS 上第二个 WebView 窗口尚未真机验证，是 v1 的主要待验收项。
 
-`pan.play` / `pan.check` 已支持：网盘分享链宿主播不了，`pan.play` 在
-App 内专用浏览器窗口打开该链接并在主窗口给一句提示；`pan.check` 不做
+`pan.play` / `pan.check` 已支持：网盘分享链先走已启用猫源的 push 站
+（`/spider/push/4/detail` → `/play`）解析成直链进原生播放器，解析不到
+（无猫源、token 失效、非网盘链）回退到 App 内专用浏览器窗口打开该链接
+并在主窗口给一句提示；`pan.check` 不做
 真实检测，全部返回 ok 占位，让页面的健康检测拿到有效目标。`fm.open`
 （`app.openExternal`）同样在应用内浏览器窗口打开外链。浏览器窗口只做
 浏览（不注入桥、不接插件能力），顶部浮动栏显示当前域名与 × 关闭按钮，

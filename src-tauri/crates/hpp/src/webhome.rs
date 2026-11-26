@@ -124,13 +124,18 @@ pub async fn dispatch(
             }
         }
         "pan.play" => {
-            // 网盘分享链宿主播不了：不走 prepare_direct（它只接受直链），
-            // 在 App 内专用浏览器窗口打开；同时给主窗口一句提示。
+            // 猫源 token 解析（cat-source.md §8）：分享链先走已启用猫源的
+            // push 站（/spider/push/4/detail → /play）解析成直链，进原生
+            // 播放器；解析不到（无猫源、token 失效、非网盘链）就回退应用内
+            // 浏览器，保持旧行为。带提取码的分享链暂不支持，走浏览器。
             let url = text(p, "url")?;
             crate::model::url(url, true, true)?;
-            Outcome::OpenInAppBrowser {
-                url: url.to_string(),
-                toast: "已在应用内打开网盘链接".to_string(),
+            match resolve_pan_play(manager, url, p).await {
+                Some((media, title)) => Outcome::Play { media, title },
+                None => Outcome::OpenInAppBrowser {
+                    url: url.to_string(),
+                    toast: "已在应用内打开网盘链接".to_string(),
+                },
             }
         }
         "pan.check" => {
@@ -282,6 +287,100 @@ pub async fn dispatch(
     })
 }
 
+/// 猫源 push 站的站点 key：源服务 /config 里 `UDe(meta)` = `nodejs_` +
+/// meta.key（push）；分享链的解析入口站（cat-source.md §8）。
+const PAN_PUSH_SITE: &str = "nodejs_push";
+
+/// 猫源 push 站的解析结果里取第一条线路的第一集：返回（线路 id，集 id），
+/// 都是带 `nodejs_push::` 前缀的 HPP id，直接当 media.resolvePlayback 的入参。
+fn first_pan_episode(detail: &Value) -> Option<(String, String)> {
+    let playlist = detail.get("playlists")?.as_array()?.first()?;
+    let episode = playlist.get("episodes")?.as_array()?.first()?;
+    let episode_id = episode.get("id")?.as_str().filter(|s| !s.is_empty())?;
+    let playlist_id = playlist
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            playlist
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })?;
+    Some((playlist_id.to_string(), episode_id.to_string()))
+}
+
+/// 分享链 → 猫源 push 站解析 → 直链播放。按猫源 id 顺序逐个尝试，
+/// 某个源解析失败就换下一个；全部失败返回 None（调用方回退浏览器）。
+/// 只传分享链本身：token 留在猫源服务内，不经宿主；分集 id 与播放地址
+/// 不记日志（cat-source.md §2.8）。
+async fn resolve_pan_play(
+    manager: &Arc<PluginManager>,
+    url: &str,
+    p: &Value,
+) -> Option<(PreparedMedia, Option<String>)> {
+    let mut cats: Vec<String> = manager
+        .list()
+        .await
+        .into_iter()
+        .filter(|info| info.meta.runtime == "cat" && info.enabled)
+        .map(|info| info.meta.id)
+        .collect();
+    cats.sort();
+    for cat_id in cats {
+        let Ok(detail) = manager
+            .call(
+                &cat_id,
+                "media.getDetail",
+                json!({ "id": format!("{PAN_PUSH_SITE}::{url}") }),
+                request_id(),
+            )
+            .await
+        else {
+            continue;
+        };
+        let Some((playlist_id, episode_id)) = first_pan_episode(&detail) else {
+            continue;
+        };
+        let Ok(playback) = manager
+            .call(
+                &cat_id,
+                "media.resolvePlayback",
+                json!({ "episodeId": episode_id, "playlistId": playlist_id }),
+                request_id(),
+            )
+            .await
+        else {
+            continue;
+        };
+        let stream = playback
+            .get("streams")
+            .and_then(Value::as_array)
+            .and_then(|s| s.first());
+        let Some(play_url) = stream
+            .and_then(|s| s.get("url"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let headers = stream
+            .and_then(|s| s.get("headers"))
+            .cloned()
+            .unwrap_or(json!({}));
+        let Ok(media) = manager.prepare_direct(&cat_id, play_url, headers).await else {
+            continue;
+        };
+        let title = p
+            .get("title")
+            .and_then(Value::as_str)
+            .or_else(|| p.get("name").and_then(Value::as_str))
+            .map(String::from);
+        return Some((media, title));
+    }
+    None
+}
+
 /// WebHome 缓存与绑定插件共用同一份存储，键名前缀 `webhome:`，与插件
 /// 自身的键隔离；clear 只清这个前缀，不动插件的其他数据。
 ///
@@ -385,5 +484,30 @@ mod tests {
         assert_eq!(canonical("config"), "config.info");
         assert_eq!(canonical("ctrl"), "player.control");
         assert_eq!(canonical("net.request"), "net.request");
+    }
+
+    #[test]
+    fn first_pan_episode_takes_first_line_first_episode() {
+        let detail = json!({"playlists": [
+            {"id": "nodejs_push::夸克原画", "label": "夸克原画", "episodes": [
+                {"id": "nodejs_push::ZXlKaGJt", "name": "密探2025.mp4"},
+                {"id": "nodejs_push::eHlKaGJt", "name": "密探2025-2.mp4"},
+            ]},
+            {"id": "nodejs_push::夸克高清", "label": "夸克高清", "episodes": [
+                {"id": "nodejs_push::abc", "name": "密探2025.mp4"},
+            ]},
+        ]});
+        assert_eq!(
+            first_pan_episode(&detail),
+            Some((
+                "nodejs_push::夸克原画".to_string(),
+                "nodejs_push::ZXlKaGJt".to_string(),
+            ))
+        );
+        assert_eq!(first_pan_episode(&json!({"playlists": []})), None);
+        assert_eq!(
+            first_pan_episode(&json!({"playlists": [{"id": "x", "episodes": []}]})),
+            None
+        );
     }
 }

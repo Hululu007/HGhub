@@ -419,7 +419,7 @@ new hg.PluginError(code: ErrorCode, message?: string, options?: {
 | `player.preloadArtwork` | v1 空操作，返回 `{ code: 0 }` |
 | `player.control`（别名 `ctrl`） | `action` 为 `play` / `pause` / `toggle` / `seek` / `stop`；`seek` 需 `seconds`；只对当前直链播放有效 |
 | `player.status`（别名 `stat`） | 返回主窗口推送的播放状态 `{ playing, positionSec, durationSec }` |
-| `pan.play` | 网盘分享链：宿主播不了，在 App 内专用浏览器窗口打开该链接，同时在主窗口给一句提示；参数 `{ type, url, password, title, name, ... }`，`url` 必填 |
+| `pan.play` | 网盘分享链：先走已启用猫源的 push 站解析成直链（`media.getDetail` → `media.resolvePlayback`，见 [cat-source.md §8](../developers/cat-source.md)），进原生播放器；解析不到（无猫源、token 失效、非网盘链）回退到 App 内专用浏览器窗口打开该链接，同时在主窗口给一句提示；参数 `{ type, url, password, title, name, ... }`，`url` 必填。带提取码的分享链暂不支持解析，走浏览器 |
 | `pan.check` | 网盘链接可用性占位：v1 不做真实检测，全部返回 `{ results: [{ state: "ok" }] }`，让页面的健康检测拿到有效目标、播放键可点 |
 | `app.search`（别名 `search`） | 调绑定插件的 `search.search`，返回原样结果 |
 | `app.openVod` / `app.openLive` / `app.openKeep` / `app.openSetting` | 在主窗口打开详情 / 直播 / 收藏（我的） / 设置；`openVod` 的参数与 `player.playVod` 相同 |

@@ -100,7 +100,7 @@ function TabBar() {
     { k: "home", label: "首页" },
     { k: "search", label: "搜索" },
     { k: "category", label: "分类" },
-    { k: "webhome", label: "Webhome" },
+    { k: "webhome", label: "Node源" },
     { k: "profile", label: "我的" },
   ];
   /* 细瘦纯文字分栏：只有选中项高亮，没有指示点。
