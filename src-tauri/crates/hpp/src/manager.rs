@@ -1572,13 +1572,22 @@ impl PluginManager {
         if let (Some(before), Ok(validated_value)) = (&cat_list_before, &validated) {
             let after = crate::cat::convert::list_summary(validated_value);
             if after.total < before.total {
+                // 列表校验上限是 100 条（model.rs 的 catalog.list 分支）：
+                // 校验后正好剩 100 条时，丢的数里含截断，不全是坏条目，
+                // 行尾注明，免得把“136 条→100 条”读成丢了 36 条坏数据。
+                let capped = if after.total == 100 {
+                    "（触顶 100 条上限）"
+                } else {
+                    ""
+                };
                 logs.lock().unwrap().push(
                     "warn",
                     &format!(
-                        "[cat] list [{}] 校验丢条目：{} 条→{} 条（转换后封面：{}）",
+                        "[cat] list [{}] 校验丢条目：{} 条→{} 条{}（转换后封面：{}）",
                         cat_list_category.as_deref().unwrap_or("?"),
                         before.total,
                         after.total,
+                        capped,
                         before.cover_part()
                     ),
                     "cat",

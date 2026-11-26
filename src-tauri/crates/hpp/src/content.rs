@@ -85,12 +85,38 @@ fn rows(
     }
     let mut out = Vec::new();
     let mut ids = std::collections::HashSet::new();
+    // 单次调用里同类丢弃只列前 3 条明细，余下的记一笔总数：
+    // 猫源推荐分区一次扇出就丢了 900 多条重复条目（2026-11-26 日志
+    // 1824 条→901 条），逐条记会把 240 行/60 秒的日志缓冲刷满，
+    // 埋掉别的信号行；总数仍在汇总行里，丢了多少不会丢。
+    let mut dup = 0usize;
+    let mut bad = 0usize;
     for (i, v) in a.iter().take(max).enumerate() {
         match parse(v.clone(), warnings) {
             Ok(v) if v.get("id").is_none() || ids.insert(v["id"].to_string()) => out.push(v),
-            Ok(_) => warnings.push(format!("{path}[{i}].id: 重复条目已丢弃")),
-            Err(e) => warnings.push(format!("{path}[{i}]: {}", e.message)),
+            Ok(_) => {
+                dup += 1;
+                if dup <= 3 {
+                    warnings.push(format!("{path}[{i}].id: 重复条目已丢弃"));
+                }
+            }
+            Err(e) => {
+                bad += 1;
+                if bad <= 3 {
+                    warnings.push(format!("{path}[{i}]: {}", e.message));
+                }
+            }
         }
+    }
+    if dup > 3 {
+        warnings.push(format!(
+            "{path}: 重复条目已丢弃 {dup} 条（仅列出前 3 条）"
+        ));
+    }
+    if bad > 3 {
+        warnings.push(format!(
+            "{path}: 无效条目已丢弃 {bad} 条（仅列出前 3 条）"
+        ));
     }
     Ok(Value::Array(out))
 }
@@ -448,4 +474,38 @@ fn article(v: Value, http: bool, detail: bool, w: &mut Vec<String>) -> Result<Va
         );
     }
     Ok(Value::Object(o))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rows_caps_duplicate_drop_warnings_with_a_total() {
+        // a、b 各出现 5 次 → 8 条重复丢弃：前 3 条逐条警告 + 1 条总数汇总。
+        let items = json!([
+            {"id": "a"}, {"id": "a"}, {"id": "a"}, {"id": "a"}, {"id": "a"},
+            {"id": "b"}, {"id": "b"}, {"id": "b"}, {"id": "b"}, {"id": "b"},
+        ]);
+        let mut warnings = Vec::new();
+        let out = rows(items, 100, "items", &mut warnings, |v, _| Ok(v)).unwrap();
+        assert_eq!(out.as_array().unwrap().len(), 2);
+        assert_eq!(warnings.len(), 4);
+        assert_eq!(warnings[0], "items[1].id: 重复条目已丢弃");
+        assert_eq!(warnings[3], "items: 重复条目已丢弃 8 条（仅列出前 3 条）");
+    }
+
+    #[test]
+    fn rows_caps_invalid_drop_warnings_with_a_total() {
+        let items = json!([1, 2, 3, 4, 5, 6]);
+        let mut warnings = Vec::new();
+        let out = rows(items, 100, "items", &mut warnings, |_, _| {
+            Err(PluginError::internal("x"))
+        })
+        .unwrap();
+        assert_eq!(out.as_array().unwrap().len(), 0);
+        assert_eq!(warnings.len(), 4);
+        assert_eq!(warnings[3], "items: 无效条目已丢弃 6 条（仅列出前 3 条）");
+    }
 }
