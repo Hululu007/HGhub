@@ -23,6 +23,9 @@ const LABEL: &str = "browser";
 /// 里才算数（直接挂在 <html> 下会被忽略），所以补 meta 时优先插到 head
 /// 最前面；脚本刚跑时 head 还没出来就用 MutationObserver 盯着，head 一出
 /// 来马上补，页面加载完 bar() 里再补一次兜底。
+/// × 是纯字形、无圆底（按钮默认 padding 会把圆底拉成椭圆）；页面内右滑
+/// （横向占主导）也调 browser_close 藏窗。× 点按先走 __TAURI__.core，
+/// 没有再走 __TAURI_INTERNALS__（远端页不一定有公开 API 对象）。
 const CHROME: &str = r#"(function(){
   if (window.__hgBrowserChrome) return; window.__hgBrowserChrome = true;
   function fitViewport(){
@@ -40,6 +43,26 @@ const CHROME: &str = r#"(function(){
     if (head) head.insertBefore(n, head.firstChild);
     else if (document.documentElement) document.documentElement.appendChild(n);
   }
+  function closeBrowser(el){
+    if (el) { try { el.style.opacity = '0.4'; } catch (e) {} }
+    var ok = false;
+    try {
+      if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
+        var p1 = window.__TAURI__.core.invoke('browser_close', {});
+        if (p1 && p1.catch) p1.catch(function(){});
+        ok = true;
+      } else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
+        var p2 = window.__TAURI_INTERNALS__.invoke('browser_close', {});
+        if (p2 && p2.catch) p2.catch(function(){});
+        ok = true;
+      }
+    } catch (e) {}
+    if (!ok && el) { try { el.style.opacity = '1'; } catch (e2) {} }
+  }
+  var swX = null;
+  function swipeStart(e){ var t = e.touches[0]; swX = {x:t.clientX, y:t.clientY}; }
+  function swipeMove(e){ if (!swX) return; var t = e.touches[0], dx = t.clientX - swX.x, dy = t.clientY - swX.y; if (dx > 60 && dx > Math.abs(dy)) { swX = null; closeBrowser(null); } }
+  function swipeEnd(){ swX = null; }
   function bar(){
     fitViewport();
     var old = document.getElementById('hg-browser-bar'); if (old) old.remove();
@@ -50,13 +73,17 @@ const CHROME: &str = r#"(function(){
     t.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     var x = document.createElement('button'); x.type = 'button'; x.textContent = '✕';
     x.setAttribute('aria-label', '关闭');
-    x.style.cssText = 'flex:none;width:28px;height:28px;border:none;border-radius:50%;background:rgba(255,255,255,.16);color:#fff;font-size:14px;line-height:1;cursor:pointer;';
-    x.onclick = function(){ try { var c = window.__TAURI__ && window.__TAURI__.core; if (c && c.invoke) c.invoke('browser_close', {}); } catch (e) {} };
+    x.style.cssText = 'flex:none;width:28px;height:28px;border:none;border-radius:0;background:transparent;padding:0;color:#fff;font-size:14px;line-height:1;cursor:pointer;';
+    x.onclick = function(){ closeBrowser(x); };
     b.appendChild(t); b.appendChild(x);
     document.documentElement.style.paddingTop = 'calc(env(safe-area-inset-top, 0px) + 36px)';
     document.documentElement.appendChild(b);
   }
   fitViewport();
+  document.addEventListener('touchstart', swipeStart, {passive:true});
+  document.addEventListener('touchmove', swipeMove, {passive:true});
+  document.addEventListener('touchend', swipeEnd);
+  document.addEventListener('touchcancel', swipeEnd);
   if (!document.head && window.MutationObserver && document.documentElement) {
     var mo = new MutationObserver(function(){ if (document.head) { try { mo.disconnect(); } catch (e) {} fitViewport(); } });
     mo.observe(document.documentElement, {childList: true});
