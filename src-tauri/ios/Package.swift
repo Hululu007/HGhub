@@ -19,7 +19,9 @@ import PackageDescription
 let package = Package(
   name: "NativePlugins",
   platforms: [
-    .macOS(.v10_13),
+    // macOS 底线 10.15：MPVKit 要求 macOS 10.15，10.13 下 SPM 直接
+    // 报错（见 v0.0.119 构建日志）；iOS 底线仍是 13，不动。
+    .macOS(.v10_15),
     .iOS(.v13),
   ],
   products: [
