@@ -124,6 +124,11 @@ function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia})
   // 几 px 内就把手势接管去纵滑，touchmove 再也不到 JS。所以改原生监听：
   // touchmove 用 {passive:false}，横向占主导（dx>10）就 preventDefault 抢回手势，
   // dx>30 即返回；竖向占主导时不拦，页面照常滚动。诊断行保留（[swipe] 写 debug.log）。
+  // v0.0.112 诊断：IMG_6437 的左缘慢速右滑仍只有 start——快竖滑有 end 行，
+  // 慢横滑连 touchmove 都没有。主窗口没开原生边缘返回手势（只 WebHome 有），
+  // 真凶是布局 div 的 touch-action: pan-y：浏览器见横向手势不在允许方向，
+  // 直接截断触摸序列（且不发 touchcancel）。改为 pan-x pan-y，让横向
+  // touchmove 也到 JS，由 preventDefault 判定；竖滑仍不拦，照常滚动。
   const layoutRef=useRef<HTMLDivElement|null>(null);
   const swipe=useRef<{x:number;y:number;t:number;done:boolean;mx:number;my:number}|null>(null);
   const selectedRef=useRef(selected);
@@ -142,7 +147,7 @@ function CategoryOverview({plugin,open}:{plugin:InstalledPlugin;open:OpenMedia})
     return()=>{el.removeEventListener('touchstart',onStart);el.removeEventListener('touchmove',onMove);el.removeEventListener('touchend',onEnd);el.removeEventListener('touchcancel',onCancel);};
   },[]);
   const content=selected?<><button className="hpp-back" onClick={()=>setSelected(null)}><IBack size={17}/>全部分类</button><h2>{selected.label}</h2><CategorySource key={selected.id} plugin={plugin} open={open} initialCategory={selected.id} siteKey={Array.isArray(selected.children)?selected.id:undefined}/></>:<><Notice error={error}/>{error&&<button onClick={()=>setAttempt(v=>v+1)}>重试分类</button>}{busy?<div className="hpp-skeleton" aria-label="正在加载分类"/>:hasParents?<>{isMobile?<div className="hpp-category-sites" aria-label="选择资源"><h2>选择资源</h2>{tree.map(site=><button key={site.id} onClick={()=>pickEntry(site)}><span><strong>{site.label}</strong><small>{site.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</div>:<p className="hpp-muted">从左侧分类目录选择一个资源，查看它的分类。</p>}</>:tree.map(category=><CategoryPreview key={category.id} plugin={plugin} category={category} open={open} all={()=>pickEntry(category)}/>)}{!busy&&!error&&!tree.length&&<div className="hpp-empty"><IGrid size={36}/><h2>这里还没有分类</h2><p>片源暂未提供分类内容。</p></div>}{!!tree.length&&<p className="hpp-end-note">— 已展示全部分类 —</p>}</>;
-  return <div ref={layoutRef} className="refined-category-layout" style={{touchAction:"pan-y"}}><aside className="refined-category-directory"><h2>分类目录</h2><nav aria-label="分类目录"><button aria-pressed={!selected} onClick={()=>setSelected(null)}><IGrid size={18}/>全部概览</button>{tree.map(c=><button key={c.id} aria-pressed={selected?.id===c.id} onClick={()=>pickEntry(c)}><span><strong>{c.label}</strong><small>{c.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</nav></aside><div className="refined-category-results">{content}</div></div>;
+  return <div ref={layoutRef} className="refined-category-layout" style={{touchAction:"pan-x pan-y"}}><aside className="refined-category-directory"><h2>分类目录</h2><nav aria-label="分类目录"><button aria-pressed={!selected} onClick={()=>setSelected(null)}><IGrid size={18}/>全部概览</button>{tree.map(c=><button key={c.id} aria-pressed={selected?.id===c.id} onClick={()=>pickEntry(c)}><span><strong>{c.label}</strong><small>{c.children?.map(child=>child.label).join(" · ")}</small></span><IChevR size={14}/></button>)}</nav></aside><div className="refined-category-results">{content}</div></div>;
 }
 function CategoryPreview({plugin,category,open,all}:{plugin:InstalledPlugin;category:Category;open:OpenMedia;all:()=>void}) {
   const list=usePagedPlugin<MediaItem>({plugin,method:"catalog.list",args:{categoryId:category.children?.[0]?.id||category.id},limit:8});
