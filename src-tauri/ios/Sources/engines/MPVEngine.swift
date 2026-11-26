@@ -5,7 +5,7 @@
 //（import Libmpv），渲染走 MPVKit Demo 同款：CAMetalLayer +
 // vo=gpu-next + gpu-api=vulkan + gpu-context=moltenvk，
 // hwdec=videotoolbox（H.264/HEVC 硬解；AV1 等走 dav1d 软解）。
-// 钉的版本见 src-tauri/ios/Package.swift（MPVKit 0.40.0 exact，
+// 钉的版本见 src-tauri/ios/Package.swift（MPVKit 0.40.0-xcode exact，
 // iOS 13.0 底线；0.41.0 起要 iOS 14.0，1.x 起要 iOS 15.0）。
 // 详见 docs/developers/native-players.md。
 //
@@ -30,6 +30,10 @@ final class MPVMetalLayer: CAMetalLayer {
     }
   }
 
+  // wantsExtendedDynamicRangeContent 只有 iOS 16.0+ 才有，应用底线是
+  // iOS 13.0——加 @available 让这个重写只在 16+ 生效，16 以下走基类
+  // 默认行为（本来就没有 EDR）。
+  @available(iOS 16.0, *)
   override var wantsExtendedDynamicRangeContent: Bool {
     get { super.wantsExtendedDynamicRangeContent }
     set {
