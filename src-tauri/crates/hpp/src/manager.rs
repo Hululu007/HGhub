@@ -1059,6 +1059,7 @@ impl PluginManager {
         &self,
         id: &str,
         temp_name: &str,
+        explicit_name: Option<&str>,
         source: Option<String>,
         plugin_js: &[u8],
         config: Option<&[u8]>,
@@ -1086,6 +1087,12 @@ impl PluginManager {
         } else {
             name
         };
+        // 导入时用户给了名字：它就是最终显示名，初始化成功也不用首个站点名覆盖
+        // （协议里 `name` 的定义：源自 `/config` 的站点名，或用户导入时给的名字）。
+        let explicit_name: Option<String> = explicit_name
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.chars().take(60).collect());
+        let name = explicit_name.clone().unwrap_or(name);
         // 猫源边车服务是回环 http：/play 与 /proxy 返回的播放地址就是
         // `http://127.0.0.1:<端口>/…`。没有这个声明，播放校验会把全部
         // http 流丢掉、报“没有合法可播放流”（2026-11-26 齐天圣瞳真机故障）。
@@ -1134,8 +1141,10 @@ impl PluginManager {
         if p.entry.enabled {
             match self.initialize(&mut p, true).await {
                 Ok(w) => {
-                    if let Some(site_name) = Self::cat_first_site_name(&w) {
-                        p.entry.meta.name = site_name.chars().take(60).collect();
+                    if explicit_name.is_none() {
+                        if let Some(site_name) = Self::cat_first_site_name(&w) {
+                            p.entry.meta.name = site_name.chars().take(60).collect();
+                        }
                     }
                 }
                 Err(e) => {
@@ -1226,7 +1235,9 @@ impl PluginManager {
         let (published_md5, js) = fetch_subscription(url).await?;
         let id = derive_plugin_id_from_url(url)?;
         let temp_name = name
+            .as_ref()
             .filter(|n| !n.trim().is_empty())
+            .cloned()
             .unwrap_or_else(|| {
                 url::Url::parse(url)
                     .ok()
@@ -1234,7 +1245,7 @@ impl PluginManager {
                     .unwrap_or_else(|| id.clone())
             });
         let info = self
-            .cat_install(&id, &temp_name, Some(url.to_string()), &js, None, &[])
+            .cat_install(&id, &temp_name, name.as_deref(), Some(url.to_string()), &js, None, &[])
             .await?;
         let record = CatSourceRecord {
             id: id.clone(),
@@ -1243,6 +1254,7 @@ impl PluginManager {
             url: Some(url.to_string()),
             md5: published_md5.unwrap_or_else(|| md5_hex(&js)),
             enabled: info.enabled,
+            custom_name: name.as_ref().is_some_and(|n| !n.trim().is_empty()),
             updated_at: crate::store::now() as i64,
         };
         {
@@ -1268,12 +1280,15 @@ impl PluginManager {
             .unwrap_or("");
         let id = derive_plugin_id_from_stem(stem)?;
         let temp_name = name
+            .as_ref()
             .filter(|n| !n.trim().is_empty())
+            .cloned()
             .unwrap_or_else(|| stem.to_string());
         let info = self
             .cat_install(
                 &id,
                 &temp_name,
+                name.as_deref(),
                 None,
                 &extracted.index_js,
                 extracted.config.as_deref(),
@@ -1287,6 +1302,7 @@ impl PluginManager {
             url: None,
             md5: extracted.index_js_md5.clone(),
             enabled: info.enabled,
+            custom_name: name.as_ref().is_some_and(|n| !n.trim().is_empty()),
             updated_at: crate::store::now() as i64,
         };
         {
@@ -1342,9 +1358,11 @@ impl PluginManager {
             if p.entry.enabled {
                 match self.initialize(&mut p, true).await {
                     Ok(w) => {
-                        if let Some(site_name) = Self::cat_first_site_name(&w) {
-                            p.entry.meta.name = site_name.chars().take(60).collect();
-                            new_record.name = p.entry.meta.name.clone();
+                        if !new_record.custom_name {
+                            if let Some(site_name) = Self::cat_first_site_name(&w) {
+                                p.entry.meta.name = site_name.chars().take(60).collect();
+                                new_record.name = p.entry.meta.name.clone();
+                            }
                         }
                         Ok(Self::info(&p))
                     }
@@ -1413,9 +1431,11 @@ impl PluginManager {
             if p.entry.enabled {
                 match self.initialize(&mut p, true).await {
                     Ok(w) => {
-                        if let Some(site_name) = Self::cat_first_site_name(&w) {
-                            p.entry.meta.name = site_name.chars().take(60).collect();
-                            new_record.name = p.entry.meta.name.clone();
+                        if !new_record.custom_name {
+                            if let Some(site_name) = Self::cat_first_site_name(&w) {
+                                p.entry.meta.name = site_name.chars().take(60).collect();
+                                new_record.name = p.entry.meta.name.clone();
+                            }
                         }
                     }
                     Err(e) => {
@@ -2342,6 +2362,7 @@ mod tests {
             .cat_install(
                 "cat.test",
                 "测试猫源",
+                None,
                 None,
                 b"module.exports = {start(){}, stop(){}};",
                 None,

@@ -25,6 +25,9 @@ pub struct CatSourceRecord {
     pub md5: String,
     /// 导入时的初始启用值；运行时的启用状态以插件条目为准。
     pub enabled: bool,
+    /// 导入时用户是否给了名字；为真时检查更新/重新导入不拿首个站点名覆盖显示名。
+    #[serde(default)]
+    pub custom_name: bool,
     /// 上次成功拉取/导入的时间（epoch 毫秒）。
     pub updated_at: i64,
 }
@@ -420,6 +423,7 @@ mod tests {
             url: Some("https://example.invalid/a.js.md5".into()),
             md5: "00".into(),
             enabled: true,
+            custom_name: false,
             updated_at: 123,
         };
         store.upsert(record.clone());

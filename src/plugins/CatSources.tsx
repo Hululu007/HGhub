@@ -18,6 +18,7 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
   const [node, setNode] = useState<CatList["node"] | null>(null);
   const [sources, setSources] = useState<CatSourceRecord[]>([]);
   const [url, setUrl] = useState("");
+  const [name, setName] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [logsId, setLogsId] = useState<string | null>(null), [logs, setLogs] = useState<unknown[]>([]);
@@ -62,11 +63,12 @@ export default function CatSources({ reload }: { reload: () => Promise<void> }) 
       <p className="hpp-muted">Node 单实例，停用猫源请用下方开关。</p>
     </section>
     <section className="hpp-import" aria-label="添加猫源"><h2>添加猫源</h2>
-      <form className="hpp-distribution-location" onSubmit={e => { e.preventDefault(); if (!url.trim()) return; const target = url.trim(); void run(async () => { await request("cat.import_url", { url: target }); setUrl(""); return "猫源已添加"; }); }}>
+      <form className="hpp-distribution-location" onSubmit={e => { e.preventDefault(); if (!url.trim()) return; const target = url.trim(); void run(async () => { await request("cat.import_url", { url: target, name: name.trim() }); setUrl(""); setName(""); return "猫源已添加"; }); }}>
+        <input aria-label="猫源名称" placeholder="源名称（可选，不填用默认名）" value={name} onChange={e => setName(e.target.value)} />
         <input aria-label="猫源订阅地址" placeholder="订阅 URL，如 https://…/index.js.md5" value={url} onChange={e => setUrl(e.target.value)} />
         <button disabled={busy || !url.trim()}>添加订阅</button>
       </form>
-      <div className="hpp-distribution-buttons"><button disabled={busy} onClick={() => void run(async () => { const path = await pickZip(); if (!path) return; await request("cat.import_zip", { path }); return "猫源已添加"; })}>导入 ZIP</button></div>
+      <div className="hpp-distribution-buttons"><button disabled={busy} onClick={() => void run(async () => { const path = await pickZip(); if (!path) return; await request("cat.import_zip", { path, name: name.trim() }); setName(""); return "猫源已添加"; })}>导入 ZIP</button></div>
     </section>
     <section className="hpp-subscriptions" aria-label="已添加的猫源"><div className="hpp-section-title"><h2>已添加的猫源</h2><span>{sources.length} 个</span></div>
       {sources.length ? sources.map(s => {
