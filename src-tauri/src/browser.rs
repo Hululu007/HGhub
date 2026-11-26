@@ -17,9 +17,26 @@ const LABEL: &str = "browser";
 /// browser_close 命令把窗口藏起来。不是 WebHome 的 SDK，不接桥。
 /// 浮动栏落在状态栏下方（top 取 safe-area），并把页面顶端下推同等高度，
 /// 否则刘海机上页面自己的顶部会被状态栏和浮动栏盖住、显示不全。
+/// 注意：页面的 viewport 没写 viewport-fit=cover 时 env(safe-area-inset-*)
+/// 是 0（猫源配置页就是这样），浮动栏会顶到状态栏底下——所以先给页面
+/// 补上 viewport-fit=cover，让 safe-area 真正生效；脚本刚跑和页面加载
+/// 完各补一次，覆盖 meta 还没解析完的情况。
 const CHROME: &str = r#"(function(){
   if (window.__hgBrowserChrome) return; window.__hgBrowserChrome = true;
+  function fitViewport(){
+    var m = document.querySelector('meta[name="viewport"]');
+    if (m) {
+      var c = m.getAttribute('content') || '';
+      if (c.indexOf('viewport-fit') === -1) m.setAttribute('content', c ? c + ', viewport-fit=cover' : 'viewport-fit=cover');
+    } else {
+      var n = document.createElement('meta');
+      n.setAttribute('name', 'viewport');
+      n.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover');
+      (document.head || document.documentElement).appendChild(n);
+    }
+  }
   function bar(){
+    fitViewport();
     var old = document.getElementById('hg-browser-bar'); if (old) old.remove();
     var b = document.createElement('div'); b.id = 'hg-browser-bar';
     b.style.cssText = 'position:fixed;top:env(safe-area-inset-top, 0px);left:0;right:0;height:36px;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:0 8px;background:rgba(20,20,24,.92);color:#fff;font:13px/1 -apple-system,BlinkMacSystemFont,sans-serif;';
@@ -34,6 +51,7 @@ const CHROME: &str = r#"(function(){
     document.documentElement.style.paddingTop = 'calc(env(safe-area-inset-top, 0px) + 36px)';
     document.documentElement.appendChild(b);
   }
+  fitViewport();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bar); else bar();
 })();"#;
 
