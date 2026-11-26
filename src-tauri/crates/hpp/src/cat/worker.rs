@@ -231,6 +231,15 @@ impl CatWorker {
             tokens.insert(id.clone(), cancel.clone());
         }
         let result = match &call {
+            convert::CatCall::Shallow => {
+                // 站点列表是加载时就已知的，不调源服务。
+                let nodes: Vec<Value> = self
+                    .sites
+                    .iter()
+                    .map(|s| json!({"id": s.key, "label": s.name, "children": []}))
+                    .collect();
+                Ok(Value::Array(nodes))
+            }
             convert::CatCall::Single {
                 site,
                 endpoint,
@@ -455,8 +464,14 @@ impl CatWorker {
                     }
                 }
                 let merged = json!({"class": classes});
-                let prefixed = convert::prefix_categories(&merged, &self.sites)?;
-                py::categories(&prefixed)
+                let nested = convert::nest_categories(&merged, &self.sites)?;
+                if let Some(arr) = nested.as_array() {
+                    if arr.len() == 1 {
+                        // 只有一个站有分类：直接平铺该站的分类，不多一次点选。
+                        return Ok(arr[0]["children"].clone());
+                    }
+                }
+                Ok(nested)
             }
             "home.getSections" | "feed.list" => {
                 let layout = if method == "home.getSections" {

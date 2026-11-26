@@ -72,13 +72,35 @@ pub enum CatCall {
         endpoint: &'static str,
         body: Value,
     },
+    /// 只返回已知的站点列表（`id` 是站 key、`label` 是站名、`children`
+    /// 为空数组），不调源服务：分类页先靠它把资源列表画出来，点某个站
+    /// 后再用带 `site` 参数的 `catalog.getCategories` 取该站的分类，
+    /// 不用一打开就把 93 个站的 `/home` 全扇出等一遍。
+    Shallow,
 }
 
 /// HPP 方法 → 猫源 HTTP 调用（复用 `python::convert::dispatch` 的模式）。
 /// 返回 None 表示该 HPP 方法猫源不支持。
 pub fn dispatch(method: &str, params: &Value, sites: &[CatSite]) -> Option<CatCall> {
     match method {
-        "catalog.getCategories" | "home.getSections" | "feed.list" => {
+        "catalog.getCategories" => {
+            if params.get("shallow").and_then(Value::as_bool) == Some(true) {
+                return Some(CatCall::Shallow);
+            }
+            if let Some(key) = params.get("site").and_then(Value::as_str) {
+                let site = sites.iter().find(|s| s.key == key)?.clone();
+                return Some(CatCall::Single {
+                    site,
+                    endpoint: "/home",
+                    body: json!({}),
+                });
+            }
+            Some(CatCall::FanOut {
+                endpoint: "/home",
+                body: json!({}),
+            })
+        }
+        "home.getSections" | "feed.list" => {
             Some(CatCall::FanOut {
                 endpoint: "/home",
                 body: json!({}),
@@ -360,6 +382,44 @@ pub fn prefix_categories(data: &Value, sites: &[CatSite]) -> Result<Value> {
     Ok(data)
 }
 
+/// 多站点分类按站点分组：顶层一个节点一个站（`id` 是站 key、`label`
+/// 是站名），子节点是该站的 class（`id` 是 `站::type_id`、`label`
+/// 是原始 `type_name`，不带站名前缀——站名已在父节点上）。
+/// 空站（`/home` 无 class 或调用失败）不出现，与今天扁平列表丢站
+/// 的行为一致。单站订阅不走这里（`convert_single` 仍用扁平的
+/// `prefix_categories`，一个站的分类直接平铺）。
+/// 分类页只在切到某个站后才展示该站的分类（2026-11-26 用户要求：
+/// 猫源下的资源子分类不默认全量展示）。
+pub fn nest_categories(data: &Value, sites: &[CatSite]) -> Result<Value> {
+    let class = data
+        .get("class")
+        .and_then(Value::as_array)
+        .ok_or_else(|| PluginError::new("INTERNAL", "猫源返回缺少 class"))?;
+    let mut out = vec![];
+    for site in sites {
+        let mut children = vec![];
+        for c in class {
+            let is_site =
+                c.get(SITE_MARK_KEY).and_then(Value::as_str) == Some(site.key.as_str());
+            if !is_site {
+                continue;
+            }
+            let Some(raw_id) = non_empty_str(c, "type_id") else {
+                continue;
+            };
+            let Some(raw_label) = non_empty_str(c, "type_name") else {
+                continue;
+            };
+            children.push(json!({"id": encode_id(&site.key, &raw_id), "label": raw_label}));
+        }
+        if children.is_empty() {
+            continue;
+        }
+        out.push(json!({"id": site.key, "label": site.name, "children": children}));
+    }
+    Ok(Value::Array(out))
+}
+
 /// 分页列表改写：先把原始 `list[]` 里每条的 `vod_id` 加上站点前缀，
 /// 再调 `python::convert::page`。
 pub fn prefix_page_items(data: &Value, site: &CatSite) -> Result<Value> {
@@ -634,6 +694,35 @@ mod tests {
     }
 
     #[test]
+    fn nest_categories_groups_by_site_without_label_prefix() {
+        let sites = vec![
+            site("nodejs_a", "站A"),
+            site("nodejs_b", "站B"),
+            site("nodejs_empty", "空站"),
+        ];
+        let merged = json!({"class": [
+            {"type_id": "movie", "type_name": "电影", "_cat_site": "nodejs_a"},
+            {"type_id": "tv", "type_name": "剧集", "_cat_site": "nodejs_a"},
+            {"type_id": "movie", "type_name": "电影", "_cat_site": "nodejs_b"},
+            {"type_id": "", "type_name": "坏的", "_cat_site": "nodejs_b"},
+        ]});
+        let out = nest_categories(&merged, &sites).unwrap();
+        let arr = out.as_array().unwrap();
+        // 空站不出现；顺序按站点顺序。
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], json!("nodejs_a"));
+        assert_eq!(arr[0]["label"], json!("站A"));
+        let kids = arr[0]["children"].as_array().unwrap();
+        assert_eq!(kids.len(), 2);
+        // 子节点 label 是原始分类名，不带站名前缀；id 带站前缀。
+        assert_eq!(kids[0]["id"], json!("nodejs_a::movie"));
+        assert_eq!(kids[0]["label"], json!("电影"));
+        assert_eq!(kids[1]["id"], json!("nodejs_a::tv"));
+        assert_eq!(arr[1]["id"], json!("nodejs_b"));
+        assert_eq!(arr[1]["children"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn playback_quality_pairs_and_hls() {
         let out = playback(
             &json!({"code": 0, "data": {"url": ["高清", "https://example.invalid/a.m3u8", "流畅", "https://example.invalid/b.mp4"], "header": {"User-Agent": "UA"}}}),
@@ -837,6 +926,20 @@ mod tests {
             dispatch("catalog.getCategories", &json!({}), &sites),
             Some(CatCall::FanOut { endpoint: "/home", .. })
         ));
+        assert!(matches!(
+            dispatch("catalog.getCategories", &json!({"shallow": true}), &sites),
+            Some(CatCall::Shallow)
+        ));
+        let Some(CatCall::Single { endpoint, .. }) = dispatch(
+            "catalog.getCategories",
+            &json!({"site": "a"}),
+            &sites,
+        ) else {
+            panic!("带 site 的 getCategories 应为 Single");
+        };
+        assert_eq!(endpoint, "/home");
+        // 不存在的站 key 不分发。
+        assert!(dispatch("catalog.getCategories", &json!({"site": "nope"}), &sites).is_none());
         assert!(matches!(
             dispatch("feed.list", &json!({}), &sites),
             Some(CatCall::FanOut { endpoint: "/home", .. })

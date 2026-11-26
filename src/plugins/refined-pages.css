@@ -79,6 +79,10 @@
 .refined-search .refined-results-detail .legacy-search-poster>div:last-child {min-width:0;flex:1}
 .refined-category-layout {display:grid;grid-template-columns:228px minmax(0,1fr);gap:24px;align-items:start}
 .refined-category-directory {position:sticky;top:0}
+.hpp-category-sites h2 {color:var(--p-dim);margin:0 12px 10px;font-size:13px!important}
+.hpp-category-sites button {display:flex;justify-content:space-between;align-items:center;width:100%;gap:12px;min-height:48px;text-align:left;background:var(--p-s1);border-radius:var(--r-lg);padding:10px 12px;margin-bottom:8px}
+.hpp-category-sites strong,.hpp-category-sites small {display:block;font-weight:500;text-align:left}
+.hpp-category-sites small {font-size:11px;color:var(--p-dim);margin-top:4px}
 .refined-category-directory h2 {color:var(--p-dim);margin:0 12px 10px;font-size:13px!important}
 .refined-category-directory nav {background:var(--p-s1);border-radius:var(--r-lg);padding:4px}
 .refined-category-directory nav button {display:flex;justify-content:space-between;width:100%;gap:12px;min-height:48px;text-align:left;background:transparent;border-radius:var(--r-sm);padding:10px 12px}
