@@ -15,12 +15,14 @@ const LABEL: &str = "browser";
 /// 注入的极简外框：顶部一条浮动栏，显示当前域名 + 一个 × 关闭按钮。
 /// 初始化脚本在每次页面加载开始时都跑，域名随导航自动更新；× 调
 /// browser_close 命令把窗口藏起来。不是 WebHome 的 SDK，不接桥。
+/// 浮动栏落在状态栏下方（top 取 safe-area），并把页面顶端下推同等高度，
+/// 否则刘海机上页面自己的顶部会被状态栏和浮动栏盖住、显示不全。
 const CHROME: &str = r#"(function(){
   if (window.__hgBrowserChrome) return; window.__hgBrowserChrome = true;
   function bar(){
     var old = document.getElementById('hg-browser-bar'); if (old) old.remove();
     var b = document.createElement('div'); b.id = 'hg-browser-bar';
-    b.style.cssText = 'position:fixed;top:0;left:0;right:0;height:36px;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:0 8px;background:rgba(20,20,24,.92);color:#fff;font:13px/1 -apple-system,BlinkMacSystemFont,sans-serif;';
+    b.style.cssText = 'position:fixed;top:env(safe-area-inset-top, 0px);left:0;right:0;height:36px;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:0 8px;background:rgba(20,20,24,.92);color:#fff;font:13px/1 -apple-system,BlinkMacSystemFont,sans-serif;';
     var t = document.createElement('span');
     t.textContent = location.hostname || location.href;
     t.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
@@ -29,6 +31,7 @@ const CHROME: &str = r#"(function(){
     x.style.cssText = 'flex:none;width:28px;height:28px;border:none;border-radius:50%;background:rgba(255,255,255,.16);color:#fff;font-size:14px;line-height:1;cursor:pointer;';
     x.onclick = function(){ try { var c = window.__TAURI__ && window.__TAURI__.core; if (c && c.invoke) c.invoke('browser_close', {}); } catch (e) {} };
     b.appendChild(t); b.appendChild(x);
+    document.documentElement.style.paddingTop = 'calc(env(safe-area-inset-top, 0px) + 36px)';
     document.documentElement.appendChild(b);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bar); else bar();
