@@ -56,21 +56,15 @@ node scripts/sync-ios-python.mjs
 # 链接与装包分别在下面的 xcodebuild 参数与 --install-app 里。
 node scripts/sync-ios-node.mjs
 
-# MPVKit 28 个 LGPL 产物（静态库）：build.rs 在 cargo 构建时（Xcode 的
-# "Build Rust Code" 阶段，在链接之前）把它们的 ios-arm64 切片暂存到
-# gen/apple/MPVKit/（见 src-tauri/build.rs），这里链进最终可执行文件。
-# 顺序是依赖拓扑（被依赖的在后）；同一组列两遍——静态库单遍链接遇到
-# 循环依赖会漏符号，第二遍补上。静态库不用嵌进 .app，没有 --install-app。
-MPVKIT_LDFLAGS="-framework Libmpv -framework Libavdevice -framework Libavfilter -framework Libavformat -framework Libavcodec -framework Libass -framework Libbluray -framework Libssl -framework gnutls -framework Libswscale -framework Libswresample -framework Libplacebo -framework Libshaderc_combined -framework Libdovi -framework Libdav1d -framework Libuavs3d -framework Libharfbuzz -framework Libfreetype -framework Libfribidi -framework Libunibreak -framework lcms2 -framework Libcrypto -framework nettle -framework hogweed -framework gmp -framework Libavutil -framework Libuchardet"
-# MoltenVK 不在上面：它是库型 XCFramework（切片里只有 libMoltenVK.a，
-# 没有 .framework 包），用 -lMoltenVK + LIBRARY_SEARCH_PATHS 链，放
-# 在最后（Libmpv / Libplacebo 用它的符号，被依赖的在后）。
-# MPVKit 自己的 linkerSettings（_MPVKit + _FFmpeg 的
-# .linkedFramework / .linkedLibrary）：swift-rs 不会把它们传进最终
-# Xcode 链接，这里照单补上（全是系统库，不是第三方依赖）。Xcode + SPM
-# 集成时这些是自动带上的；我们是 build.rs + xcodebuild 手动链，必须
-# 自己补。Metal 已在工程默认链接里，重复写无害。
-MPVKIT_SYS_LDFLAGS="-framework AVFoundation -framework CoreAudio -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework CoreMedia -framework Metal -framework VideoToolbox -lbz2 -liconv -lexpat -lresolv -lxml2 -lz -lc++"
+# MPVKit 28 个 LGPL 产物（静态库）：v0.0.126 诊断版暂时摘掉（见
+# Package.swift 与 build.rs）——v0.0.124/125 带 MPVKit 静态链入后
+# 启动黑屏（无 .ips、无 JetsamEvent），125 的 smbc 修法已验在包里
+# 仍黑屏，怀疑是 MPVKit 这堆静态库导致启动挂起；摘掉后若能启动，
+# 即证实是它，再想办法把 mpv 接回来。恢复办法：把 MPVKIT_LDFLAGS
+#（28 个 -framework，同一组列两遍防循环依赖漏符号）、MPVKIT_SYS_LDFLAGS
+#（MPVKit 的 linkerSettings 系统库）、-lMoltenVK、FRAMEWORK_SEARCH_PATHS
+# 里的 $(PROJECT_DIR)/MPVKit、LIBRARY_SEARCH_PATHS 这一行全加回来。
+# 原值见 git 历史（v0.0.125 的 build-ios-unsigned.sh）。
 # smbc_*：LGPL 的 Libavformat 编译时开了 SMB 支持（libsmbclient.o 在
 # 包里），但 Libsmbclient 本身是 GPL，不在 LGPL 产品里，所以这 22 个
 # 符号没处链。v0.0.124 用 `-Wl,-U` 让它们保持未定义，结果 dyld 启动
@@ -93,9 +87,8 @@ xcodebuild build \
   -derivedDataPath "$ROOT/build_output" \
   TOOLCHAIN_DIR="$XCODE_TOOLCHAIN" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-  FRAMEWORK_SEARCH_PATHS='$(inherited) $(PROJECT_DIR) $(PROJECT_DIR)/Python.xcframework/ios-arm64 $(PROJECT_DIR)/MPVKit' \
-  LIBRARY_SEARCH_PATHS='$(inherited) $(PROJECT_DIR)/MPVKit' \
-  OTHER_LDFLAGS='$(inherited) -framework Python -framework SystemConfiguration'" $MPVKIT_LDFLAGS $MPVKIT_LDFLAGS $MPVKIT_SYS_LDFLAGS -lMoltenVK"
+  FRAMEWORK_SEARCH_PATHS='$(inherited) $(PROJECT_DIR) $(PROJECT_DIR)/Python.xcframework/ios-arm64' \
+  OTHER_LDFLAGS='$(inherited) -framework Python -framework SystemConfiguration'
 
 APP_DIR="$ROOT/build_output/Build/Products/release-iphoneos"
 # 产品名改名后 .app 文件名会跟着变（改名前是 HGhub.app），不写死名字，

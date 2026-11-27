@@ -113,8 +113,11 @@ fn link_ios_native_plugins() {
     // --install-app 步骤。28 个是 MPVKit 0.40.0-xcode 的 LGPL 产品
     // `MPVKit` 的传递闭包（从它的 Package.swift 算出）；换 MPVKit
     // 版本要重新算。只在 macOS host + iOS target 跑。
-    #[cfg(target_os = "macos")]
-    stage_mpvkit_frameworks(&manifest_dir);
+    // v0.0.126 诊断版：MPVKit 暂时摘掉（见 Package.swift），这行先注释，
+    // 恢复时取消注释即可；stage_mpvkit_frameworks 与 MPVKIT_FRAMEWORKS
+    // 留着，别删。
+    // #[cfg(target_os = "macos")]
+    // stage_mpvkit_frameworks(&manifest_dir);
 }
 
 /// MPVKit LGPL 产品 `MPVKit` 的传递闭包（0.40.0-xcode，28 个二进制目标）。

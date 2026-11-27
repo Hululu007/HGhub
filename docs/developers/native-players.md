@@ -115,6 +115,14 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   持。v0.0.124 曾用 `-Wl,-U` 让它们保持未定义，结果 dyld 启动时就要
   解析、直接 abort（启动闪退），已删掉——没了 `-U`，空实现要是没链
   上，构建直接报 undefined symbols，不会再悄悄打出启动就崩的包。
+  **v0.0.126 诊断版：MPVKit 暂时摘掉**——v0.0.124/125 带 MPVKit 静态
+  链入后启动黑屏（无 .ips、无 JetsamEvent），125 的 smbc 修法已验在
+  包里仍黑屏，怀疑是 MPVKit 这堆静态库导致启动挂起；摘掉后若能启动，
+  即证实是它，再想办法把 mpv 接回来。摘掉的范围：Package.swift 的
+  MPVKit 依赖 + target 的 `.product(name: "MPVKit")`、build.rs 的
+  stage_mpvkit_frameworks 调用、build-ios-unsigned.sh 的 MPVKIT_* 链接
+  参数与 MPVKit 搜索路径；MPVEngine 走 `#else` 空实现（报 unavailable），
+  smbc 空实现留着（只改一个变量）。恢复办法见各文件里的注释。
   真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
 
 ## Mac 验证（按顺序）
