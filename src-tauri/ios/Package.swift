@@ -35,17 +35,24 @@ let package = Package(
   ],
   dependencies: [
     .package(name: "Tauri", path: "../.tauri/tauri-api"),
-    // mpv（MPVKit 0.40.0-xcode，LGPL）：v0.0.126 诊断版暂时摘掉——
-    // v0.0.124/125 带 MPVKit 静态链入后启动黑屏（无 .ips、无 JetsamEvent），
-    // 125 的 smbc 修法已验在包里仍黑屏，怀疑是 MPVKit 这堆静态库导致
-    // 启动挂起；摘掉后若能启动，即证实是它，再想办法把 mpv 接回来
-    // （懒加载 / 换链接方式）。摘掉后 MPVEngine 走 #else 空实现（报
-    // unavailable），播放内核选 mpv 会提示未接入。恢复办法：把下面
-    // 这一段 MPVKit 依赖加回来（url exact "0.40.0-xcode"，target 里
-    // 再加 .product(name: "MPVKit", package: "MPVKit")），同时恢复
-    // build.rs 的 stage_mpvkit_frameworks 调用和 build-ios-unsigned.sh
-    // 的 MPVKIT_* 链接参数。GPL 版产品 `MPVKit-GPL` 含 Samba，与 HGhub
-    // 的 PolyForm Noncommercial 冲突，不要用。
+    // mpv 软解（LGPL 版产品 `MPVKit`；GPL 版产品 `MPVKit-GPL` 含 Samba，
+    // 与 HGhub 的 PolyForm Noncommercial 冲突，不要用）。
+    // 钉 0.40.0-xcode exact：0.40.0 的 Libuavs3d / Libuchardet 清单
+    // 校验和已过期（子仓库重发了 1.2.1 / 0.0.8 的包，清单没跟上；
+    // 实测 sha256 与 CI 算出的一致、与清单不符，重跑也一样失败）。
+    // -xcode 变体 38 个产物全是 -xcode 后缀、成套的，坏掉的那两个
+    // 校验和已核对无误；mpv 仍是 0.40.0，iOS 底线仍是 13。
+    // 0.41.0 起最低 iOS 14.0，1.x 起 iOS 15.0，升版要先定 iOS floor。
+    // 注意 MPVKit 只提供 libmpv/FFmpeg 的 XCFramework，没有 Swift
+    // 播放器类——引擎直接调 libmpv C API（见 engines/MPVEngine.swift）。
+    // v0.0.127 懒加载：这个依赖只让 SPM 把 XCFramework 下下来、供
+    // build.rs 暂存到 gen/apple/MPVKit/，再由 build-ios-unsigned.sh
+    // 打成 MPVKit.framework 动态库、嵌进 .app/Frameworks/，选 mpv
+    // 播放时才 dlopen。主程序启动时完全不碰 MPVKit（v0.0.124/125
+    // 静态链入后启动黑屏，126 摘掉就启动，已证实是它），所以
+    // OTHER_LDFLAGS 里不再加 MPVKit 的 -framework；Swift 代码也不
+    // 再 `import Libmpv`（改 dlopen + dlsym，见 MPVEngine.swift）。
+    .package(url: "https://github.com/mpvkit/MPVKit.git", exact: "0.40.0-xcode")
   ],
   targets: [
     // Targets are the basic building blocks of a package. A target can define a module or a test suite.
@@ -54,6 +61,7 @@ let package = Package(
       name: "NativePlugins",
       dependencies: [
         .byName(name: "Tauri"),
+        .product(name: "MPVKit", package: "MPVKit"),
       ],
       path: "Sources")
   ]

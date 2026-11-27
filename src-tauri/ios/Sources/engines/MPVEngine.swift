@@ -1,21 +1,133 @@
 // mpv 引擎（libmpv / MPVKit）：四个里格式和 ASS 字幕最强，但也最难接。
 // MPVKit（mpvkit/MPVKit，LGPL 版产品 `MPVKit`）只提供 libmpv/FFmpeg
 // 的 XCFramework，没有 Swift 播放器类——MPVPlayer/MPVGLView 是另一个
-// libmpv-ios 项目的包，不在 MPVKit 里。所以这里直接调 libmpv 的 C API
-//（import Libmpv），渲染走 MPVKit Demo 同款：CAMetalLayer +
+// libmpv-ios 项目的包，不在 MPVKit 里。所以这里直接调 libmpv 的 C API，
+// 渲染走 MPVKit Demo 同款：CAMetalLayer +
 // vo=gpu-next + gpu-api=vulkan + gpu-context=moltenvk，
 // hwdec=videotoolbox（H.264/HEVC 硬解；AV1 等走 dav1d 软解）。
 // 钉的版本见 src-tauri/ios/Package.swift（MPVKit 0.40.0-xcode exact，
 // iOS 13.0 底线；0.41.0 起要 iOS 14.0，1.x 起要 iOS 15.0）。
 // 详见 docs/developers/native-players.md。
 //
-// 依赖未装时走 #else 分支：open 直接报 unavailable，说明缺什么、怎么装。
-// 第一次在 Mac 上编时以接入的 MPVKit 版本为准由 Xcode 校验。
+// 懒加载（v0.0.127）：MPVKit 不再静态链进主程序（v0.0.124/125 那样
+// 启动黑屏，126 摘掉就启动，已证实是它）。28 个静态库打成一个动态库
+// MPVKit.framework、嵌进 .app/Frameworks/，启动时完全不碰；这里在
+// 用户第一次选 mpv 点播放时才 dlopen + dlsym，加载失败就报
+// unavailable、播放链回落 AVPlayer/WebView，绝不 crash。主程序里
+// 没有任何 mpv 符号（不 `import Libmpv`），所以启动与 126 完全一致。
+// libmpv 的常量与结构体布局按 MPVKit 0.40.0-xcode 的 client.h 手写
+// （MPV_FORMAT_* / MPV_EVENT_* / MPV_END_FILE_REASON_* / mpv_event /
+// mpv_event_property / mpv_event_end_file），错一个字段就内存错乱，
+// 改版先核对 client.h。
 
 import UIKit
 
-#if canImport(Libmpv)
-import Libmpv
+/// libmpv 常量（client.h，mpv 0.40.0）：MPV_FORMAT_*。
+private let MPV_FORMAT_FLAG: Int32 = 3
+private let MPV_FORMAT_INT64: Int32 = 4
+private let MPV_FORMAT_DOUBLE: Int32 = 5
+
+/// libmpv 常量（client.h，mpv 0.40.0）：MPV_EVENT_*。
+private let MPV_EVENT_NONE: Int32 = 0
+private let MPV_EVENT_SHUTDOWN: Int32 = 1
+private let MPV_EVENT_END_FILE: Int32 = 7
+private let MPV_EVENT_PROPERTY_CHANGE: Int32 = 22
+
+/// libmpv 常量（client.h，mpv 0.40.0）：MPV_END_FILE_REASON_*。
+/// 注意 0.40.0 里 ERROR = 4（不是 3），STOP = 2，QUIT = 3，REDIRECT = 5。
+private let MPV_END_FILE_REASON_EOF: Int32 = 0
+private let MPV_END_FILE_REASON_ERROR: Int32 = 4
+
+/// libmpv 事件结构（client.h，mpv 0.40.0）：mpv_event。
+/// 字段顺序与类型必须与 C 完全一致：event_id(int)、error(int)、
+/// reply_userdata(uint64_t)、data(void*)。
+private struct MPVEvent {
+  var event_id: Int32
+  var error: Int32
+  var reply_userdata: UInt64
+  var data: UnsafeMutableRawPointer?
+}
+
+/// libmpv 事件结构（client.h，mpv 0.40.0）：mpv_event_property。
+/// 字段：name(const char*)、format(mpv_format/int)、data(void*)。
+private struct MPVEventProperty {
+  var name: UnsafePointer<CChar>?
+  var format: Int32
+  var data: UnsafeMutableRawPointer?
+}
+
+/// libmpv 事件结构（client.h，mpv 0.40.0）：mpv_event_end_file。
+/// 字段：reason(mpv_end_file_reason/int)、error(int)、
+/// playlist_entry_id(int64_t)、playlist_insert_id(int64_t)、
+/// playlist_insert_num_entries(int)。注意 playlist_entry_id 在
+/// API 1.108 起是 int64_t（旧版是 const char*），不要按旧版写。
+private struct MPVEventEndFile {
+  var reason: Int32
+  var error: Int32
+  var playlist_entry_id: Int64
+  var playlist_insert_id: Int64
+  var playlist_insert_num_entries: Int32
+}
+
+/// dlopen 后 dlsym 出来的 libmpv 函数表：每个函数一个 @convention(c)
+/// 函数指针。加载时逐个 dlsym、缺一个就整体失败（不调空指针）。
+private struct MPVKitAPI {
+  let create: @convention(c) () -> OpaquePointer?
+  let initialize: @convention(c) (OpaquePointer?) -> Int32
+  let terminateDestroy: @convention(c) (OpaquePointer?) -> Void
+  let setOption: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32
+  let setOptionString: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Int32
+  let command: @convention(c) (OpaquePointer?, UnsafeMutablePointer<UnsafePointer<CChar>?>?) -> Int32
+  let setProperty: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32
+  let getProperty: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32
+  let observeProperty: @convention(c) (OpaquePointer?, UInt64, UnsafePointer<CChar>?, Int32) -> Int32
+  let requestLogMessages: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Int32
+  let waitEvent: @convention(c) (OpaquePointer?, Double) -> UnsafePointer<MPVEvent>?
+  let setWakeupCallback: @convention(c) (OpaquePointer?, (@convention(c) (UnsafeMutableRawPointer?) -> Void)?, UnsafeMutableRawPointer?) -> Void
+}
+
+/// dlopen MPVKit.framework 并 dlsym 出全部 libmpv 函数。
+/// 失败返回 nil（附 dlerror 原因，调用方写进 unavailable 错误）。
+/// 只在用户选 mpv 播放时调（open 入口），启动时绝不调。
+/// 不 dlclose：播完不卸载，进程生命周期内常驻（重复 dlopen 同一路
+/// 径本就会返回同一 handle）。
+private func loadMPVKitAPI() -> (api: MPVKitAPI?, error: String?) {
+  guard let path = Bundle.main.path(
+    forResource: "MPVKit", ofType: nil,
+    inDirectory: "Frameworks/MPVKit.framework")
+  else {
+    return (nil, "MPVKit.framework 不在包里")
+  }
+  guard let handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL) else {
+    let reason = dlerror().map { String(cString: $0) } ?? "未知原因"
+    return (nil, "dlopen 失败：\(reason)")
+  }
+  func sym<T>(_ name: String, as type: T.Type) -> T? {
+    guard let ptr = dlsym(handle, name) else { return nil }
+    return unsafeBitCast(ptr, to: type)
+  }
+  guard let create = sym("mpv_create", as: (@convention(c) () -> OpaquePointer?).self),
+        let initialize = sym("mpv_initialize", as: (@convention(c) (OpaquePointer?) -> Int32).self),
+        let terminateDestroy = sym("mpv_terminate_destroy", as: (@convention(c) (OpaquePointer?) -> Void).self),
+        let setOption = sym("mpv_set_option", as: (@convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32).self),
+        let setOptionString = sym("mpv_set_option_string", as: (@convention(c) (OpaquePointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Int32).self),
+        let command = sym("mpv_command", as: (@convention(c) (OpaquePointer?, UnsafeMutablePointer<UnsafePointer<CChar>?>?) -> Int32).self),
+        let setProperty = sym("mpv_set_property", as: (@convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32).self),
+        let getProperty = sym("mpv_get_property", as: (@convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32).self),
+        let observeProperty = sym("mpv_observe_property", as: (@convention(c) (OpaquePointer?, UInt64, UnsafePointer<CChar>?, Int32) -> Int32).self),
+        let requestLogMessages = sym("mpv_request_log_messages", as: (@convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Int32).self),
+        let waitEvent = sym("mpv_wait_event", as: (@convention(c) (OpaquePointer?, Double) -> UnsafePointer<MPVEvent>?).self),
+        let setWakeupCallback = sym("mpv_set_wakeup_callback", as: (@convention(c) (OpaquePointer?, (@convention(c) (UnsafeMutableRawPointer?) -> Void)?, UnsafeMutableRawPointer?) -> Void).self)
+  else {
+    return (nil, "dlsym 缺函数（MPVKit 版本不对？）")
+  }
+  return (MPVKitAPI(
+    create: create, initialize: initialize, terminateDestroy: terminateDestroy,
+    setOption: setOption, setOptionString: setOptionString, command: command,
+    setProperty: setProperty, getProperty: getProperty,
+    observeProperty: observeProperty, requestLogMessages: requestLogMessages,
+    waitEvent: waitEvent, setWakeupCallback: setWakeupCallback), nil)
+}
 
 /// mpv 渲染用的 Metal 层（照搬 MPVKit Demo 的 MetalLayer）：
 /// MoltenVK 会把 drawableSize 压成 1x1 强行完成一帧，导致闪烁还可能
@@ -57,6 +169,7 @@ final class MPVEngine: NSObject, NativePlayerEngine {
   var eventHandler: ((NativePlayerEvent) -> Void)?
 
   private var mpv: OpaquePointer?
+  private var api: MPVKitAPI?
   private var videoView: MPVVideoView?
   private var container: UIViewController?
   private var timer: Timer?
@@ -90,9 +203,9 @@ final class MPVEngine: NSObject, NativePlayerEngine {
   /// 不然 wakeup 回调还会往已释放的 self 上打。
   deinit {
     timer?.invalidate()
-    if let handle = mpv {
+    if let handle = mpv, let api = api {
       mpv = nil
-      mpv_terminate_destroy(handle)
+      api.terminateDestroy(handle)
     }
   }
 
@@ -102,7 +215,16 @@ final class MPVEngine: NSObject, NativePlayerEngine {
     completion: @escaping (Result<NativePlayerState, Error>) -> Void
   ) {
     _ = title
-    guard let handle = mpv_create() else {
+    // 懒加载：到这里（用户选了 mpv）才 dlopen MPVKit.framework。
+    // 启动时不走这里，所以启动完全不受 MPVKit 影响。
+    let loaded = loadMPVKitAPI()
+    guard let api = loaded.api else {
+      completion(.failure(NativePlayerUnavailableError(
+        message: "mpv 未接入：\(loaded.error ?? "MPVKit 加载失败")，详见 docs/developers/native-players.md")))
+      return
+    }
+    self.api = api
+    guard let handle = api.create() else {
       completion(.failure(NativePlayerUnavailableError(message: "mpv 创建失败")))
       return
     }
@@ -120,30 +242,30 @@ final class MPVEngine: NSObject, NativePlayerEngine {
     self.container = container
 
     var layer = videoView.metalLayer
-    mpv_set_option(handle, "wid", MPV_FORMAT_INT64, &layer)
-    mpv_set_option_string(handle, "vo", "gpu-next")
-    mpv_set_option_string(handle, "gpu-api", "vulkan")
-    mpv_set_option_string(handle, "gpu-context", "moltenvk")
-    mpv_set_option_string(handle, "hwdec", "videotoolbox")
-    mpv_set_option_string(handle, "subs-match-os-language", "yes")
-    mpv_set_option_string(handle, "subs-fallback", "yes")
-    mpv_set_option_string(handle, "video-rotate", "no")
+    api.setOption(handle, "wid", MPV_FORMAT_INT64, &layer)
+    api.setOptionString(handle, "vo", "gpu-next")
+    api.setOptionString(handle, "gpu-api", "vulkan")
+    api.setOptionString(handle, "gpu-context", "moltenvk")
+    api.setOptionString(handle, "hwdec", "videotoolbox")
+    api.setOptionString(handle, "subs-match-os-language", "yes")
+    api.setOptionString(handle, "subs-fallback", "yes")
+    api.setOptionString(handle, "video-rotate", "no")
     #if DEBUG
-    mpv_request_log_messages(handle, "debug")
+    api.requestLogMessages(handle, "debug")
     #else
-    mpv_request_log_messages(handle, "no")
+    api.requestLogMessages(handle, "no")
     #endif
-    guard mpv_initialize(handle) >= 0 else {
-      mpv_terminate_destroy(handle)
+    guard api.initialize(handle) >= 0 else {
+      api.terminateDestroy(handle)
       self.videoView = nil
       self.container = nil
       completion(.failure(NativePlayerUnavailableError(message: "mpv 初始化失败")))
       return
     }
     self.mpv = handle
-    mpv_observe_property(handle, 0, "dwidth", MPV_FORMAT_INT64)
-    mpv_observe_property(handle, 0, "dheight", MPV_FORMAT_INT64)
-    mpv_set_wakeup_callback(handle, { ctx in
+    api.observeProperty(handle, 0, "dwidth", MPV_FORMAT_INT64)
+    api.observeProperty(handle, 0, "dheight", MPV_FORMAT_INT64)
+    api.setWakeupCallback(handle, { ctx in
       guard let ctx = ctx else { return }
       let engine = Unmanaged<MPVEngine>.fromOpaque(ctx).takeUnretainedValue()
       engine.readEvents()
@@ -195,15 +317,15 @@ final class MPVEngine: NSObject, NativePlayerEngine {
   }
 
   func setRate(_ rate: Double) {
-    guard let handle = mpv else { return }
+    guard let handle = mpv, let api = api else { return }
     var value = rate
-    mpv_set_property(handle, "speed", MPV_FORMAT_DOUBLE, &value)
+    api.setProperty(handle, "speed", MPV_FORMAT_DOUBLE, &value)
   }
 
   func setVolume(_ volume: Double, muted: Bool) {
-    guard let handle = mpv else { return }
+    guard let handle = mpv, let api = api else { return }
     var value = muted ? 0 : volume * 100
-    mpv_set_property(handle, "volume", MPV_FORMAT_DOUBLE, &value)
+    api.setProperty(handle, "volume", MPV_FORMAT_DOUBLE, &value)
     setFlag(handle, "mute", muted)
   }
 
@@ -215,10 +337,11 @@ final class MPVEngine: NSObject, NativePlayerEngine {
     // terminate_destroy 会把阻塞在 wait_event 里的循环唤醒。
     let handle = mpv
     mpv = nil
-    if let handle = handle {
+    if let handle = handle, let api = api {
       _ = command(handle, "stop")
-      mpv_terminate_destroy(handle)
+      api.terminateDestroy(handle)
     }
+    api = nil
     videoView?.removeFromSuperview()
     videoView = nil
     container?.dismiss(animated: true, completion: nil)
@@ -232,35 +355,37 @@ final class MPVEngine: NSObject, NativePlayerEngine {
   // MARK: - libmpv 小工具（照搬 MPVKit Demo 的同名做法）
 
   private func getDouble(_ name: String) -> Double {
-    guard let handle = mpv else { return 0 }
+    guard let handle = mpv, let api = api else { return 0 }
     var data = Double()
-    mpv_get_property(handle, name, MPV_FORMAT_DOUBLE, &data)
+    api.getProperty(handle, name, MPV_FORMAT_DOUBLE, &data)
     return data
   }
 
   private func getFlag(_ name: String) -> Bool {
-    guard let handle = mpv else { return false }
+    guard let handle = mpv, let api = api else { return false }
     var data = Int64()
-    mpv_get_property(handle, name, MPV_FORMAT_FLAG, &data)
+    api.getProperty(handle, name, MPV_FORMAT_FLAG, &data)
     return data > 0
   }
 
   private func setFlag(_ handle: OpaquePointer, _ name: String, _ flag: Bool) {
+    guard let api = api else { return }
     var data: Int = flag ? 1 : 0
-    mpv_set_property(handle, name, MPV_FORMAT_FLAG, &data)
+    api.setProperty(handle, name, MPV_FORMAT_FLAG, &data)
   }
 
   /// 发一条 mpv 命令（argv 式）；返回 mpv 的错误码（0 成功，负数失败）。
   /// C 参数用 strdup/free 管理（Demo 同款）。
   @discardableResult
   private func command(_ handle: OpaquePointer, _ command: String, args: [String?] = []) -> Int32 {
+    guard let api = api else { return -1 }
     var cargs = makeCArgs(command, args).map { $0.flatMap { UnsafePointer<CChar>(strdup($0)) } }
     defer {
       for ptr in cargs where ptr != nil {
         free(UnsafeMutablePointer(mutating: ptr!))
       }
     }
-    return mpv_command(handle, &cargs)
+    return api.command(handle, &cargs)
   }
 
   private func makeCArgs(_ command: String, _ args: [String?]) -> [String?] {
@@ -278,13 +403,13 @@ final class MPVEngine: NSObject, NativePlayerEngine {
   /// 其它事件（日志等）直接丢掉，不打印。
   private func readEvents() {
     eventQueue.async { [weak self] in
-      guard let self = self else { return }
+      guard let self = self, let api = self.api else { return }
       while let handle = self.mpv {
-        guard let event = mpv_wait_event(handle, 0) else { break }
+        guard let event = api.waitEvent(handle, 0) else { break }
         if event.pointee.event_id == MPV_EVENT_NONE { break }
         switch event.pointee.event_id {
         case MPV_EVENT_PROPERTY_CHANGE:
-          guard let property = UnsafePointer<mpv_event_property>(OpaquePointer(event.pointee.data))?.pointee else { continue }
+          guard let property = UnsafePointer<MPVEventProperty>(OpaquePointer(event.pointee.data))?.pointee else { continue }
           let name = String(cString: property.name)
           if name == "dwidth" || name == "dheight" {
             guard let value = UnsafePointer<Int64>(OpaquePointer(property.data))?.pointee else { continue }
@@ -293,7 +418,7 @@ final class MPVEngine: NSObject, NativePlayerEngine {
             }
           }
         case MPV_EVENT_END_FILE:
-          guard let endFile = UnsafePointer<mpv_event_end_file>(OpaquePointer(event.pointee.data))?.pointee else { continue }
+          guard let endFile = UnsafePointer<MPVEventEndFile>(OpaquePointer(event.pointee.data))?.pointee else { continue }
           if endFile.reason == MPV_END_FILE_REASON_ERROR {
             DispatchQueue.main.async { self.fireError() }
           } else if endFile.reason == MPV_END_FILE_REASON_EOF {
@@ -323,37 +448,3 @@ final class MPVEngine: NSObject, NativePlayerEngine {
     eventHandler?(.error("mpv 播放失败"))
   }
 }
-
-#else
-
-final class MPVEngine: NSObject, NativePlayerEngine {
-  var eventHandler: ((NativePlayerEvent) -> Void)?
-  var videoSize: CGSize { .zero }
-  var currentState: NativePlayerState {
-    NativePlayerState(
-      engine: "mpv", playing: false, position: 0, duration: 0,
-      rate: 1, volume: 0, muted: false, videoWidth: 0, videoHeight: 0)
-  }
-
-  func open(
-    url: URL, position: Double, rate: Double, volume: Double, muted: Bool, title: String?,
-    present: @escaping (UIViewController) -> Void,
-    completion: @escaping (Result<NativePlayerState, Error>) -> Void
-  ) {
-    _ = url; _ = position; _ = rate; _ = volume; _ = muted; _ = title; _ = present
-    completion(
-      .failure(
-        NativePlayerUnavailableError(
-          message:
-            "mpv 未接入：Package.swift 里 MPVKit 0.40.0（LGPL）依赖未生效（可能 SPM 未解析或版本不对），详见 docs/developers/native-players.md")))
-  }
-
-  func play() {}
-  func pause() {}
-  func seek(to position: Double) { _ = position }
-  func setRate(_ rate: Double) { _ = rate }
-  func setVolume(_ volume: Double, muted: Bool) { _ = volume; _ = muted }
-  func close() {}
-}
-
-#endif

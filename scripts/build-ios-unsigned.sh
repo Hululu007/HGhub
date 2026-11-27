@@ -56,23 +56,18 @@ node scripts/sync-ios-python.mjs
 # 链接与装包分别在下面的 xcodebuild 参数与 --install-app 里。
 node scripts/sync-ios-node.mjs
 
-# MPVKit 28 个 LGPL 产物（静态库）：v0.0.126 诊断版暂时摘掉（见
-# Package.swift 与 build.rs）——v0.0.124/125 带 MPVKit 静态链入后
-# 启动黑屏（无 .ips、无 JetsamEvent），125 的 smbc 修法已验在包里
-# 仍黑屏，怀疑是 MPVKit 这堆静态库导致启动挂起；摘掉后若能启动，
-# 即证实是它，再想办法把 mpv 接回来。恢复办法：把 MPVKIT_LDFLAGS
-#（28 个 -framework，同一组列两遍防循环依赖漏符号）、MPVKIT_SYS_LDFLAGS
-#（MPVKit 的 linkerSettings 系统库）、-lMoltenVK、FRAMEWORK_SEARCH_PATHS
-# 里的 $(PROJECT_DIR)/MPVKit、LIBRARY_SEARCH_PATHS 这一行全加回来。
-# 原值见 git 历史（v0.0.125 的 build-ios-unsigned.sh）。
+# MPVKit 28 个 LGPL 产物（静态库）：v0.0.127 懒加载——不再静态链进
+# 主程序（v0.0.124/125 那样启动黑屏，126 摘掉就启动，已证实是它）。
+# build.rs 只把 28 个产物的 ios-arm64 切片暂存到 gen/apple/MPVKit/
+#（staging 在 xcodebuild 的 "Build Rust Code" 阶段跑），xcodebuild
+# 之后、打 IPA 之前，本脚本用 clang -dynamiclib 把它们打成一个
+# MPVKit.framework 动态库（smbc 空实现用 C 版 smbc_stubs.c 一起链
+# 进去，自包含），嵌进 .app/Frameworks/，选 mpv 播放时才 dlopen。
+# 主程序 OTHER_LDFLAGS 里不再加 MPVKit 的 -framework（启动零引用），
+# Swift 代码也不再 import Libmpv（改 dlopen + dlsym）。
 # smbc_*：LGPL 的 Libavformat 编译时开了 SMB 支持（libsmbclient.o 在
 # 包里），但 Libsmbclient 本身是 GPL，不在 LGPL 产品里，所以这 22 个
-# 符号没处链。v0.0.124 用 `-Wl,-U` 让它们保持未定义，结果 dyld 启动
-# 时就要解析、报 Symbol not found、直接 abort（启动闪退）。v0.0.125
-# 起改在 Rust 里写空实现（src-tauri/src/smbc_stubs.rs，只 iOS 编译），
-# 让链接时符号有着落；-U 已删掉——没了它，空实现要是没链上，构建
-# 直接报 undefined symbols，不会再悄悄打出一个启动就崩的包。不要为
-# 此链 GPL 的 Libsmbclient，smb:// 播放不支持。
+# 符号没处链。不要为此链 GPL 的 Libsmbclient，smb:// 播放不支持。
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.
 XCODE_TOOLCHAIN="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain"
@@ -117,6 +112,111 @@ node scripts/sync-ios-python.mjs --install-app "$APP"
 # Node 引擎装包：NodeMobile.framework + 边车源码进 .app，
 # 再打 IPA 之前完成。
 node scripts/sync-ios-node.mjs --install-app "$APP"
+
+# MPVKit 懒加载：把 build.rs 暂存的 28 个静态库打成一个动态库
+# MPVKit.framework，嵌进 .app/Frameworks/。启动时不加载，选 mpv
+# 播放时 Swift 才 dlopen（见 engines/MPVEngine.swift）。
+# -force_load 逐个加：静态库默认只拉被引用到的目标文件，libmpv 的
+# 符号是 dlsym 动态调用的、链接时无引用，不加会丢符号。不要用全局
+# -all_load（会作用于系统库、引出重复符号）。
+# smbc 空实现（src-tauri/ios/smbc_stubs.c）一起链进去：dlopen 那一
+# 刻（chained fixups 下全部符号立即绑定）22 个 smbc_* 必须有着落。
+# 校验：dylib 是 arm64 Mach-O；install_name 是
+# @rpath/MPVKit.framework/MPVKit；无 __mod_init_func（有的话 dlopen
+# 时会先跑构造器，挂起/崩溃就卡在选 mpv 那一步）；mpv_create 已定义
+# （导出）；smbc_* 无未定义（空实现已链进）。
+MPVKIT_STAGE="src-tauri/gen/apple/MPVKit"
+MPVKIT_TMP="$(mktemp -d)"
+IOS_SDKROOT="$(xcrun -sdk iphoneos --show-sdk-path)"
+xcrun -sdk iphoneos clang -arch arm64 -target arm64-apple-ios15.0 \
+  -isysroot "$IOS_SDKROOT" -c src-tauri/ios/smbc_stubs.c \
+  -o "$MPVKIT_TMP/smbc_stubs.o"
+mkdir -p "$MPVKIT_TMP/MPVKit.framework"
+xcrun -sdk iphoneos clang -dynamiclib \
+  -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDKROOT" \
+  -install_name @rpath/MPVKit.framework/MPVKit \
+  -o "$MPVKIT_TMP/MPVKit.framework/MPVKit" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libmpv.framework/Libmpv" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libavdevice.framework/Libavdevice" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libavfilter.framework/Libavfilter" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libavformat.framework/Libavformat" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libavcodec.framework/Libavcodec" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libass.framework/Libass" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libbluray.framework/Libbluray" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libssl.framework/Libssl" \
+  -Wl,-force_load,"$MPVKIT_STAGE/gnutls.framework/gnutls" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libswscale.framework/Libswscale" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libswresample.framework/Libswresample" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libplacebo.framework/Libplacebo" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libshaderc_combined.framework/Libshaderc_combined" \
+  -Wl,-force_load,"$MPVKIT_STAGE/libMoltenVK.a" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libdovi.framework/Libdovi" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libdav1d.framework/Libdav1d" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libuavs3d.framework/Libuavs3d" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libharfbuzz.framework/Libharfbuzz" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libfreetype.framework/Libfreetype" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libfribidi.framework/Libfribidi" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libunibreak.framework/Libunibreak" \
+  -Wl,-force_load,"$MPVKIT_STAGE/lcms2.framework/lcms2" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libcrypto.framework/Libcrypto" \
+  -Wl,-force_load,"$MPVKIT_STAGE/nettle.framework/nettle" \
+  -Wl,-force_load,"$MPVKIT_STAGE/hogweed.framework/hogweed" \
+  -Wl,-force_load,"$MPVKIT_STAGE/gmp.framework/gmp" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libavutil.framework/Libavutil" \
+  -Wl,-force_load,"$MPVKIT_STAGE/Libuchardet.framework/Libuchardet" \
+  "$MPVKIT_TMP/smbc_stubs.o" \
+  -framework AVFoundation -framework CoreAudio -framework AudioToolbox \
+  -framework CoreVideo -framework CoreFoundation -framework CoreMedia \
+  -framework Metal -framework VideoToolbox \
+  -lbz2 -liconv -lexpat -lresolv -lxml2 -lz -lc++
+cat > "$MPVKIT_TMP/MPVKit.framework/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>MPVKit</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.hghub.player.mpvkit</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MPVKit</string>
+	<key>CFBundlePackageType</key>
+	<string>FMWK</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.40.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.40.0</string>
+	<key>MinimumOSVersion</key>
+	<string>15.0</string>
+</dict>
+</plist>
+PLIST
+MPVKIT_DYLIB="$MPVKIT_TMP/MPVKit.framework/MPVKit"
+file "$MPVKIT_DYLIB" | grep 'Mach-O.*dynamically linked shared library.*arm64'
+if [ "$(xcrun -sdk iphoneos otool -D "$MPVKIT_DYLIB" | tail -1)" != '@rpath/MPVKit.framework/MPVKit' ]; then
+  echo 'MPVKit dylib install_name 不是 @rpath/MPVKit.framework/MPVKit' >&2
+  exit 1
+fi
+if xcrun -sdk iphoneos otool -l "$MPVKIT_DYLIB" | grep -q '__mod_init_func'; then
+  echo 'MPVKit dylib 有 __mod_init_func（dlopen 时会跑构造器）' >&2
+  exit 1
+fi
+if ! xcrun -sdk iphoneos nm -g "$MPVKIT_DYLIB" | grep -q ' T _mpv_create$'; then
+  echo 'MPVKit dylib 未导出 _mpv_create' >&2
+  exit 1
+fi
+if xcrun -sdk iphoneos nm -u "$MPVKIT_DYLIB" | grep -q '_smbc_'; then
+  echo 'MPVKit dylib 还有未定义的 _smbc_（空实现没链进）' >&2
+  exit 1
+fi
+mkdir -p "$APP/Frameworks"
+cp -R "$MPVKIT_TMP/MPVKit.framework" "$APP/Frameworks/"
+ls -lh "$APP/Frameworks/MPVKit.framework/MPVKit"
+rm -rf "$MPVKIT_TMP"
 
 PACKAGE_DIR=$(mktemp -d)
 mkdir -p "$PACKAGE_DIR/Payload"

@@ -88,41 +88,54 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   没装走 `#else` 分支——`open` 直接失败，报错里写清缺哪个依赖、怎么装，
   不留“能打开但播不了”的空实现。`#if` 分支里的方法名是按各家 README 所写，
   第一次在 Mac 上编时以接入的依赖版本为准在构建时校验（见下）。
-- **mpv 已接线（依赖已声明，引擎已按 libmpv C API 写好，链接已接好，尚未真机验证）**：
+- **mpv 已接线（懒加载，尚未真机验证）**：
   `Package.swift` 里 MPVKit `0.40.0-xcode` exact（LGPL 版产品 `MPVKit`），
-  `engines/MPVEngine.swift` 的 `#if` 分支是 `import Libmpv` 直接调 C API
+  `engines/MPVEngine.swift` 不再 `import Libmpv`，改在用户选 mpv 点播放
+  时 `dlopen` + `dlsym`（见下）。调用的还是同一套 libmpv C API
   （`mpv_create` / `mpv_initialize` / `loadfile` / `seek` / `pause` /
   `speed` / `volume` / `time-pos` / `duration` / `dwidth` / `dheight`，
   事件走 `mpv_set_wakeup_callback` + `mpv_wait_event` 排空），渲染是
   Demo 同款 CAMetalLayer + gpu-next/vulkan/moltenvk。注意 MPVKit 包里
   没有 `MPVPlayer` / `MPVGLView`（那是另一个 libmpv-ios 项目的包），
-  旧代码里按它们写的分支已经删掉。链接：MPVKit 的 28 个 LGPL 产物是
-  SPM 二进制目标（XCFramework，静态库），swift-rs 不会把它们传进最终
-  Xcode 链接——`src-tauri/build.rs` 在 cargo 构建时把 28 个产物的
-  ios-arm64 切片暂存到 `gen/apple/MPVKit/`，`scripts/build-ios-unsigned.sh`
-  的 xcodebuild 参数（`FRAMEWORK_SEARCH_PATHS` + `OTHER_LDFLAGS`，同一组
-  列两遍防静态库循环依赖）链进最终可执行文件；静态库不用嵌进 .app。
+  旧代码里按它们写的分支已经删掉。
+  懒加载（v0.0.127）：v0.0.124/125 把 MPVKit 28 个 LGPL 产物静态链进
+  主程序后启动黑屏（无 .ips、无 JetsamEvent），v0.0.126 摘掉就启动，
+  证实是它；机制未明（无静态初始化器、符号与链接库都查过无问题），
+  但实证已足够。所以 28 个产物不再进主程序：`src-tauri/build.rs`
+  只把 28 个产物的 ios-arm64 切片暂存到 `gen/apple/MPVKit/`，
+  `scripts/build-ios-unsigned.sh` 在 xcodebuild 之后用
+  `clang -dynamiclib` 把它们打成一个 `MPVKit.framework` 动态库
+  （`-Wl,-force_load` 逐个加——libmpv 的符号是 dlsym 动态调用的，
+  链接时无引用，不加会丢符号；不要用全局 `-all_load`），嵌进
+  `.app/Frameworks/`（与 NodeMobile/Python 同款位置，TrollStore
+  安装时做 fakesign）。`MPVEngine.swift` 在 open 入口才 dlopen
+  （全路径 `Frameworks/MPVKit.framework/MPVKit`，`RTLD_NOW |
+  RTLD_GLOBAL`）并 dlsym 出 12 个 libmpv 函数（缺一个就整体失败，
+  报 unavailable、播放链回落 AVPlayer/WebView）；不 dlclose，
+  进程生命周期内常驻。主程序里没有任何 mpv 符号，启动与 126 完全
+  一致。libmpv 的常量与结构体布局按 MPVKit 0.40.0-xcode 的
+  `client.h` 在 Swift 里手写（`MPV_FORMAT_*` / `MPV_EVENT_*` /
+  `MPV_END_FILE_REASON_*` / `mpv_event` / `mpv_event_property` /
+  `mpv_event_end_file`），改版先核对 client.h——0.40.0 里
+  `MPV_END_FILE_REASON_ERROR = 4`（不是 3），`mpv_event_end_file`
+  的 `playlist_entry_id` 是 int64_t（旧版是 const char*）。
   例外是 MoltenVK：它是库型 XCFramework，切片里只有 `libMoltenVK.a`、
-  没有 `.framework` 包，用 `-lMoltenVK` + `LIBRARY_SEARCH_PATHS` 链。
+  没有 `.framework` 包，打 dylib 时直接传这个 .a。
   系统库：MPVKit 的 `_MPVKit` / `_FFmpeg` 目标在 `linkerSettings` 里
   声明的系统框架与系统库（AVFoundation、CoreAudio、AudioToolbox、
   CoreVideo、CoreFoundation、CoreMedia、Metal、VideoToolbox；bz2、
-  iconv、expat、resolv、xml2、z、c++）也要在 xcodebuild 参数里补上，
-  swift-rs 同样不会传它们。smb：LGPL 的 Libavformat 编译时开了 SMB
-  支持，但 Libsmbclient 是 GPL、不在 LGPL 产品里，22 个 `smbc_*` 符号
-  在 Rust 里写空实现（`src-tauri/src/smbc_stubs.rs`，只 iOS 编译，
-  返回错误/NULL）；不要为此链 GPL 的 Libsmbclient，smb:// 播放不支
-  持。v0.0.124 曾用 `-Wl,-U` 让它们保持未定义，结果 dyld 启动时就要
-  解析、直接 abort（启动闪退），已删掉——没了 `-U`，空实现要是没链
-  上，构建直接报 undefined symbols，不会再悄悄打出启动就崩的包。
-  **v0.0.126 诊断版：MPVKit 暂时摘掉**——v0.0.124/125 带 MPVKit 静态
-  链入后启动黑屏（无 .ips、无 JetsamEvent），125 的 smbc 修法已验在
-  包里仍黑屏，怀疑是 MPVKit 这堆静态库导致启动挂起；摘掉后若能启动，
-  即证实是它，再想办法把 mpv 接回来。摘掉的范围：Package.swift 的
-  MPVKit 依赖 + target 的 `.product(name: "MPVKit")`、build.rs 的
-  stage_mpvkit_frameworks 调用、build-ios-unsigned.sh 的 MPVKIT_* 链接
-  参数与 MPVKit 搜索路径；MPVEngine 走 `#else` 空实现（报 unavailable），
-  smbc 空实现留着（只改一个变量）。恢复办法见各文件里的注释。
+  iconv、expat、resolv、xml2、z、c++）在打 dylib 时补上。
+  smb：LGPL 的 Libavformat 编译时开了 SMB 支持，但 Libsmbclient 是
+  GPL、不在 LGPL 产品里，22 个 `smbc_*` 符号在 C 里写空实现
+  （`src-tauri/ios/smbc_stubs.c`，返回错误/NULL），一起链进动态库
+  内部（自包含——dlopen 那一刻 chained fixups 下全部符号立即绑定，
+  必须有着落；不依赖主程序导出，Rust 版空实现已删掉）；不要为此链
+  GPL 的 Libsmbclient，smb:// 播放不支持。v0.0.124 曾用 `-Wl,-U`
+  让它们保持未定义，结果 dyld 启动时就要解析、直接 abort（启动闪
+  退），已删掉。打完 dylib 后校验：arm64 Mach-O 动态库；
+  install_name 是 `@rpath/MPVKit.framework/MPVKit`；无
+  `__mod_init_func`（有的话 dlopen 时会先跑构造器）；`mpv_create`
+  已定义（导出）；`smbc_*` 无未定义。
   真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
 
 ## Mac 验证（按顺序）
