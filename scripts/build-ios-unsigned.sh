@@ -116,9 +116,16 @@ node scripts/sync-ios-node.mjs --install-app "$APP"
 # MPVKit 懒加载：把 build.rs 暂存的 28 个静态库打成一个动态库
 # MPVKit.framework，嵌进 .app/Frameworks/。启动时不加载，选 mpv
 # 播放时 Swift 才 dlopen（见 engines/MPVEngine.swift）。
-# -force_load 逐个加：静态库默认只拉被引用到的目标文件，libmpv 的
-# 符号是 dlsym 动态调用的、链接时无引用，不加会丢符号。不要用全局
-# -all_load（会作用于系统库、引出重复符号）。
+# 链接方式是普通静态库链接 + -u 指定 12 个入口符号：12 个
+# mpv_* 函数是 dlsym 动态调用的、链接时无引用，-u 让链接器把
+# 定义它们的各目标文件拉进来，其余按引用传递拉入。不要用
+# -force_load 逐个加（v0.0.131 就是这么挂的）：FFmpeg 的
+# vulkan.o 编进了 Libavfilter/Libavcodec/Libavutil 三份（同一批
+# ff_vk_* 符号），GnuTLS 也自带了 OpenSSL 的 aes/sha/gcm 汇编
+# 例程（与 Libcrypto 重复），force_load 全拉进来报 66 个重复符号；
+# 普通链接按先定义者胜出，与 v0.0.124 静态链进主程序的成功方式一致。
+# 维护注意：MPVEngine.swift 若新增 dlsym 的 mpv_* 函数，必须同步
+# 加进下面的 -u 列表，否则 dylib 里没有它、运行时 dlsym 失败。
 # smbc 空实现（src-tauri/ios/smbc_stubs.c）一起链进去：dlopen 那一
 # 刻（chained fixups 下全部符号立即绑定）22 个 smbc_* 必须有着落。
 # 校验：dylib 是 arm64 Mach-O；install_name 是
@@ -136,34 +143,38 @@ xcrun -sdk iphoneos clang -dynamiclib \
   -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDKROOT" \
   -install_name @rpath/MPVKit.framework/MPVKit \
   -o "$MPVKIT_TMP/MPVKit.framework/MPVKit" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libmpv.framework/Libmpv" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libavdevice.framework/Libavdevice" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libavfilter.framework/Libavfilter" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libavformat.framework/Libavformat" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libavcodec.framework/Libavcodec" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libass.framework/Libass" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libbluray.framework/Libbluray" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libssl.framework/Libssl" \
-  -Wl,-force_load,"$MPVKIT_STAGE/gnutls.framework/gnutls" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libswscale.framework/Libswscale" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libswresample.framework/Libswresample" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libplacebo.framework/Libplacebo" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libshaderc_combined.framework/Libshaderc_combined" \
-  -Wl,-force_load,"$MPVKIT_STAGE/libMoltenVK.a" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libdovi.framework/Libdovi" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libdav1d.framework/Libdav1d" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libuavs3d.framework/Libuavs3d" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libharfbuzz.framework/Libharfbuzz" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libfreetype.framework/Libfreetype" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libfribidi.framework/Libfribidi" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libunibreak.framework/Libunibreak" \
-  -Wl,-force_load,"$MPVKIT_STAGE/lcms2.framework/lcms2" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libcrypto.framework/Libcrypto" \
-  -Wl,-force_load,"$MPVKIT_STAGE/nettle.framework/nettle" \
-  -Wl,-force_load,"$MPVKIT_STAGE/hogweed.framework/hogweed" \
-  -Wl,-force_load,"$MPVKIT_STAGE/gmp.framework/gmp" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libavutil.framework/Libavutil" \
-  -Wl,-force_load,"$MPVKIT_STAGE/Libuchardet.framework/Libuchardet" \
+  -u _mpv_create -u _mpv_initialize -u _mpv_terminate_destroy \
+  -u _mpv_set_option -u _mpv_set_option_string -u _mpv_command \
+  -u _mpv_set_property -u _mpv_get_property -u _mpv_observe_property \
+  -u _mpv_request_log_messages -u _mpv_wait_event -u _mpv_set_wakeup_callback \
+  "$MPVKIT_STAGE/Libmpv.framework/Libmpv" \
+  "$MPVKIT_STAGE/Libavdevice.framework/Libavdevice" \
+  "$MPVKIT_STAGE/Libavfilter.framework/Libavfilter" \
+  "$MPVKIT_STAGE/Libavformat.framework/Libavformat" \
+  "$MPVKIT_STAGE/Libavcodec.framework/Libavcodec" \
+  "$MPVKIT_STAGE/Libass.framework/Libass" \
+  "$MPVKIT_STAGE/Libbluray.framework/Libbluray" \
+  "$MPVKIT_STAGE/Libssl.framework/Libssl" \
+  "$MPVKIT_STAGE/gnutls.framework/gnutls" \
+  "$MPVKIT_STAGE/Libswscale.framework/Libswscale" \
+  "$MPVKIT_STAGE/Libswresample.framework/Libswresample" \
+  "$MPVKIT_STAGE/Libplacebo.framework/Libplacebo" \
+  "$MPVKIT_STAGE/Libshaderc_combined.framework/Libshaderc_combined" \
+  "$MPVKIT_STAGE/libMoltenVK.a" \
+  "$MPVKIT_STAGE/Libdovi.framework/Libdovi" \
+  "$MPVKIT_STAGE/Libdav1d.framework/Libdav1d" \
+  "$MPVKIT_STAGE/Libuavs3d.framework/Libuavs3d" \
+  "$MPVKIT_STAGE/Libharfbuzz.framework/Libharfbuzz" \
+  "$MPVKIT_STAGE/Libfreetype.framework/Libfreetype" \
+  "$MPVKIT_STAGE/Libfribidi.framework/Libfribidi" \
+  "$MPVKIT_STAGE/Libunibreak.framework/Libunibreak" \
+  "$MPVKIT_STAGE/lcms2.framework/lcms2" \
+  "$MPVKIT_STAGE/Libcrypto.framework/Libcrypto" \
+  "$MPVKIT_STAGE/nettle.framework/nettle" \
+  "$MPVKIT_STAGE/hogweed.framework/hogweed" \
+  "$MPVKIT_STAGE/gmp.framework/gmp" \
+  "$MPVKIT_STAGE/Libavutil.framework/Libavutil" \
+  "$MPVKIT_STAGE/Libuchardet.framework/Libuchardet" \
   "$MPVKIT_TMP/smbc_stubs.o" \
   -framework AVFoundation -framework CoreAudio -framework AudioToolbox \
   -framework CoreVideo -framework CoreFoundation -framework CoreMedia \

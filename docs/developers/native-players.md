@@ -105,8 +105,15 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   只把 28 个产物的 ios-arm64 切片暂存到 `gen/apple/MPVKit/`，
   `scripts/build-ios-unsigned.sh` 在 xcodebuild 之后用
   `clang -dynamiclib` 把它们打成一个 `MPVKit.framework` 动态库
-  （`-Wl,-force_load` 逐个加——libmpv 的符号是 dlsym 动态调用的，
-  链接时无引用，不加会丢符号；不要用全局 `-all_load`），嵌进
+  （普通静态库链接 + `-u` 指定 12 个入口符号——12 个 libmpv 函数
+  是 dlsym 动态调用的、链接时无引用，`-u` 让链接器把定义它们的
+  各目标文件拉进来，其余按引用传递拉入；不要用 `-Wl,-force_load`
+  逐个加，v0.0.131 就是这么挂的：FFmpeg 的 vulkan.o 编进了
+  Libavfilter/Libavcodec/Libavutil 三份（同一批 ff_vk_* 符号），
+  GnuTLS 也自带了 OpenSSL 的 aes/sha/gcm 汇编例程（与 Libcrypto
+  重复），force_load 全拉进来报 66 个重复符号；普通链接按先定义
+  者胜出，与 v0.0.124 静态链进主程序的成功方式一致；也不要用全局
+  `-all_load`），嵌进
   `.app/Frameworks/`（与 NodeMobile/Python 同款位置，TrollStore
   安装时做 fakesign）。`MPVEngine.swift` 在 open 入口才 dlopen
   （全路径 `Frameworks/MPVKit.framework/MPVKit`，`RTLD_NOW |
@@ -138,9 +145,11 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   必须有着落；不依赖主程序导出，Rust 版空实现已删掉）；不要为此链
   GPL 的 Libsmbclient，smb:// 播放不支持。v0.0.124 曾用 `-Wl,-U`
   让它们保持未定义，结果 dyld 启动时就要解析、直接 abort（启动闪
-  退），已删掉。打完 dylib 后校验：arm64 Mach-O 动态库；
-  install_name 是 `@rpath/MPVKit.framework/MPVKit`；无
-  `__mod_init_func`（有的话 dlopen 时会先跑构造器）；`mpv_create`
+  退），已删掉。维护注意：`MPVEngine.swift` 若新增 dlsym 的 mpv_*
+  函数，必须同步加进 `build-ios-unsigned.sh` 的 `-u` 列表，否则
+  dylib 里没有它、运行时 dlsym 失败。打完 dylib 后校验：arm64
+  Mach-O 动态库；install_name 是 `@rpath/MPVKit.framework/MPVKit`；
+  无 `__mod_init_func`（有的话 dlopen 时会先跑构造器）；`mpv_create`
   已定义（导出）；`smbc_*` 无未定义。
   真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
 
