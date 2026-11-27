@@ -215,15 +215,15 @@ if [ "$(xcrun -sdk iphoneos otool -D "$MPVKIT_DYLIB" | tail -1)" != '@rpath/MPVK
   echo 'MPVKit dylib install_name 不是 @rpath/MPVKit.framework/MPVKit' >&2
   exit 1
 fi
-if xcrun -sdk iphoneos otool -l "$MPVKIT_DYLIB" | grep -q '__mod_init_func'; then
+if xcrun -sdk iphoneos otool -l "$MPVKIT_DYLIB" | grep '__mod_init_func' > /dev/null; then
   echo 'MPVKit dylib 有 __mod_init_func（dlopen 时会跑构造器）' >&2
   exit 1
 fi
-if ! xcrun -sdk iphoneos nm -g "$MPVKIT_DYLIB" | grep -q ' T _mpv_create$'; then
+if ! xcrun -sdk iphoneos nm -g "$MPVKIT_DYLIB" | grep ' T _mpv_create$' > /dev/null; then
   echo 'MPVKit dylib 未导出 _mpv_create' >&2
   exit 1
 fi
-if xcrun -sdk iphoneos nm -u "$MPVKIT_DYLIB" | grep -q '_smbc_'; then
+if xcrun -sdk iphoneos nm -u "$MPVKIT_DYLIB" | grep '_smbc_' > /dev/null; then
   echo 'MPVKit dylib 还有未定义的 _smbc_（空实现没链进）' >&2
   exit 1
 fi
