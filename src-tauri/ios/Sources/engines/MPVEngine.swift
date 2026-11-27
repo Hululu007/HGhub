@@ -228,18 +228,26 @@ final class MPVEngine: NSObject, NativePlayerEngine {
       completion(.failure(NativePlayerUnavailableError(message: "mpv 创建失败")))
       return
     }
-    // 渲染层先建好：wid 要的就是这个 CAMetalLayer，initialize 之前就要给。
-    // 容器先建不 present：loadfile 万一失败直接销毁，连 present 都不走，
-    // 避免 present 后立刻 dismiss 的竞态。
+    // 渲染层先建好：wid 要的就是这个 CAMetalLayer。
+    // 先 present 再 initialize：MoltenVK 建 swapchain 要层已有真实
+    // 尺寸且已进窗口；0.0.133 是 initialize 在先、present 在后，
+    // 层还没上屏、尺寸也未必对，swapchain 建坏了就再也出不了画面——
+    // 只剩声音、时间照走（133 真机视频就是这样：mpv 徽标、1920x800、
+    // 进度走到 23:35，画面全黑）。frame 直接取屏幕尺寸，不取尚未
+    // layout 的 container.view.bounds。initialize 失败已 present
+    // 过，要 dismiss 掉容器再报失败（loadfile 失败走 close()，里面
+    // 本来就会 dismiss）。
     let videoView = MPVVideoView()
     let container = UIViewController()
     container.modalPresentationStyle = .fullScreen
     container.view.backgroundColor = .black
-    videoView.frame = container.view.bounds
+    videoView.frame = UIScreen.main.bounds
     videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     container.view.addSubview(videoView)
     self.videoView = videoView
     self.container = container
+    present(container)
+    container.view.layoutIfNeeded()
 
     var layer = videoView.metalLayer
     api.setOption(handle, "wid", MPV_FORMAT_INT64, &layer)
@@ -257,6 +265,7 @@ final class MPVEngine: NSObject, NativePlayerEngine {
     #endif
     guard api.initialize(handle) >= 0 else {
       api.terminateDestroy(handle)
+      container.dismiss(animated: false, completion: nil)
       self.videoView = nil
       self.container = nil
       completion(.failure(NativePlayerUnavailableError(message: "mpv 初始化失败")))
@@ -279,7 +288,6 @@ final class MPVEngine: NSObject, NativePlayerEngine {
       completion(.failure(NativePlayerUnavailableError(message: "mpv 打开失败")))
       return
     }
-    present(container)
     if position > 0 {
       _ = command(handle, "seek", args: ["\(position)", "absolute"])
     }
