@@ -82,7 +82,7 @@ private struct MPVKitAPI {
   let getProperty: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32
   let observeProperty: @convention(c) (OpaquePointer?, UInt64, UnsafePointer<CChar>?, Int32) -> Int32
   let requestLogMessages: @convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Int32
-  let waitEvent: @convention(c) (OpaquePointer?, Double) -> UnsafePointer<MPVEvent>?
+  let waitEvent: @convention(c) (OpaquePointer?, Double) -> UnsafeMutableRawPointer?
   let setWakeupCallback: @convention(c) (OpaquePointer?, (@convention(c) (UnsafeMutableRawPointer?) -> Void)?, UnsafeMutableRawPointer?) -> Void
 }
 
@@ -116,7 +116,7 @@ private func loadMPVKitAPI() -> (api: MPVKitAPI?, error: String?) {
         let getProperty = sym("mpv_get_property", as: (@convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32).self),
         let observeProperty = sym("mpv_observe_property", as: (@convention(c) (OpaquePointer?, UInt64, UnsafePointer<CChar>?, Int32) -> Int32).self),
         let requestLogMessages = sym("mpv_request_log_messages", as: (@convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Int32).self),
-        let waitEvent = sym("mpv_wait_event", as: (@convention(c) (OpaquePointer?, Double) -> UnsafePointer<MPVEvent>?).self),
+        let waitEvent = sym("mpv_wait_event", as: (@convention(c) (OpaquePointer?, Double) -> UnsafeMutableRawPointer?).self),
         let setWakeupCallback = sym("mpv_set_wakeup_callback", as: (@convention(c) (OpaquePointer?, (@convention(c) (UnsafeMutableRawPointer?) -> Void)?, UnsafeMutableRawPointer?) -> Void).self)
   else {
     return (nil, "dlsym 缺函数（MPVKit 版本不对？）")
@@ -405,7 +405,8 @@ final class MPVEngine: NSObject, NativePlayerEngine {
     eventQueue.async { [weak self] in
       guard let self = self, let api = self.api else { return }
       while let handle = self.mpv {
-        guard let event = api.waitEvent(handle, 0) else { break }
+        guard let rawEvent = api.waitEvent(handle, 0) else { break }
+        let event = rawEvent.assumingMemoryBound(to: MPVEvent.self)
         if event.pointee.event_id == MPV_EVENT_NONE { break }
         switch event.pointee.event_id {
         case MPV_EVENT_PROPERTY_CHANGE:
