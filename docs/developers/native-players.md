@@ -129,7 +129,8 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   MoltenVK 要 kCAGravity/kCGColorSpace/IOSurface，Libass 要 CTFont，
   124 静态链进主程序时这些符号由主程序已链的框架兜底，独立打 dylib
   时必须自己链上（v0.0.129 就是这么挂的，65 个未定义符号全是这 5 个
-  框架的）。
+  框架的；v0.0.130 又差 OpenGLES 与 UIKit——Libmpv 的 iOS GL 硬解要
+  EAGLContext，MoltenVK 要 UIScreen/UIView）。
   smb：LGPL 的 Libavformat 编译时开了 SMB 支持，但 Libsmbclient 是
   GPL、不在 LGPL 产品里，22 个 `smbc_*` 符号在 C 里写空实现
   （`src-tauri/ios/smbc_stubs.c`，返回错误/NULL），一起链进动态库

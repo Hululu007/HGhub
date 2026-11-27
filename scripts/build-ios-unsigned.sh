@@ -170,6 +170,7 @@ xcrun -sdk iphoneos clang -dynamiclib \
   -framework Metal -framework VideoToolbox \
   -framework QuartzCore -framework CoreGraphics -framework CoreText \
   -framework IOSurface -framework Foundation \
+  -framework OpenGLES -framework UIKit \
   -lbz2 -liconv -lexpat -lresolv -lxml2 -lz -lc++
 cat > "$MPVKIT_TMP/MPVKit.framework/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
