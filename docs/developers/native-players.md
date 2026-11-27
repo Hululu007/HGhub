@@ -124,7 +124,12 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   系统库：MPVKit 的 `_MPVKit` / `_FFmpeg` 目标在 `linkerSettings` 里
   声明的系统框架与系统库（AVFoundation、CoreAudio、AudioToolbox、
   CoreVideo、CoreFoundation、CoreMedia、Metal、VideoToolbox；bz2、
-  iconv、expat、resolv、xml2、z、c++）在打 dylib 时补上。
+  iconv、expat、resolv、xml2、z、c++）在打 dylib 时补上；另外还要
+  补 QuartzCore、CoreGraphics、CoreText、IOSurface、Foundation——
+  MoltenVK 要 kCAGravity/kCGColorSpace/IOSurface，Libass 要 CTFont，
+  124 静态链进主程序时这些符号由主程序已链的框架兜底，独立打 dylib
+  时必须自己链上（v0.0.129 就是这么挂的，65 个未定义符号全是这 5 个
+  框架的）。
   smb：LGPL 的 Libavformat 编译时开了 SMB 支持，但 Libsmbclient 是
   GPL、不在 LGPL 产品里，22 个 `smbc_*` 符号在 C 里写空实现
   （`src-tauri/ios/smbc_stubs.c`，返回错误/NULL），一起链进动态库
