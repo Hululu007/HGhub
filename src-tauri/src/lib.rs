@@ -11,6 +11,8 @@ mod network_policy;
 mod node;
 mod plugins;
 mod python;
+#[cfg(target_os = "ios")]
+mod smbc_stubs;
 mod webhome;
 #[cfg(target_os = "windows")]
 mod windows_login;

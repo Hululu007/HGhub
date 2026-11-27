@@ -110,8 +110,11 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   iconv、expat、resolv、xml2、z、c++）也要在 xcodebuild 参数里补上，
   swift-rs 同样不会传它们。smb：LGPL 的 Libavformat 编译时开了 SMB
   支持，但 Libsmbclient 是 GPL、不在 LGPL 产品里，22 个 `smbc_*` 符号
-  用 `-Wl,-U` 保持未定义（只在打开 smb:// 链接时才会被调到，本应用
-  只播网盘直链）；不要为此链 GPL 的 Libsmbclient，smb:// 播放不支持。
+  在 Rust 里写空实现（`src-tauri/src/smbc_stubs.rs`，只 iOS 编译，
+  返回错误/NULL）；不要为此链 GPL 的 Libsmbclient，smb:// 播放不支
+  持。v0.0.124 曾用 `-Wl,-U` 让它们保持未定义，结果 dyld 启动时就要
+  解析、直接 abort（启动闪退），已删掉——没了 `-U`，空实现要是没链
+  上，构建直接报 undefined symbols，不会再悄悄打出启动就崩的包。
   真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
 
 ## Mac 验证（按顺序）
