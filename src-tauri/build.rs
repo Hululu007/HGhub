@@ -102,6 +102,95 @@ fn link_ios_native_plugins() {
     println!("cargo:rerun-if-changed=ios/Sources");
     #[cfg(target_os = "macos")]
     tauri_utils::build::link_apple_library("NativePlugins", &manifest_dir.join("ios"));
+    // MPVKit 28 个 LGPL 产物是 SPM 二进制目标（XCFramework，静态库），
+    // swift build 只把它们下到构建目录，不会链进 NativePlugins 静态库，
+    // 更不会进最终 Xcode 链接——v0.0.121 就是这么挂的（`_mpv_*` 全是
+    // undefined symbols，`framework 'Libmpv' not found`）。这里在
+    // swift build 跑完后，把 28 个产物的 device/sim 切片拷到
+    // gen/apple/MPVKit/，由 build-ios-unsigned.sh 的 xcodebuild 参数
+    // （FRAMEWORK_SEARCH_PATHS + OTHER_LDFLAGS）链进最终可执行文件。
+    // XCFramework 里是静态库（ar archive），不用嵌进 .app，所以没有
+    // --install-app 步骤。28 个是 MPVKit 0.40.0-xcode 的 LGPL 产品
+    // `MPVKit` 的传递闭包（从它的 Package.swift 算出）；换 MPVKit
+    // 版本要重新算。只在 macOS host + iOS target 跑。
+    #[cfg(target_os = "macos")]
+    stage_mpvkit_frameworks(&manifest_dir);
+}
+
+/// MPVKit LGPL 产品 `MPVKit` 的传递闭包（0.40.0-xcode，28 个二进制目标）。
+/// 顺序是链接拓扑（被依赖的在后），build-ios-unsigned.sh 里按此顺序
+/// 传 -framework（同一组列两遍，防静态库循环依赖漏符号）。
+#[cfg(target_os = "macos")]
+const MPVKIT_FRAMEWORKS: [&str; 28] = [
+    "Libmpv", "Libavdevice", "Libavfilter", "Libavformat", "Libavcodec",
+    "Libass", "Libbluray", "Libssl", "gnutls", "Libswscale",
+    "Libswresample", "Libplacebo", "Libshaderc_combined", "MoltenVK",
+    "Libdovi", "Libdav1d", "Libuavs3d", "Libharfbuzz", "Libfreetype",
+    "Libfribidi", "Libunibreak", "lcms2", "Libcrypto", "nettle",
+    "hogweed", "gmp", "Libavutil", "Libuchardet",
+];
+
+/// 把 MPVKit 28 个产物的对应切片拷到 gen/apple/MPVKit/（见上）。
+/// swift-rs 把 SPM 包编到 OUT_DIR/swift-rs/NativePlugins（构建目录），
+/// 二进制产物在它下面；布局不硬编码，递归按名找。
+#[cfg(target_os = "macos")]
+fn stage_mpvkit_frameworks(manifest_dir: &Path) {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target != "aarch64-apple-ios" && target != "aarch64-apple-ios-sim" {
+        return;
+    }
+    let slice = if target == "aarch64-apple-ios-sim" {
+        "ios-arm64-simulator"
+    } else {
+        "ios-arm64"
+    };
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let swift_build_dir = out_dir.join("swift-rs").join("NativePlugins");
+    let stage_dir = manifest_dir.join("gen").join("apple").join("MPVKit");
+    let mut missing: Vec<&str> = Vec::new();
+    for name in MPVKIT_FRAMEWORKS {
+        match find_xcframework(&swift_build_dir, name) {
+            Some(xc) => {
+                let framework = xc.join(slice).join(format!("{name}.framework"));
+                if !framework.is_dir() {
+                    missing.push(name);
+                    continue;
+                }
+                let dest = stage_dir.join(format!("{name}.framework"));
+                let _ = std::fs::remove_dir_all(&dest);
+                copy_dir_filtered(&framework, &dest, &[]);
+            }
+            None => missing.push(name),
+        }
+    }
+    if !missing.is_empty() {
+        panic!(
+            "MPVKit staging 缺少产物（swift build 没下下来？）：{}",
+            missing.join(", ")
+        );
+    }
+}
+
+/// 在 `root` 下递归找名为 `{name}.xcframework` 的目录。
+#[cfg(target_os = "macos")]
+fn find_xcframework(root: &Path, name: &str) -> Option<PathBuf> {
+    let want = format!("{name}.xcframework");
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_name() == want.as_str() && path.is_dir() {
+                return Some(path);
+            }
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    None
 }
 
 /// 把 tauri 的 iOS Swift API 目录拷到 `dst`（即 src-tauri/.tauri/tauri-api）。

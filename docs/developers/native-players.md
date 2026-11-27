@@ -88,7 +88,7 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   没装走 `#else` 分支——`open` 直接失败，报错里写清缺哪个依赖、怎么装，
   不留“能打开但播不了”的空实现。`#if` 分支里的方法名是按各家 README 所写，
   第一次在 Mac 上编时以接入的依赖版本为准在构建时校验（见下）。
-- **mpv 已接线（依赖已声明，引擎已按 libmpv C API 写好，尚未编译验证）**：
+- **mpv 已接线（依赖已声明，引擎已按 libmpv C API 写好，链接已接好，尚未真机验证）**：
   `Package.swift` 里 MPVKit `0.40.0-xcode` exact（LGPL 版产品 `MPVKit`），
   `engines/MPVEngine.swift` 的 `#if` 分支是 `import Libmpv` 直接调 C API
   （`mpv_create` / `mpv_initialize` / `loadfile` / `seek` / `pause` /
@@ -96,9 +96,13 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   事件走 `mpv_set_wakeup_callback` + `mpv_wait_event` 排空），渲染是
   Demo 同款 CAMetalLayer + gpu-next/vulkan/moltenvk。注意 MPVKit 包里
   没有 `MPVPlayer` / `MPVGLView`（那是另一个 libmpv-ios 项目的包），
-  旧代码里按它们写的分支已经删掉。第一次真正的编译检查是下个版本 tag
-  的 CI iOS 构建；真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）
-  要等用户装上试。
+  旧代码里按它们写的分支已经删掉。链接：MPVKit 的 28 个 LGPL 产物是
+  SPM 二进制目标（XCFramework，静态库），swift-rs 不会把它们传进最终
+  Xcode 链接——`src-tauri/build.rs` 在 cargo 构建时把 28 个产物的
+  ios-arm64 切片暂存到 `gen/apple/MPVKit/`，`scripts/build-ios-unsigned.sh`
+  的 xcodebuild 参数（`FRAMEWORK_SEARCH_PATHS` + `OTHER_LDFLAGS`，同一组
+  列两遍防静态库循环依赖）链进最终可执行文件；静态库不用嵌进 .app。
+  真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
 
 ## Mac 验证（按顺序）
 
