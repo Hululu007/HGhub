@@ -61,7 +61,10 @@ node scripts/sync-ios-node.mjs
 # gen/apple/MPVKit/（见 src-tauri/build.rs），这里链进最终可执行文件。
 # 顺序是依赖拓扑（被依赖的在后）；同一组列两遍——静态库单遍链接遇到
 # 循环依赖会漏符号，第二遍补上。静态库不用嵌进 .app，没有 --install-app。
-MPVKIT_LDFLAGS="-framework Libmpv -framework Libavdevice -framework Libavfilter -framework Libavformat -framework Libavcodec -framework Libass -framework Libbluray -framework Libssl -framework gnutls -framework Libswscale -framework Libswresample -framework Libplacebo -framework Libshaderc_combined -framework MoltenVK -framework Libdovi -framework Libdav1d -framework Libuavs3d -framework Libharfbuzz -framework Libfreetype -framework Libfribidi -framework Libunibreak -framework lcms2 -framework Libcrypto -framework nettle -framework hogweed -framework gmp -framework Libavutil -framework Libuchardet"
+MPVKIT_LDFLAGS="-framework Libmpv -framework Libavdevice -framework Libavfilter -framework Libavformat -framework Libavcodec -framework Libass -framework Libbluray -framework Libssl -framework gnutls -framework Libswscale -framework Libswresample -framework Libplacebo -framework Libshaderc_combined -framework Libdovi -framework Libdav1d -framework Libuavs3d -framework Libharfbuzz -framework Libfreetype -framework Libfribidi -framework Libunibreak -framework lcms2 -framework Libcrypto -framework nettle -framework hogweed -framework gmp -framework Libavutil -framework Libuchardet"
+# MoltenVK 不在上面：它是库型 XCFramework（切片里只有 libMoltenVK.a，
+# 没有 .framework 包），用 -lMoltenVK + LIBRARY_SEARCH_PATHS 链，放
+# 在最后（Libmpv / Libplacebo 用它的符号，被依赖的在后）。
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.
 XCODE_TOOLCHAIN="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain"
@@ -77,7 +80,8 @@ xcodebuild build \
   TOOLCHAIN_DIR="$XCODE_TOOLCHAIN" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
   FRAMEWORK_SEARCH_PATHS='$(inherited) $(PROJECT_DIR) $(PROJECT_DIR)/Python.xcframework/ios-arm64 $(PROJECT_DIR)/MPVKit' \
-  OTHER_LDFLAGS='$(inherited) -framework Python -framework SystemConfiguration'" $MPVKIT_LDFLAGS $MPVKIT_LDFLAGS"
+  LIBRARY_SEARCH_PATHS='$(inherited) $(PROJECT_DIR)/MPVKit' \
+  OTHER_LDFLAGS='$(inherited) -framework Python -framework SystemConfiguration'" $MPVKIT_LDFLAGS $MPVKIT_LDFLAGS -lMoltenVK"
 
 APP_DIR="$ROOT/build_output/Build/Products/release-iphoneos"
 # 产品名改名后 .app 文件名会跟着变（改名前是 HGhub.app），不写死名字，

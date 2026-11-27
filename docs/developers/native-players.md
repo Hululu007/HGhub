@@ -102,6 +102,8 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   ios-arm64 切片暂存到 `gen/apple/MPVKit/`，`scripts/build-ios-unsigned.sh`
   的 xcodebuild 参数（`FRAMEWORK_SEARCH_PATHS` + `OTHER_LDFLAGS`，同一组
   列两遍防静态库循环依赖）链进最终可执行文件；静态库不用嵌进 .app。
+  例外是 MoltenVK：它是库型 XCFramework，切片里只有 `libMoltenVK.a`、
+  没有 `.framework` 包，用 `-lMoltenVK` + `LIBRARY_SEARCH_PATHS` 链。
   真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
 
 ## Mac 验证（按顺序）

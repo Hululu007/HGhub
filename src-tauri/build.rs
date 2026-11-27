@@ -151,14 +151,25 @@ fn stage_mpvkit_frameworks(manifest_dir: &Path) {
     for name in MPVKIT_FRAMEWORKS {
         match find_xcframework(&swift_build_dir, name) {
             Some(xc) => {
-                let framework = xc.join(slice).join(format!("{name}.framework"));
-                if !framework.is_dir() {
+                // 两种形态：多数是 <Name>.framework（目录），MoltenVK 是
+                // 库型 XCFramework——切片里只有 libMoltenVK.a，没有
+                // .framework 包（见 v0.0.122 构建日志的 Copying 步）。
+                let slice_dir = xc.join(slice);
+                let framework = slice_dir.join(format!("{name}.framework"));
+                let lib = slice_dir.join(format!("lib{name}.a"));
+                if framework.is_dir() {
+                    let dest = stage_dir.join(format!("{name}.framework"));
+                    let _ = std::fs::remove_dir_all(&dest);
+                    copy_dir_filtered(&framework, &dest, &[]);
+                } else if lib.is_file() {
+                    let dest = stage_dir.join(format!("lib{name}.a"));
+                    let _ = std::fs::remove_file(&dest);
+                    std::fs::copy(&lib, &dest).unwrap_or_else(|e| {
+                        panic!("MPVKit staging：拷 {name} 的静态库失败：{e}")
+                    });
+                } else {
                     missing.push(name);
-                    continue;
                 }
-                let dest = stage_dir.join(format!("{name}.framework"));
-                let _ = std::fs::remove_dir_all(&dest);
-                copy_dir_filtered(&framework, &dest, &[]);
             }
             None => missing.push(name),
         }
