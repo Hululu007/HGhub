@@ -51,7 +51,7 @@ private struct MPVEvent {
 /// libmpv 事件结构（client.h，mpv 0.40.0）：mpv_event_property。
 /// 字段：name(const char*)、format(mpv_format/int)、data(void*)。
 private struct MPVEventProperty {
-  var name: UnsafePointer<CChar>?
+  var name: UnsafePointer<CChar>!
   var format: Int32
   var data: UnsafeMutableRawPointer?
 }
