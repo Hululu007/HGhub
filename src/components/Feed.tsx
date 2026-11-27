@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { isTauri } from "@tauri-apps/api/core";
+import { isTauri, invoke } from "@tauri-apps/api/core";
 import { setMobileOrientation } from "../orientation";
 import { setStatusBarHidden } from "../statusBar";
 import { adjustBrightness, adjustVolume } from "../screenControl";
@@ -16,7 +16,7 @@ import PlaybackLock from "./PlaybackLock";
 import { registerBackHandler } from "../back";
 import { useVerticalSwipe } from './useVerticalSwipe';
 import type { PreparedMedia } from "../plugins/client";
-import { closeNativePlayer, clearLocalNativePlayback, isLocalNativePlayback, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
+import { closeNativePlayer, clearLocalNativePlayback, isLocalNativePlayback, onNativePlayerClosed, onNativePlayerEnded, onNativePlayerError, onNativePlayerLog, onNativePlayerTime, openNativePlayer } from "../plugins/nativePlayer";
 import DownloadManager from "../plugins/DownloadManager";
 import { openInSenPlayer } from "../senplayer";
 import { playbackEngineFallbackChain, playbackEngineLabel, type PlaybackEngine } from "../plugins/playbackEngine";
@@ -488,6 +488,9 @@ export default function Feed({media, position, active=true, preparing=false, err
         if (isLocalNativePlayback()) { clearLocalNativePlayback(); return; }
         fallbackToWebView(e.position);
       }),
+      // mpv 诊断日志（v0.0.135 起）：mpv 自己的日志行写进运行日志，
+      // 只在 mpv 播放时有；其它引擎不发这个事件。
+      onNativePlayerLog((e) => { void invoke("debug_log", { msg: `[mpv] ${e.message}` }).catch(() => {}); }),
     ]).then((u) => { if (live) listeners = u; else u.forEach((l) => void l.unregister()); });
     return () => { live = false; listeners.forEach((l) => void l.unregister()); };
   }, []);

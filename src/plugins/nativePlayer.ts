@@ -68,6 +68,12 @@ export interface NativePlayerClosedEvent {
   position: number;
 }
 
+export interface NativePlayerLogEvent {
+  engine: string;
+  sessionId: string;
+  message: string;
+}
+
 /** 只有 iOS 才有原生播放器桥；其它平台 invoke 会直接报“不支持”。 */
 export function isNativePlayerAvailable(): boolean {
   return platform === "ios";
@@ -144,4 +150,8 @@ export function onNativePlayerError(cb: (event: NativePlayerErrorEvent) => void)
 
 export function onNativePlayerClosed(cb: (event: NativePlayerClosedEvent) => void): Promise<PluginListener> {
   return addPluginListener<NativePlayerClosedEvent>("native-player", "native-player-closed", cb);
+}
+
+export function onNativePlayerLog(cb: (event: NativePlayerLogEvent) => void): Promise<PluginListener> {
+  return addPluginListener<NativePlayerLogEvent>("native-player", "native-player-log", cb);
 }

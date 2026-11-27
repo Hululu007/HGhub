@@ -88,7 +88,7 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   没装走 `#else` 分支——`open` 直接失败，报错里写清缺哪个依赖、怎么装，
   不留“能打开但播不了”的空实现。`#if` 分支里的方法名是按各家 README 所写，
   第一次在 Mac 上编时以接入的依赖版本为准在构建时校验（见下）。
-- **mpv 已接线（懒加载，尚未真机验证）**：
+- **mpv 已接线（懒加载，真机已测、画面待修）**：
   `Package.swift` 里 MPVKit `0.40.0-xcode` exact（LGPL 版产品 `MPVKit`），
   `engines/MPVEngine.swift` 不再 `import Libmpv`，改在用户选 mpv 点播放
   时 `dlopen` + `dlsym`（见下）。调用的还是同一套 libmpv C API
@@ -151,7 +151,14 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   Mach-O 动态库；install_name 是 `@rpath/MPVKit.framework/MPVKit`；
   无 `__mod_init_func`（有的话 dlopen 时会先跑构造器）；`mpv_create`
   已定义（导出）；`smbc_*` 无未定义。
-  真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
+  真机播放（v0.0.133/134 已测）：mpv 能加载、能解码、有声、进度走，
+  但画面全黑。133 先 initialize 后 present，134 改先 present 后
+  initialize，都一样黑——初始化顺序不是原因（或不是唯一原因）。
+  诊断（v0.0.135 起）：`MPVEngine` 常开 mpv 日志 info 级
+  （`mpv_request_log_messages(handle, "info")`），`MPV_EVENT_LOG_MESSAGE`
+  经 `native-player-log` 事件发回前端、写进运行日志（`[mpv] 前缀:
+  内容`）。mpv 自己的 VO/swapchain 报错只有这里能看到；黑画面先看
+  运行日志里的这几行，再定下一步。
 
 ## Mac 验证（按顺序）
 

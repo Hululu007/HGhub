@@ -30,6 +30,7 @@ private let MPV_FORMAT_DOUBLE: Int32 = 5
 /// libmpv 常量（client.h，mpv 0.40.0）：MPV_EVENT_*。
 private let MPV_EVENT_NONE: Int32 = 0
 private let MPV_EVENT_SHUTDOWN: Int32 = 1
+private let MPV_EVENT_LOG_MESSAGE: Int32 = 2
 private let MPV_EVENT_END_FILE: Int32 = 7
 private let MPV_EVENT_PROPERTY_CHANGE: Int32 = 22
 
@@ -54,6 +55,16 @@ private struct MPVEventProperty {
   var name: UnsafePointer<CChar>!
   var format: Int32
   var data: UnsafeMutableRawPointer?
+}
+
+/// libmpv 事件结构（client.h，mpv 0.40.0）：mpv_event_log_message。
+/// 字段：prefix(const char*)、level(const char*)、text(const char*)、
+/// log_level(mpv_log_level/int)。text 自带一个换行，转发前去掉。
+private struct MPVEventLogMessage {
+  var prefix: UnsafePointer<CChar>!
+  var level: UnsafePointer<CChar>!
+  var text: UnsafePointer<CChar>!
+  var log_level: Int32
 }
 
 /// libmpv 事件结构（client.h，mpv 0.40.0）：mpv_event_end_file。
@@ -258,10 +269,13 @@ final class MPVEngine: NSObject, NativePlayerEngine {
     api.setOptionString(handle, "subs-match-os-language", "yes")
     api.setOptionString(handle, "subs-fallback", "yes")
     api.setOptionString(handle, "video-rotate", "no")
+    // 诊断（v0.0.135 起）：mpv 日志常开 info 级、经事件写进运行日志。
+    // 正式版以前是 "no"，黑画面只能靠猜；133/134 两轮都只剩声音没
+    // 画面，原因只能看 mpv 自己的报错（VO/swapchain 那几行）。
     #if DEBUG
     api.requestLogMessages(handle, "debug")
     #else
-    api.requestLogMessages(handle, "no")
+    api.requestLogMessages(handle, "info")
     #endif
     guard api.initialize(handle) >= 0 else {
       api.terminateDestroy(handle)
@@ -407,8 +421,9 @@ final class MPVEngine: NSObject, NativePlayerEngine {
   }
 
   /// mpv 事件排空（wakeup 回调进来后在后台队列跑）：只处理与本引擎
-  /// 有关的几件——dwidth/dheight 变了记分辨率；播完/播错发事件。
-  /// 其它事件（日志等）直接丢掉，不打印。
+  /// 有关的几件——dwidth/dheight 变了记分辨率；播完/播错发事件；
+  /// mpv 自己的日志（info 级）经 .log 发回前端写进运行日志。
+  /// 其它事件直接丢掉，不打印。
   private func readEvents() {
     eventQueue.async { [weak self] in
       guard let self = self, let api = self.api else { return }
@@ -417,6 +432,10 @@ final class MPVEngine: NSObject, NativePlayerEngine {
         let event = rawEvent.assumingMemoryBound(to: MPVEvent.self)
         if event.pointee.event_id == MPV_EVENT_NONE { break }
         switch event.pointee.event_id {
+        case MPV_EVENT_LOG_MESSAGE:
+          guard let logMsg = UnsafePointer<MPVEventLogMessage>(OpaquePointer(event.pointee.data))?.pointee else { continue }
+          let line = "\(String(cString: logMsg.prefix)): \(String(cString: logMsg.text).trimmingCharacters(in: .whitespacesAndNewlines))"
+          DispatchQueue.main.async { self.eventHandler?(.log(line)) }
         case MPV_EVENT_PROPERTY_CHANGE:
           guard let property = UnsafePointer<MPVEventProperty>(OpaquePointer(event.pointee.data))?.pointee else { continue }
           let name = String(cString: property.name)

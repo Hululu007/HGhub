@@ -97,11 +97,20 @@ struct NativePlayerClosedEvent: Encodable {
   var position: Double
 }
 
+/// mpv 自己的日志行（诊断用，见 MPVEngine 的 requestLogMessages）：
+/// message 是 "前缀: 内容"，前端写进运行日志，不触发播放失败。
+struct NativePlayerLogEvent: Encodable {
+  var engine: String
+  var sessionId: String
+  var message: String
+}
+
 enum NativePlayerEvent {
   case time(position: Double, duration: Double, videoSize: CGSize)
   case ended
   case error(String)
   case closed
+  case log(String)
 }
 
 // MARK: - 统一引擎协议：四个引擎都实现它，插件只认这个接口
@@ -184,6 +193,12 @@ class NativePlayerPlugin: Plugin {
           data: NativePlayerClosedEvent(
             engine: engineName, sessionId: sessionId, position: lastPosition))
         engine = nil
+      case .log(let message):
+        // 只转发、不结束播放：mpv 日志不是播放失败。
+        try trigger(
+          "native-player-log",
+          data: NativePlayerLogEvent(
+            engine: engineName, sessionId: sessionId, message: message))
       }
     } catch {
       // 事件发不出去不影响播放本身；播放状态仍可由 state 命令查询。
