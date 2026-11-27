@@ -104,6 +104,14 @@ pill（v0.0.22 删掉），入口只在更多菜单里。
   列两遍防静态库循环依赖）链进最终可执行文件；静态库不用嵌进 .app。
   例外是 MoltenVK：它是库型 XCFramework，切片里只有 `libMoltenVK.a`、
   没有 `.framework` 包，用 `-lMoltenVK` + `LIBRARY_SEARCH_PATHS` 链。
+  系统库：MPVKit 的 `_MPVKit` / `_FFmpeg` 目标在 `linkerSettings` 里
+  声明的系统框架与系统库（AVFoundation、CoreAudio、AudioToolbox、
+  CoreVideo、CoreFoundation、CoreMedia、Metal、VideoToolbox；bz2、
+  iconv、expat、resolv、xml2、z、c++）也要在 xcodebuild 参数里补上，
+  swift-rs 同样不会传它们。smb：LGPL 的 Libavformat 编译时开了 SMB
+  支持，但 Libsmbclient 是 GPL、不在 LGPL 产品里，22 个 `smbc_*` 符号
+  用 `-Wl,-U` 保持未定义（只在打开 smb:// 链接时才会被调到，本应用
+  只播网盘直链）；不要为此链 GPL 的 Libsmbclient，smb:// 播放不支持。
   真机播放（尤其 AV1 / 杜比视界这类硬件解不了的原画）要等用户装上试。
 
 ## Mac 验证（按顺序）

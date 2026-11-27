@@ -65,6 +65,17 @@ MPVKIT_LDFLAGS="-framework Libmpv -framework Libavdevice -framework Libavfilter 
 # MoltenVK 不在上面：它是库型 XCFramework（切片里只有 libMoltenVK.a，
 # 没有 .framework 包），用 -lMoltenVK + LIBRARY_SEARCH_PATHS 链，放
 # 在最后（Libmpv / Libplacebo 用它的符号，被依赖的在后）。
+# MPVKit 自己的 linkerSettings（_MPVKit + _FFmpeg 的
+# .linkedFramework / .linkedLibrary）：swift-rs 不会把它们传进最终
+# Xcode 链接，这里照单补上（全是系统库，不是第三方依赖）。Xcode + SPM
+# 集成时这些是自动带上的；我们是 build.rs + xcodebuild 手动链，必须
+# 自己补。Metal 已在工程默认链接里，重复写无害。
+MPVKIT_SYS_LDFLAGS="-framework AVFoundation -framework CoreAudio -framework AudioToolbox -framework CoreVideo -framework CoreFoundation -framework CoreMedia -framework Metal -framework VideoToolbox -lbz2 -liconv -lexpat -lresolv -lxml2 -lz -lc++"
+# smbc_*：LGPL 的 Libavformat 编译时开了 SMB 支持（libsmbclient.o 在
+# 包里），但 Libsmbclient 本身是 GPL，不在 LGPL 产品里，所以这 22 个
+# 符号没处链。-U 让它们保持未定义（只在打开 smb:// 链接时才会被调到，
+# 本应用只播网盘直链，永远走不到）；不要为此链 GPL 的 Libsmbclient。
+SMBC_UNDEFINED="-Wl,-U,_smbc_close -Wl,-U,_smbc_closedir -Wl,-U,_smbc_free_context -Wl,-U,_smbc_fstat -Wl,-U,_smbc_init -Wl,-U,_smbc_init_context -Wl,-U,_smbc_lseek -Wl,-U,_smbc_new_context -Wl,-U,_smbc_open -Wl,-U,_smbc_opendir -Wl,-U,_smbc_read -Wl,-U,_smbc_readdir -Wl,-U,_smbc_rename -Wl,-U,_smbc_rmdir -Wl,-U,_smbc_setFunctionAuthDataWithContext -Wl,-U,_smbc_setOptionUserData -Wl,-U,_smbc_setTimeout -Wl,-U,_smbc_setWorkgroup -Wl,-U,_smbc_set_context -Wl,-U,_smbc_stat -Wl,-U,_smbc_unlink -Wl,-U,_smbc_write"
 # Tauri generates lowercase debug/release configurations. Using Release
 # silently selected debug in the original workflow.
 XCODE_TOOLCHAIN="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain"
@@ -81,7 +92,7 @@ xcodebuild build \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
   FRAMEWORK_SEARCH_PATHS='$(inherited) $(PROJECT_DIR) $(PROJECT_DIR)/Python.xcframework/ios-arm64 $(PROJECT_DIR)/MPVKit' \
   LIBRARY_SEARCH_PATHS='$(inherited) $(PROJECT_DIR)/MPVKit' \
-  OTHER_LDFLAGS='$(inherited) -framework Python -framework SystemConfiguration'" $MPVKIT_LDFLAGS $MPVKIT_LDFLAGS -lMoltenVK"
+  OTHER_LDFLAGS='$(inherited) -framework Python -framework SystemConfiguration'" $MPVKIT_LDFLAGS $MPVKIT_LDFLAGS $MPVKIT_SYS_LDFLAGS -lMoltenVK $SMBC_UNDEFINED"
 
 APP_DIR="$ROOT/build_output/Build/Products/release-iphoneos"
 # 产品名改名后 .app 文件名会跟着变（改名前是 HGhub.app），不写死名字，
